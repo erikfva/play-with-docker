@@ -1,29 +1,42 @@
 const { Client } = require('ssh2');
-const crypto = require('crypto');
+const { exec } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { v4: uuidv4 } = require('uuid');
 
 /**
- * Generates an RSA key pair for SSH authentication.
+ * Generates an RSA key pair for SSH authentication using system ssh-keygen.
  * @returns {Promise<{publicKey: string, privateKey: string}>}
  */
 async function generateKeyPair() {
   return new Promise((resolve, reject) => {
-    crypto.generateKeyPair('rsa', {
-      modulusLength: 2048,
-      publicKeyEncoding: {
-        type: 'pkcs1',
-        format: 'pem'
-      },
-      privateKeyEncoding: {
-        type: 'pkcs1',
-        format: 'pem'
-      }
-    }, (err, publicKey, privateKey) => {
+    const keyPath = path.join(os.tmpdir(), `id_rsa_${uuidv4()}`);
+    
+    // -t rsa: RSA key
+    // -b 2048: 2048 bits
+    // -f keyPath: output file
+    // -N "": no passphrase
+    // -C "": empty comment
+    // -q: quiet
+    exec(`ssh-keygen -t rsa -b 2048 -f ${keyPath} -N "" -C "" -q`, (err) => {
       if (err) return reject(err);
-      
-      // Convert to OpenSSH format (simplified for MVP, usually needs a bit more work)
-      // For real MVP, we might use a library or formatting logic.
-      // But gcs-service.js expects the key to be added.
-      resolve({ publicKey, privateKey });
+
+      try {
+        const privateKey = fs.readFileSync(keyPath, 'utf8');
+        const publicKey = fs.readFileSync(`${keyPath}.pub`, 'utf8');
+
+        // Cleanup temporary files
+        fs.unlinkSync(keyPath);
+        fs.unlinkSync(`${keyPath}.pub`);
+
+        resolve({ 
+            publicKey: publicKey.trim(), 
+            privateKey: privateKey 
+        });
+      } catch (readErr) {
+        reject(readErr);
+      }
     });
   });
 }

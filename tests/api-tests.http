@@ -1,6 +1,5 @@
 @baseUrl = http://localhost:3000/api/v1
-@sessionId = ad8fa1a6-56e7-4d0c-ad4d-c72cde6c77a2
-
+@sessionId = 7294fee3-e6c3-4b47-86d9-fdac21bec4f2
 ### 1. Health Check
 GET http://localhost:3000/health
 
