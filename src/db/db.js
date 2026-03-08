@@ -18,6 +18,8 @@ db.serialize(() => {
     envName TEXT,
     sshCommand TEXT,
     webHost TEXT,
+    privateKey TEXT,
+    publicKey TEXT,
     createdAt DATETIME DEFAULT CURRENT_TIMESTAMP,
     status TEXT DEFAULT 'PENDING'
   )`);

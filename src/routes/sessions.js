@@ -90,12 +90,64 @@ router.get('/:id', (req, res) => {
   });
 });
 
-// Execute command (Placeholder for now, implementation depends on SSH setup)
+const sshService = require('../services/ssh-service');
+
+// Execute command (Now implemented for MVP)
 router.post('/:id/command', (req, res) => {
-    // This would use ssh2 to connect to the shell
-    // However, GCS SSH access usually requires key management.
-    // For MVP, we might skip direct command execution or require setting up keys first.
-    res.status(501).json({ error: 'Command execution not fully implemented in MVP without SSH key setup' });
+    const { id } = req.params;
+    const { command } = req.body;
+
+    if (!command) {
+        return res.status(400).json({ error: 'Command is required' });
+    }
+
+    db.get('SELECT * FROM sessions WHERE id = ?', [id], async (err, row) => {
+        if (err || !row) {
+            return res.status(err ? 500 : 404).json({ error: err ? 'Database error' : 'Session not found' });
+        }
+
+        try {
+            // Get latest status and SSH info from GCS API
+            const status = await gcsService.getCloudShellStatus(row.envName);
+            if (status.status !== 'RUNNING') {
+                return res.status(400).json({ error: `Session is not ready. Current status: ${status.status}` });
+            }
+
+            let privateKey = row.privateKey;
+            
+            // If no key pair exists for this session, generate and register one
+            if (!privateKey) {
+                console.log('Generating new SSH key pair for session:', id);
+                const keys = await sshService.generateKeyPair();
+                
+                // Add public key to GCS
+                await gcsService.addPublicKey(keys.publicKey, row.envName);
+                
+                // Save keys to DB
+                await new Promise((resolve, reject) => {
+                    db.run('UPDATE sessions SET privateKey = ?, publicKey = ? WHERE id = ?', 
+                        [keys.privateKey, keys.publicKey, id], (err) => err ? reject(err) : resolve());
+                });
+                
+                privateKey = keys.privateKey;
+            }
+
+            // Execute command
+            const output = await sshService.executeCommand({
+                host: status.sshHost,
+                port: status.sshPort,
+                username: status.sshUsername
+            }, command, privateKey);
+
+            res.json({ output });
+        } catch (error) {
+            console.error('Command execution error:', error);
+            res.status(500).json({ 
+                error: 'Failed to execute command', 
+                details: error.message 
+            });
+        }
+    });
 });
 
 module.exports = router;

@@ -1,0 +1,23 @@
+@baseUrl = http://localhost:3000/api/v1
+@sessionId = ad8fa1a6-56e7-4d0c-ad4d-c72cde6c77a2
+
+### 1. Health Check
+GET http://localhost:3000/health
+
+### 2. Create a New Cloud Shell Session
+# This will trigger the Google Cloud Shell start-up process
+POST {{baseUrl}}/sessions
+Content-Type: application/json
+
+### 3. Get Session Details and Status
+# Use the ID returned from the POST request above
+GET {{baseUrl}}/sessions/{{sessionId}}
+
+### 4. Execute a Command (Placeholder)
+# Note: Full SSH command execution requires SSH key setup in MVP
+POST {{baseUrl}}/sessions/{{sessionId}}/command
+Content-Type: application/json
+
+{
+    "command": "ls -la"
+}
