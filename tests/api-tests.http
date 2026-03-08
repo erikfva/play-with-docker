@@ -13,11 +13,13 @@ Content-Type: application/json
 # Use the ID returned from the POST request above
 GET {{baseUrl}}/sessions/{{sessionId}}
 
-### 4. Execute a Command (Placeholder)
-# Note: Full SSH command execution requires SSH key setup in MVP
+### 4. Execute a Command (Requires SSH setup)
 POST {{baseUrl}}/sessions/{{sessionId}}/command
 Content-Type: application/json
 
 {
     "command": "ls -la"
 }
+
+### 5. Terminate and Remove Session
+DELETE {{baseUrl}}/sessions/{{sessionId}}

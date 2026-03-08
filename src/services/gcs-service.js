@@ -88,8 +88,26 @@ async function addPublicKey(key, envName = 'users/me/environments/default') {
     }
 }
 
+async function removePublicKey(keyName, envName = 'users/me/environments/default') {
+    try {
+        const auth = await getAuthClient();
+        const res = await cloudshell.users.environments.removePublicKey({
+            environment: envName,
+            requestBody: {
+                key: keyName
+            },
+            auth: auth
+        });
+        return res.data;
+    } catch (error) {
+        console.error('Error removing public key:', error);
+        throw error;
+    }
+}
+
 module.exports = {
   startCloudShellSession,
   getCloudShellStatus,
-  addPublicKey
+  addPublicKey,
+  removePublicKey
 };
