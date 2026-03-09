@@ -1,55 +1,117 @@
-# MVP: Google Cloud Shell Virtual Environment Orchestrator
+# MVP: Multi-Provider VPS Orchestrator
 
-This document outlines the Minimum Viable Product (MVP) to replace Play With Docker (PWD) with Google Cloud Shell (GCS) as the backend provider for the Virtual Development Environment Orchestrator.
+This document defines the MVP for a provider-agnostic Virtual Development Environment Orchestrator.
+The API must support multiple providers behind one common contract, with a clean extension path for future providers (for example AWS).
 
 ## 1. Goal
-Provide a robust, API-driven alternative to the fragile browser-automated PWD sessions. GCS offers pre-configured development environments with 5GB of persistent storage and a stable Google Cloud SDK for automation.
+
+Expose one stable API to create and manage temporary VPS-like development sessions across different backends.
+
+Initial provider scope:
+- `gcs` (Google Cloud Shell) - implemented
+- `pwd` (Play with Docker) - adapter scaffolded, not implemented yet
+
+Post-MVP target:
+- `aws` (adapter to be added later)
 
 ## 2. Core Architecture
 
-The current architecture uses **Playwright** to simulate user interactions on `labs.play-with-docker.com`. The GCS-based MVP will replace this with the **Google Cloud Shell API**.
+Use a **Provider Adapter + Factory** pattern.
 
-### 2.1. Component Mapping
+### 2.1 Provider Contract
 
-| PWD Component | GCS Equivalent | Benefit |
-| :--- | :--- | :--- |
-| `pwd-service.js` (Playwright) | `gcs-service.js` (Google Cloud SDK) | Reliability & Speed |
-| PWD Session ID | GCS Environment Name | Consistent Resource Identification |
-| Public IP / SSH String | `gcloud cloud-shell ssh` | Secure, authenticated access |
-| 4-hour limit | 12-hour session (Active) | Longer session duration |
-| Ephemeral storage | 5GB Persistent Home Directory | Retain work across sessions |
+Each provider implements the same interface:
+- `createSession(input) -> ProviderSession`
+- `refreshSession(sessionRow) -> ProviderSessionUpdate`
+- `executeCommand(sessionRow, command) -> CommandResult`
+- `terminateSession(sessionRow) -> void`
 
-## 3. Implementation Plan
+### 2.2 Service Layout
 
-### Phase 1: Google Cloud Integration
-1.  **Enable Cloud Shell API**: Enable `cloudshell.googleapis.com` in the GCP Console.
-2.  **Service Account Setup**: Create a Service Account with `roles/cloudshell.user` and `roles/cloudshell.viewer` permissions.
-3.  **Authentication**: Configure the backend to use Application Default Credentials (ADC) or a Service Account JSON key.
+- `src/services/providers/base-provider.js` - provider interface
+- `src/services/providers/gcs-provider.js` - GCS adapter implementation
+- `src/services/providers/pwd-provider.js` - PWD stub (Not Implemented)
+- `src/services/provider-factory.js` - provider resolution and registry
+- `src/services/errors/provider-errors.js` - normalized provider error classes
 
-### Phase 2: Core GCS Service (`gcs-service.js`)
-Instead of `createPwdSession`, implement `startCloudShellSession`:
--   **Function**: `startCloudShellSession(userId)`
--   **Action**: Call `environments.start` via the Google Cloud Shell API.
--   **Data Collected**: `webHost` (for terminal access), `sshCommand`, and `environmentName`.
+### 2.3 Normalized Session Model
 
-### Phase 3: Database & API Refactoring
-1.  **Schema Update**: Update the `sessions` table in SQLite:
-    -   `provider`: 'gcs'
-    -   `envName`: GCS environment resource name.
-    -   `sshCommand`: The `gcloud` command for connection.
-2.  **Route Integration**: Update `POST /api/v1/sessions` to initialize the GCS environment and return its status (e.g., `STARTING`, `RUNNING`).
+Persist provider-neutral fields in `sessions`:
+- `id` (internal UUID)
+- `provider` (`gcs`, `pwd`, future `aws`)
+- `providerSessionId` (provider-native session/environment ID)
+- `status`
+- `sshCommand`
+- `webHost`
+- `privateKey` / `publicKey` (when needed for command execution)
+- `metadata` (JSON text for provider-specific details)
+- `createdAt`
 
-### Phase 4: Command Execution Layer
-Replace the Playwright-based terminal automation with a Node.js-based SSH client (`ssh2`) that connects via the Google Cloud Shell SSH tunnel:
--   **Command**: `gcloud alpha cloud-shell ssh --command="..."`
+Compatibility note:
+- Legacy `envName` is still stored/backfilled for older rows; new flows use `providerSessionId`.
 
-## 4. MVP Feature Set
--   [ ] **Create Session**: Trigger a GCS environment startup.
--   [ ] **Get Details**: Retrieve the web terminal URL and `gcloud` SSH command.
--   [ ] **Check Status**: Query the API to see if the environment is ready.
--   [ ] **Stop Session**: Use `environments.removePublicKeys` or similar to "close" the session.
--   [ ] **Persistence**: Ensure files in `/home/user` persist between sessions.
+## 3. API Design (Provider-Aware)
 
-## 5. Risks & Mitigation
--   **User-Account Constraint**: GCS is per-user. The MVP will require each user to authenticate via OAuth2 to manage *their* Cloud Shell, or the orchestrator must manage a pool of Google Accounts.
--   **GCP Quotas**: Cloud Shell is limited to 50 hours per week per user. The orchestrator should monitor and alert users of their usage.
+Use one API surface with explicit provider selection.
+
+- `POST /api/v1/sessions`
+  - Body may include `provider` (defaults to `gcs`)
+  - Uses provider factory to resolve adapter
+- `GET /api/v1/sessions/:id`
+  - Returns DB-backed session plus best-effort provider refresh
+- `POST /api/v1/sessions/:id/command`
+  - Runs command through resolved provider adapter
+- `DELETE /api/v1/sessions/:id`
+  - Calls provider termination hook, then deletes local row
+- `GET /api/v1/sessions/providers/supported`
+  - Lists registered providers
+
+Rules:
+- Public API uses internal `id`.
+- Provider-native IDs stay in `providerSessionId`.
+- Provider errors are mapped to consistent HTTP responses.
+
+## 4. Database Changes
+
+`src/db/db.js` must ensure schema supports provider-aware sessions:
+- Add missing columns if needed (`provider`, `providerSessionId`, `metadata`, etc.)
+- Backfill `provider = 'gcs'` when missing
+- Backfill `providerSessionId = envName` for legacy rows
+
+## 5. MVP Implementation Phases
+
+### Phase 1: Provider Abstraction (Complete)
+1. Define provider base contract.
+2. Add provider factory.
+3. Route session operations through provider adapters.
+
+### Phase 2: Google Cloud Shell Adapter (Complete)
+1. Implement session create/refresh/command/terminate behavior.
+2. Map GCS response fields to normalized model.
+3. Handle SSH key lifecycle for command execution.
+
+### Phase 3: Schema/Route Refactor (Complete)
+1. Persist `providerSessionId` and provider metadata.
+2. Keep compatibility with legacy `envName`.
+3. Standardize provider errors in routes.
+
+### Phase 4: Second Provider and Hardening (In Progress)
+1. Implement real `pwd-provider` behavior (currently stubbed with 501).
+2. Add integration tests for provider contract behavior.
+3. Improve timeout/retry/error mapping per provider.
+
+## 6. MVP Feature Status
+
+- [x] Create session with provider selection (`gcs` default)
+- [x] Retrieve session with normalized provider flow
+- [x] Execute command through provider adapter (`gcs`)
+- [x] Terminate session with provider hook + DB cleanup
+- [x] Persist provider/session mapping in SQLite
+- [ ] Implement full `pwd` provider behavior
+- [ ] Add provider-level integration test coverage
+
+## 7. Risks and Constraints
+
+- **Provider capability mismatch**: Different providers expose different lifecycle operations (for example, no explicit "stop" API in Cloud Shell). Adapter must implement best-effort semantics.
+- **Credential model differences**: Auth flows vary by provider and may require per-provider setup.
+- **Operational consistency**: Status models and errors differ by provider; normalization layer must remain strict and well-tested.

@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
+const db = require('./db/db');
 const sessionRoutes = require('./routes/sessions');
 
 const app = express();
@@ -16,6 +17,13 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK' });
 });
 
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
+db.ready
+  .then(() => {
+    app.listen(port, () => {
+      console.log(`Server running on port ${port}`);
+    });
+  })
+  .catch((err) => {
+    console.error('Server startup aborted due to DB initialization error:', err.message);
+    process.exit(1);
+  });

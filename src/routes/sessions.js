@@ -1,188 +1,190 @@
 const express = require('express');
-const router = express.Router();
-const db = require('../db/db');
-const gcsService = require('../services/gcs-service');
 const { v4: uuidv4 } = require('uuid');
+const db = require('../db/db');
+const { getProvider, listProviders, normalizeProviderName } = require('../services/provider-factory');
+const { ProviderError } = require('../services/errors/provider-errors');
 
-// Create a new session
-router.post('/', async (req, res) => {
-  try {
-    // Start Cloud Shell
-    const sessionData = await gcsService.startCloudShellSession();
-    const id = uuidv4();
-    const envName = sessionData.envName;
-    const provider = 'gcs';
+const router = express.Router();
 
-    // Store in DB
-    db.run(
-      `INSERT INTO sessions (id, provider, envName, status) VALUES (?, ?, ?, ?)`,
-      [id, provider, envName, 'STARTING'],
-      function(err) {
-        if (err) {
-          console.error(err);
-          return res.status(500).json({ error: 'Database error' });
-        }
-        res.status(201).json({ 
-          id, 
-          status: 'STARTING',
-          message: 'Cloud Shell session initialization started.' 
-        });
+function dbGet(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
+  });
+}
+
+function dbRun(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function runCallback(err) {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(this);
       }
+    });
+  });
+}
+
+function mapErrorToHttp(res, error, fallbackMessage) {
+  if (error instanceof ProviderError) {
+    return res.status(error.statusCode).json({
+      error: error.message,
+      code: error.code,
+      details: error.details
+    });
+  }
+
+  console.error(error);
+  return res.status(500).json({ error: fallbackMessage });
+}
+
+function parseMetadata(rawMetadata) {
+  if (!rawMetadata) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(rawMetadata);
+  } catch (_) {
+    return { raw: rawMetadata };
+  }
+}
+
+router.post('/', async (req, res) => {
+  const providerName = normalizeProviderName(req.body?.provider || 'gcs');
+
+  try {
+    const provider = getProvider(providerName);
+    const created = await provider.createSession(req.body || {});
+    const id = uuidv4();
+
+    await dbRun(
+      `INSERT INTO sessions (id, provider, providerSessionId, envName, status, metadata)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        provider.name,
+        created.providerSessionId,
+        created.providerSessionId,
+        created.status || 'STARTING',
+        created.metadata ? JSON.stringify(created.metadata) : null
+      ]
     );
+
+    return res.status(201).json({
+      id,
+      provider: provider.name,
+      providerSessionId: created.providerSessionId,
+      status: created.status || 'STARTING'
+    });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to start Cloud Shell session' });
+    return mapErrorToHttp(res, error, 'Failed to create session');
   }
 });
 
-// Get session details
-router.get('/:id', (req, res) => {
-  const { id } = req.params;
-  db.get('SELECT * FROM sessions WHERE id = ?', [id], async (err, row) => {
-    if (err) {
-      return res.status(500).json({ error: 'Database error' });
-    }
+router.get('/providers/supported', (req, res) => {
+  res.json({ providers: listProviders() });
+});
+
+router.get('/:id', async (req, res) => {
+  try {
+    const row = await dbGet('SELECT * FROM sessions WHERE id = ?', [req.params.id]);
     if (!row) {
       return res.status(404).json({ error: 'Session not found' });
     }
 
-    // Refresh status from GCS
+    const provider = getProvider(row.provider);
+
     try {
-        const gcsStatus = await gcsService.getCloudShellStatus(row.envName);
-        
-        // Update DB with latest info
-        // We might want to persist webHost, ssh info if available
-        const updates = [];
-        const params = [];
+      const refreshed = await provider.refreshSession(row);
+      await dbRun(
+        `UPDATE sessions
+         SET status = COALESCE(?, status),
+             webHost = COALESCE(?, webHost),
+             sshCommand = COALESCE(?, sshCommand),
+             metadata = COALESCE(?, metadata)
+         WHERE id = ?`,
+        [
+          refreshed.status || null,
+          refreshed.webHost || null,
+          refreshed.sshCommand || null,
+          refreshed.metadata ? JSON.stringify(refreshed.metadata) : null,
+          row.id
+        ]
+      );
 
-        if (gcsStatus.webHost) {
-            updates.push('webHost = ?');
-            params.push(gcsStatus.webHost);
-        }
-        if (gcsStatus.status) {
-            updates.push('status = ?');
-            params.push(gcsStatus.status);
-        }
-        
-        // Construct SSH command string for frontend use if we have enough info
-        if (gcsStatus.sshUsername && gcsStatus.sshHost) {
-             const sshCmd = `ssh ${gcsStatus.sshUsername}@${gcsStatus.sshHost} -p ${gcsStatus.sshPort || 22}`;
-             updates.push('sshCommand = ?');
-             params.push(sshCmd);
-             row.sshCommand = sshCmd; // Update local obj for response
-        }
-
-        if (updates.length > 0) {
-            params.push(id);
-            db.run(`UPDATE sessions SET ${updates.join(', ')} WHERE id = ?`, params);
-        }
-
-        // Merge latest status
-        row.status = gcsStatus.status || row.status;
-        row.webHost = gcsStatus.webHost || row.webHost;
-        
-        res.json(row);
-    } catch (apiError) {
-        console.warn('Could not refresh status from GCS API', apiError.message);
-        // Return DB version if API fails
-        res.json(row);
-    }
-  });
-});
-
-const sshService = require('../services/ssh-service');
-
-// Execute command (Now implemented for MVP)
-router.post('/:id/command', (req, res) => {
-    const { id } = req.params;
-    const { command } = req.body;
-
-    if (!command) {
-        return res.status(400).json({ error: 'Command is required' });
+      row.status = refreshed.status || row.status;
+      row.webHost = refreshed.webHost || row.webHost;
+      row.sshCommand = refreshed.sshCommand || row.sshCommand;
+      row.metadata = refreshed.metadata || parseMetadata(row.metadata);
+    } catch (providerError) {
+      console.warn(`Provider refresh failed for session ${row.id}:`, providerError.message);
+      row.metadata = parseMetadata(row.metadata);
     }
 
-    db.get('SELECT * FROM sessions WHERE id = ?', [id], async (err, row) => {
-        if (err || !row) {
-            return res.status(err ? 500 : 404).json({ error: err ? 'Database error' : 'Session not found' });
-        }
-
-        try {
-            // Get latest status and SSH info from GCS API
-            const status = await gcsService.getCloudShellStatus(row.envName);
-            if (status.status !== 'RUNNING') {
-                return res.status(400).json({ error: `Session is not ready. Current status: ${status.status}` });
-            }
-
-            let privateKey = row.privateKey;
-            
-            // If no key pair exists for this session, generate and register one
-            if (!privateKey) {
-                console.log('Generating new SSH key pair for session:', id);
-                const keys = await sshService.generateKeyPair();
-                
-                // Add public key to GCS
-                await gcsService.addPublicKey(keys.publicKey, row.envName);
-                
-                // Save keys to DB
-                await new Promise((resolve, reject) => {
-                    db.run('UPDATE sessions SET privateKey = ?, publicKey = ? WHERE id = ?', 
-                        [keys.privateKey, keys.publicKey, id], (err) => err ? reject(err) : resolve());
-                });
-                
-                privateKey = keys.privateKey;
-            }
-
-            // Execute command
-            const output = await sshService.executeCommand({
-                host: status.sshHost,
-                port: status.sshPort,
-                username: status.sshUsername
-            }, command, privateKey);
-
-            res.json({ output });
-        } catch (error) {
-            console.error('Command execution error:', error);
-            res.status(500).json({ 
-                error: 'Failed to execute command', 
-                details: error.message 
-            });
-        }
-    });
+    return res.json(row);
+  } catch (error) {
+    return mapErrorToHttp(res, error, 'Failed to retrieve session');
+  }
 });
 
-// Terminate session
-router.delete('/:id', (req, res) => {
-    const { id } = req.params;
+router.post('/:id/command', async (req, res) => {
+  const { command } = req.body || {};
+  if (!command) {
+    return res.status(400).json({ error: 'Command is required' });
+  }
 
-    db.get('SELECT * FROM sessions WHERE id = ?', [id], async (err, row) => {
-        if (err || !row) {
-            return res.status(err ? 500 : 404).json({ error: err ? 'Database error' : 'Session not found' });
-        }
+  try {
+    const row = await dbGet('SELECT * FROM sessions WHERE id = ?', [req.params.id]);
+    if (!row) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
 
-        try {
-            // If the session has a public key registered, remove it from GCS
-            // Note: Cloud Shell API's removePublicKey expects the key name (resource name)
-            // If we didn't store the name, we might need to get it or handle it.
-            // For MVP, we'll mark as CLOSED in DB and attempt to remove if we have the resource name.
-            if (row.publicKey) {
-                // In a real scenario, gcsService.addPublicKey returns the resource name
-                // Let's assume we can remove it or just move to DB cleanup.
-                // await gcsService.removePublicKey(row.publicKeyName, row.envName);
-            }
+    const provider = getProvider(row.provider);
+    const result = await provider.executeCommand(row, command);
+    const updates = result.updates || {};
 
-            // Remove from DB or mark as CLOSED
-            db.run('DELETE FROM sessions WHERE id = ?', [id], (deleteErr) => {
-                if (deleteErr) {
-                    return res.status(500).json({ error: 'Failed to delete session from database' });
-                }
-                res.json({ message: `Session ${id} terminated and removed from orchestrator.` });
-            });
+    await dbRun(
+      `UPDATE sessions
+       SET privateKey = COALESCE(?, privateKey),
+           publicKey = COALESCE(?, publicKey),
+           sshCommand = COALESCE(?, sshCommand),
+           status = COALESCE(?, status)
+       WHERE id = ?`,
+      [
+        updates.privateKey || null,
+        updates.publicKey || null,
+        updates.sshCommand || null,
+        updates.status || null,
+        row.id
+      ]
+    );
 
-        } catch (error) {
-            console.error('Termination error:', error);
-            res.status(500).json({ error: 'Failed to gracefully terminate session' });
-        }
-    });
+    return res.json({ output: result.output });
+  } catch (error) {
+    return mapErrorToHttp(res, error, 'Failed to execute command');
+  }
+});
+
+router.delete('/:id', async (req, res) => {
+  try {
+    const row = await dbGet('SELECT * FROM sessions WHERE id = ?', [req.params.id]);
+    if (!row) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    const provider = getProvider(row.provider);
+    try {
+      await provider.terminateSession(row);
+    } catch (providerError) {
+      console.warn(`Provider termination failed for session ${row.id}:`, providerError.message);
+    }
+
+    await dbRun('DELETE FROM sessions WHERE id = ?', [row.id]);
+
+    return res.json({ message: `Session ${row.id} terminated and removed from orchestrator.` });
+  } catch (error) {
+    return mapErrorToHttp(res, error, 'Failed to terminate session');
+  }
 });
 
 module.exports = router;
