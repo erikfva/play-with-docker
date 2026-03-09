@@ -1,12 +1,15 @@
 @baseUrl = http://localhost:3000/api/v1
-@sessionId = 7294fee3-e6c3-4b47-86d9-fdac21bec4f2
 ### 1. Health Check
 GET http://localhost:3000/health
 
 ### 2. Create a New Cloud Shell Session
 # This will trigger the Google Cloud Shell start-up process
+# @name createSession
 POST {{baseUrl}}/sessions
 Content-Type: application/json
+
+###
+@sessionId = {{createSession.response.body.$.id}}
 
 ### 3. Get Session Details and Status
 # Use the ID returned from the POST request above
@@ -20,5 +23,29 @@ Content-Type: application/json
     "command": "ls -la"
 }
 
-### 5. Terminate and Remove Session
+### 5. Execute Docker Code Server Command
+POST {{baseUrl}}/sessions/{{sessionId}}/command
+Content-Type: application/json
+
+{
+    "command": "docker run -d -e PUID=1000 -e PGID=1000 -e TZ=Etc/UTC -e PASSWORD=password -e HASHED_PASSWORD= -e SUDO_PASSWORD=password -e SUDO_PASSWORD_HASH= -e DEFAULT_WORKSPACE=/config/workspace -e S3_ACCESS_KEY_ID=ET -e S3_SECRET_ACCESS_KEY=PM -e S3_BUCKET=code-server -e S3_ENDPOINT=https://f0q5.or.idrivee2-51.com -e INIT_FILE=init-code-server.sh -e GIT_USER_NAME=erikfva -e GIT_USER_EMAIL=erik.vargas@yandex.com -e TOKEN_NGROK=3M -e HTTPS_PORTS=8443,8081 -p 8443:8443 -p 8081:8081 -p 3000:3000 -v /config:/config -v /var/run/docker.sock:/var/run/docker.sock --restart unless-stopped --privileged --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined --network=host erikvargas/code-server:latest"
+}
+
+### 6. Execute Docker PS
+POST {{baseUrl}}/sessions/{{sessionId}}/command
+Content-Type: application/json
+
+{
+    "command": "docker ps"
+}
+
+### 7. Read HTTPS URL File From Code Server Container
+POST {{baseUrl}}/sessions/{{sessionId}}/command
+Content-Type: application/json
+
+{
+    "command": "docker exec $(docker ps -q --filter ancestor=erikvargas/code-server:latest) cat /config/workspace/https_url.txt"
+}
+
+### 8. Terminate and Remove Session
 DELETE {{baseUrl}}/sessions/{{sessionId}}
