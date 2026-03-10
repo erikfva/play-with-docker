@@ -24,6 +24,12 @@ function dbRun(sql, params = []) {
   });
 }
 
+function dbAll(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)));
+  });
+}
+
 function mapErrorToHttp(res, error, fallbackMessage) {
   if (error instanceof ProviderError) {
     return res.status(error.statusCode).json({
@@ -83,6 +89,24 @@ router.post('/', async (req, res) => {
 
 router.get('/providers/supported', (req, res) => {
   res.json({ providers: listProviders() });
+});
+
+router.get('/', async (req, res) => {
+  const { status } = req.query;
+  const sql = status ? 'SELECT * FROM sessions WHERE status = ?' : 'SELECT * FROM sessions';
+  const params = status ? [status] : [];
+
+  try {
+    const rows = await dbAll(sql, params);
+    const sessions = rows.map((row) => ({
+      ...row,
+      metadata: parseMetadata(row.metadata)
+    }));
+
+    return res.json({ sessions });
+  } catch (error) {
+    return mapErrorToHttp(res, error, 'Failed to list sessions');
+  }
 });
 
 router.get('/:id', async (req, res) => {
