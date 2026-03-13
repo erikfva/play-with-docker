@@ -89,3 +89,6 @@ Content-Type: application/json
 
 ### 12. Terminate and Remove Session
 DELETE {{baseUrl}}/sessions/{{sessionId}}
+
+### 13. Terminate All Sessions
+POST {{baseUrl}}/sessions/terminate-all

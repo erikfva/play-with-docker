@@ -211,4 +211,52 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
+router.post('/terminate-all', async (req, res) => {
+  try {
+    const rows = await dbAll('SELECT * FROM sessions');
+    const results = [];
+
+    for (const row of rows) {
+      const provider = getProvider(row.provider);
+      const result = {
+        id: row.id,
+        provider: row.provider,
+        terminated: false,
+        deleted: false,
+        errors: []
+      };
+
+      try {
+        await provider.terminateSession(row);
+        result.terminated = true;
+      } catch (providerError) {
+        result.errors.push(`terminateSession: ${providerError.message}`);
+      }
+
+      try {
+        await dbRun('DELETE FROM sessions WHERE id = ?', [row.id]);
+        result.deleted = true;
+      } catch (dbError) {
+        result.errors.push(`dbDelete: ${dbError.message}`);
+      }
+
+      results.push(result);
+    }
+
+    const summary = results.reduce(
+      (acc, item) => {
+        if (item.terminated) acc.terminated += 1;
+        if (item.deleted) acc.deleted += 1;
+        if (item.errors.length) acc.errors += 1;
+        return acc;
+      },
+      { total: results.length, terminated: 0, deleted: 0, errors: 0 }
+    );
+
+    return res.json({ summary, results });
+  } catch (error) {
+    return mapErrorToHttp(res, error, 'Failed to terminate all sessions');
+  }
+});
+
 module.exports = router;
