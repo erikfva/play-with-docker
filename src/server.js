@@ -3,6 +3,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const db = require('./db/db');
 const sessionRoutes = require('./routes/sessions');
+const { requireServerToken } = require('./middleware/require-server-token');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -10,7 +11,7 @@ const port = process.env.PORT || 3000;
 app.use(bodyParser.json());
 
 // Routes
-app.use('/api/v1/sessions', sessionRoutes);
+app.use('/api/v1/sessions', requireServerToken, sessionRoutes);
 
 // Health Check
 app.get('/health', (req, res) => {
