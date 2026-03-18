@@ -12,7 +12,7 @@ services:
       - apparmor:unconfined
     env_file:
       - .env
-    volumes:
-      # Use the same absolute path for host and container.
-      - ${GOOGLE_APPLICATION_CREDENTIALS:?set GOOGLE_APPLICATION_CREDENTIALS}:${GOOGLE_APPLICATION_CREDENTIALS}:ro
+    environment:
+      # Container path must be absolute for Google auth libraries.
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:?set GOOGLE_APPLICATION_CREDENTIALS}
     restart: unless-stopped

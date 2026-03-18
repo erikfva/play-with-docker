@@ -1,7 +1,14 @@
 #!/bin/sh
 set -eu
 
-if [ -n "${S3_BUCKET:-}" ]; then
+is_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if [ -n "${S3_BUCKET:-}" ] && is_truthy "${S3FS_ENABLED:-1}"; then
   MOUNT_DIR="${S3_MOUNT_DIR:-/mnt/s3}"
   case "$MOUNT_DIR" in
     /*) : ;;
@@ -39,6 +46,8 @@ if [ -n "${S3_BUCKET:-}" ]; then
     echo "s3fs mount failed" >&2
     exit 1
   fi
+elif [ -n "${S3_BUCKET:-}" ]; then
+  echo "S3FS mount disabled (S3FS_ENABLED=${S3FS_ENABLED:-0})"
 fi
 
 exec "$@"

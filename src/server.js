@@ -4,6 +4,7 @@ const bodyParser = require('body-parser');
 const db = require('./db/db');
 const sessionRoutes = require('./routes/sessions');
 const { requireServerToken } = require('./middleware/require-server-token');
+const { initGoogleCredentialsFromS3IfNeeded } = require('./services/google-credentials-loader');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -18,13 +19,17 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK' });
 });
 
-db.ready
-  .then(() => {
+async function startServer() {
+  try {
+    await initGoogleCredentialsFromS3IfNeeded();
+    await db.ready;
     app.listen(port, () => {
       console.log(`Server running on port ${port}`);
     });
-  })
-  .catch((err) => {
-    console.error('Server startup aborted due to DB initialization error:', err.message);
+  } catch (err) {
+    console.error('Server startup aborted due to initialization error:', err.message);
     process.exit(1);
-  });
+  }
+}
+
+startServer();
