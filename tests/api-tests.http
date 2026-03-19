@@ -1,8 +1,10 @@
-@baseUrl = http://localhost:3000/api/v1
-@s3AccessKeyId = ET
-@s3SecretAccessKey = PM
+@baseUrl = https://play-with-docker-bidk.onrender.com/api/v1
+@s3EndPoint = https://s3.
+@s3AccessKeyId = 8S
+@s3SecretAccessKey = mi
+@s3Region = 8S
 @tokenNgrok = 3M
-@serverToken = {{$dotenv SERVER_TOKEN}}
+@serverToken = ZZ
 
 ### 1. Health Check
 GET http://localhost:3000/health
@@ -42,7 +44,7 @@ Content-Type: application/json
 X-Server-Token: {{serverToken}}
 
 {
-    "command": "docker run -d -e PUID=1000 -e PGID=1000 -e TZ=Etc/UTC -e PASSWORD=password -e HASHED_PASSWORD= -e SUDO_PASSWORD=password -e SUDO_PASSWORD_HASH= -e DEFAULT_WORKSPACE=/config/workspace -e S3_ACCESS_KEY_ID={{s3AccessKeyId}} -e S3_SECRET_ACCESS_KEY={{s3SecretAccessKey}} -e S3_BUCKET=code-server -e S3_ENDPOINT=https://f0q5.or.idrivee2-51.com -e INIT_FILE=init-code-server.sh -e GIT_USER_NAME=erikfva -e GIT_USER_EMAIL=erik.vargas@yandex.com -e TOKEN_NGROK={{tokenNgrok}} -e HTTPS_PORTS=8443,8081 -p 8443:8443 -p 8081:8081 -p 3000:3000 -v /config:/config -v /var/run/docker.sock:/var/run/docker.sock --restart unless-stopped --privileged --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined --network=host erikvargas/code-server:latest"
+    "command": "docker run -d -e PUID=1000 -e PGID=1000 -e TZ=Etc/UTC -e PASSWORD=password -e HASHED_PASSWORD= -e SUDO_PASSWORD=password -e SUDO_PASSWORD_HASH= -e DEFAULT_WORKSPACE=/config/workspace -e S3_ACCESS_KEY_ID={{s3AccessKeyId}} -e S3_SECRET_ACCESS_KEY={{s3SecretAccessKey}} -e S3_BUCKET=code-server -e S3_ENDPOINT={{s3EndPoint}} -e S3_REGION={{s3Region}} -e INIT_FILE=init-code-server.sh -e GIT_USER_NAME=erikfva -e GIT_USER_EMAIL=erik.vargas@yandex.com -e TOKEN_NGROK={{tokenNgrok}} -e HTTPS_PORTS=8443,8081 -p 8443:8443 -p 8081:8081 -p 3000:3000 -v /config:/config -v /var/run/docker.sock:/var/run/docker.sock --restart unless-stopped --privileged --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined --network=host erikvargas/code-server:latest"
 }
 
 ### 7. Execute Docker PS
@@ -70,6 +72,24 @@ X-Server-Token: {{serverToken}}
 
 {
     "command": "CS_ID=$(docker ps -q --filter ancestor=erikvargas/code-server:latest); docker exec $CS_ID sh -lc \"nohup cloudflared tunnel --url http://localhost:8443 --no-autoupdate > /tmp/cloudflared-8443.log 2>&1 & sleep 1; tail -n 20 /tmp/cloudflared-8443.log\""
+}
+
+### 8.2. Read 8443 logs From Cloudflare
+POST {{baseUrl}}/sessions/{{sessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "docker exec $(docker ps -q --filter ancestor=erikvargas/code-server:latest) cat /tmp/cloudflared-8443.log"
+}
+
+### 8.3. Display logs From Code Server Container
+POST {{baseUrl}}/sessions/{{sessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "docker logs $(docker ps -q --filter ancestor=erikvargas/code-server:latest)"
 }
 
 ### 9. Delete Code Server Container
