@@ -3,6 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('../db/db');
 const { getProvider, listProviders, normalizeProviderName } = require('../services/provider-factory');
 const { ProviderError } = require('../services/errors/provider-errors');
+const keepAliveService = require('../services/keep-alive-service');
 
 const router = express.Router();
 
@@ -75,6 +76,12 @@ router.post('/', async (req, res) => {
         created.metadata ? JSON.stringify(created.metadata) : null
       ]
     );
+
+    const sessionRow = await dbGet('SELECT * FROM sessions WHERE id = ?', [id]);
+
+    // START KEEP-ALIVE (provider-aware)
+    // Will only start if the provider has it enabled
+    keepAliveService.startKeepAlive(sessionRow, provider);
 
     return res.status(201).json({
       id,
@@ -197,6 +204,13 @@ router.delete('/:id', async (req, res) => {
     }
 
     const provider = getProvider(row.provider);
+
+    // STOP KEEP-ALIVE BEFORE TERMINATING
+    keepAliveService.stopKeepAlive(row.id);
+
+    // Display keep-alive stats if available
+    const stats = keepAliveService.getKeepAliveStats(row.id);
+
     try {
       await provider.terminateSession(row);
     } catch (providerError) {
@@ -205,7 +219,15 @@ router.delete('/:id', async (req, res) => {
 
     await dbRun('DELETE FROM sessions WHERE id = ?', [row.id]);
 
-    return res.json({ message: `Session ${row.id} terminated and removed from orchestrator.` });
+    const response = {
+      message: `Session ${row.id} (${row.provider}) terminated and removed from orchestrator.`
+    };
+
+    if (stats) {
+      response.keepAliveStats = stats;
+    }
+
+    return res.json(response);
   } catch (error) {
     return mapErrorToHttp(res, error, 'Failed to terminate session');
   }
@@ -213,6 +235,9 @@ router.delete('/:id', async (req, res) => {
 
 router.post('/terminate-all', async (req, res) => {
   try {
+    // STOP ALL KEEP-ALIVES FIRST
+    keepAliveService.stopAllKeepAlives();
+
     const rows = await dbAll('SELECT * FROM sessions');
     const results = [];
 

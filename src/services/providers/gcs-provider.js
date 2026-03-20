@@ -12,6 +12,97 @@ class GcsProvider extends BaseProvider {
     return sessionRow.providerSessionId || sessionRow.envName;
   }
 
+  getKeepAliveConfig() {
+    return {
+      enabled: true,
+      intervalMinutes: 15,  // Send keep-alive every 15 minutes (before 20-min timeout)
+      strategy: 'ssh-command'
+    };
+  }
+
+  async isSessionActive(sessionRow) {
+    try {
+      const status = await gcsService.getCloudShellStatus(
+        this.getProviderSessionId(sessionRow)
+      );
+      return status.status === 'RUNNING';
+    } catch (error) {
+      console.warn(`[GCS] Failed to check session active status: ${error.message}`);
+      return false;
+    }
+  }
+
+  async executeKeepAlive(sessionRow) {
+    try {
+      const status = await gcsService.getCloudShellStatus(
+        this.getProviderSessionId(sessionRow)
+      );
+
+      // Check if suspended, attempt resume if needed
+      if (status.status === 'SUSPENDED') {
+        console.log(`[GCS] Session ${sessionRow.id} detected as SUSPENDED. Resuming...`);
+        await gcsService.startCloudShellSession();
+        return {
+          success: true,
+          action: 'resumed',
+          message: 'Session was suspended, resuming now',
+          updates: {}
+        };
+      }
+
+      // If not running yet, don't send commands
+      if (status.status !== 'RUNNING') {
+        return {
+          success: false,
+          action: 'wait',
+          message: `Session not ready (${status.status}), skipping keep-alive`,
+          updates: {}
+        };
+      }
+
+      // If no SSH key yet, generate them now (like executeCommand does)
+      let privateKey = sessionRow.privateKey;
+      let publicKey = sessionRow.publicKey;
+      let updates = {};
+
+      if (!privateKey) {
+        console.log(`[GCS] Generating SSH keys for keep-alive on session ${sessionRow.id}`);
+        const keys = await sshService.generateKeyPair();
+        await gcsService.addPublicKey(keys.publicKey, this.getProviderSessionId(sessionRow));
+        privateKey = keys.privateKey;
+        publicKey = keys.publicKey;
+        updates.privateKey = privateKey;
+        updates.publicKey = publicKey;
+      }
+
+      // Send harmless SSH command to reset inactivity timer
+      const output = await sshService.executeCommand(
+        {
+          host: status.sshHost,
+          port: status.sshPort || 22,
+          username: status.sshUsername
+        },
+        'echo "Keep-alive: $(date)"',
+        privateKey
+      );
+
+      return {
+        success: true,
+        action: 'keep-alive-sent',
+        message: output.trim(),
+        updates
+      };
+    } catch (error) {
+      console.warn(`[GCS] Keep-alive failed for session ${sessionRow.id}: ${error.message}`);
+      return {
+        success: false,
+        action: 'error',
+        error: error.message,
+        updates: {}
+      };
+    }
+  }
+
   async createSession() {
     const sessionData = await gcsService.startCloudShellSession();
     return {

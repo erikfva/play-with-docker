@@ -6,6 +6,29 @@ class PwdProvider extends BaseProvider {
     super('pwd');
   }
 
+  getKeepAliveConfig() {
+    return {
+      enabled: false,
+      intervalMinutes: null,
+      strategy: 'none'  // PWD doesn't need keep-alive
+    };
+  }
+
+  async isSessionActive(sessionRow) {
+    // PWD sessions don't have inactivity concerns
+    return true;
+  }
+
+  async executeKeepAlive(sessionRow) {
+    // Not called for PWD (keep-alive disabled), but implement for safety
+    return {
+      success: true,
+      action: 'skipped',
+      message: 'PWD provider does not require keep-alive',
+      updates: {}
+    };
+  }
+
   async createSession() {
     throw new ProviderNotImplementedError(this.name);
   }
