@@ -2,7 +2,9 @@
 
 ## 1. Objective
 
-This project provides a micro-service that programmatically creates and manages Play with Docker (PWD) instances. The core of the project is a Node.js API that abstracts the complexity of interacting with the PWD website, offering a simple way to spin up temporary, VPS-like environments.
+This is a **multi-provider VPS orchestrator** that exposes a unified API to manage temporary virtual development environments. Currently, it supports **Google Cloud Shell (GCS)** and has scaffolding for Play with Docker (PWD) as additional providers.
+
+The project uses an **adapter/factory pattern** to abstract provider-specific logic behind a common interface.
 
 ## 2. Core Technology Stack
 

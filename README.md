@@ -1,6 +1,6 @@
 # play-with-docker
 
-Express API that orchestrates Cloud Shell sessions and command execution, with SQLite-backed session state.
+This is a **multi-provider VPS orchestrator** that exposes a unified API to manage temporary virtual development environments.
 
 ## Requirements
 
