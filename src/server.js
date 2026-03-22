@@ -5,6 +5,7 @@ const db = require('./db/db');
 const sessionRoutes = require('./routes/sessions');
 const { requireServerToken } = require('./middleware/require-server-token');
 const { initGoogleCredentialsFromS3IfNeeded } = require('./services/google-credentials-loader');
+const keepAliveService = require('./services/keep-alive-service');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -24,6 +25,15 @@ async function startServer() {
     await initGoogleCredentialsFromS3IfNeeded();
     await db.ready;
     console.log('db ready in server');
+
+    try {
+      const recoverySummary = await keepAliveService.recoverKeepAlivesOnStartup();
+      console.log('[KeepAlive][Recovery] Completed:', recoverySummary);
+    } catch (error) {
+      // Recovery is best-effort; server startup should continue.
+      console.warn('[KeepAlive][Recovery] Startup recovery failed:', error.message);
+    }
+
     app.listen(port, () => {
       console.log(`Server running on port ${port}`);
     });
