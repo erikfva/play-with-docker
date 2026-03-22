@@ -4,9 +4,20 @@
  */
 
 const db = require('../db/db');
+const { getProvider } = require('./provider-factory');
 
 const activeKeepAliveTimers = new Map();
 const keepAliveStats = new Map();
+const TERMINAL_SESSION_STATUSES = new Set(['TERMINATED', 'DELETED', 'FAILED']);
+
+function normalizeStatus(status) {
+  if (!status) return '';
+  return String(status).trim().toUpperCase();
+}
+
+function isTerminalStatus(status) {
+  return TERMINAL_SESSION_STATUSES.has(normalizeStatus(status));
+}
 
 /**
  * Start keep-alive for a session
@@ -113,6 +124,103 @@ async function startKeepAlive(sessionRow, provider) {
 }
 
 /**
+ * Recover keep-alive timers from persisted sessions on startup.
+ * This method is best-effort and continues processing even if one session fails.
+ * @returns {Object} recovery summary
+ */
+async function recoverKeepAlivesOnStartup() {
+  const summary = {
+    scanned: 0,
+    eligible: 0,
+    started: 0,
+    cleaned: 0,
+    skipped: 0,
+    failed: 0
+  };
+
+  console.log('[KeepAlive][Recovery] Starting keep-alive recovery from database');
+
+  let rows = [];
+  try {
+    rows = await db.all('SELECT * FROM sessions');
+  } catch (error) {
+    console.error('[KeepAlive][Recovery] Failed to load sessions from database:', error.message);
+    summary.failed += 1;
+    return summary;
+  }
+
+  summary.scanned = rows.length;
+
+  for (const sessionRow of rows) {
+    try {
+      let provider;
+      try {
+        provider = getProvider(sessionRow.provider);
+      } catch (error) {
+        summary.skipped += 1;
+        console.warn(
+          `[KeepAlive][Recovery] Skipping session ${sessionRow.id}: unsupported provider "${sessionRow.provider}"`
+        );
+        continue;
+      }
+
+      const keepAliveConfig = provider.getKeepAliveConfig();
+      if (!keepAliveConfig.enabled) {
+        summary.skipped += 1;
+        continue;
+      }
+
+      if (isTerminalStatus(sessionRow.status)) {
+        summary.skipped += 1;
+        continue;
+      }
+
+      summary.eligible += 1;
+
+      // For GCS recovery, verify remote session is still active before scheduling keep-alive.
+      if (provider.name === 'gcs') {
+        try {
+          const isActive = await provider.isSessionActive(sessionRow);
+          if (!isActive) {
+            await db.run('DELETE FROM sessions WHERE id = ?', [sessionRow.id]);
+            summary.cleaned += 1;
+            console.log(
+              `[KeepAlive][Recovery] Cleaned stale gcs session ${sessionRow.id}: remote session inactive/stopped`
+            );
+            continue;
+          }
+        } catch (error) {
+          summary.failed += 1;
+          console.warn(
+            `[KeepAlive][Recovery] Failed active-check for session ${sessionRow.id}: ${error.message}`
+          );
+          continue;
+        }
+      }
+
+      const alreadyRunning = activeKeepAliveTimers.has(sessionRow.id);
+      await startKeepAlive(sessionRow, provider);
+      if (alreadyRunning) {
+        summary.skipped += 1;
+      } else {
+        summary.started += 1;
+      }
+    } catch (error) {
+      summary.failed += 1;
+      console.warn(
+        `[KeepAlive][Recovery] Failed to recover session ${sessionRow.id}: ${error.message}`
+      );
+    }
+  }
+
+  console.log(
+    `[KeepAlive][Recovery] scanned=${summary.scanned} eligible=${summary.eligible} started=${summary.started} cleaned=${summary.cleaned} skipped=${summary.skipped} failed=${summary.failed}`
+  );
+
+  return summary;
+}
+
+/**
  * Stop keep-alive for a session
  * @param {string} sessionId - Session ID
  */
@@ -155,6 +263,7 @@ function stopAllKeepAlives() {
 
 module.exports = {
   startKeepAlive,
+  recoverKeepAlivesOnStartup,
   stopKeepAlive,
   getKeepAliveStats,
   stopAllKeepAlives
