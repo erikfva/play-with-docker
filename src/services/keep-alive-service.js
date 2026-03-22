@@ -138,8 +138,6 @@ async function recoverKeepAlivesOnStartup() {
     failed: 0
   };
 
-  console.log('[KeepAlive][Recovery] Starting keep-alive recovery from database');
-
   let rows = [];
   try {
     rows = await db.all('SELECT * FROM sessions');
@@ -150,6 +148,11 @@ async function recoverKeepAlivesOnStartup() {
   }
 
   summary.scanned = rows.length;
+  if (summary.scanned === 0) {
+    return summary;
+  }
+
+  console.log('[KeepAlive][Recovery] Starting keep-alive recovery from database');
 
   for (const sessionRow of rows) {
     try {

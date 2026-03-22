@@ -28,7 +28,9 @@ async function startServer() {
 
     try {
       const recoverySummary = await keepAliveService.recoverKeepAlivesOnStartup();
-      console.log('[KeepAlive][Recovery] Completed:', recoverySummary);
+      if (recoverySummary.scanned > 0) {
+        console.log('[KeepAlive][Recovery] Completed:', recoverySummary);
+      }
     } catch (error) {
       // Recovery is best-effort; server startup should continue.
       console.warn('[KeepAlive][Recovery] Startup recovery failed:', error.message);
