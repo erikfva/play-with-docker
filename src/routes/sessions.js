@@ -7,30 +7,6 @@ const keepAliveService = require('../services/keep-alive-service');
 
 const router = express.Router();
 
-function dbGet(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
-  });
-}
-
-function dbRun(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function runCallback(err) {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(this);
-      }
-    });
-  });
-}
-
-function dbAll(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)));
-  });
-}
-
 function mapErrorToHttp(res, error, fallbackMessage) {
   if (error instanceof ProviderError) {
     return res.status(error.statusCode).json({
@@ -64,7 +40,7 @@ router.post('/', async (req, res) => {
     const created = await provider.createSession(req.body || {});
     const id = uuidv4();
 
-    await dbRun(
+    await db.run(
       `INSERT INTO sessions (id, provider, providerSessionId, envName, status, metadata)
        VALUES (?, ?, ?, ?, ?, ?)`,
       [
@@ -77,7 +53,7 @@ router.post('/', async (req, res) => {
       ]
     );
 
-    const sessionRow = await dbGet('SELECT * FROM sessions WHERE id = ?', [id]);
+    const sessionRow = await db.get('SELECT * FROM sessions WHERE id = ?', [id]);
 
     // START KEEP-ALIVE (provider-aware)
     // Will only start if the provider has it enabled
@@ -104,7 +80,7 @@ router.get('/', async (req, res) => {
   const params = status ? [status] : [];
 
   try {
-    const rows = await dbAll(sql, params);
+    const rows = await db.all(sql, params);
     const sessions = rows.map((row) => ({
       ...row,
       metadata: parseMetadata(row.metadata)
@@ -118,7 +94,7 @@ router.get('/', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const row = await dbGet('SELECT * FROM sessions WHERE id = ?', [req.params.id]);
+    const row = await db.get('SELECT * FROM sessions WHERE id = ?', [req.params.id]);
     if (!row) {
       return res.status(404).json({ error: 'Session not found' });
     }
@@ -127,7 +103,7 @@ router.get('/:id', async (req, res) => {
 
     try {
       const refreshed = await provider.refreshSession(row);
-      await dbRun(
+      await db.run(
         `UPDATE sessions
          SET status = COALESCE(?, status),
              webHost = COALESCE(?, webHost),
@@ -165,7 +141,7 @@ router.post('/:id/command', async (req, res) => {
   }
 
   try {
-    const row = await dbGet('SELECT * FROM sessions WHERE id = ?', [req.params.id]);
+    const row = await db.get('SELECT * FROM sessions WHERE id = ?', [req.params.id]);
     if (!row) {
       return res.status(404).json({ error: 'Session not found' });
     }
@@ -174,7 +150,7 @@ router.post('/:id/command', async (req, res) => {
     const result = await provider.executeCommand(row, command);
     const updates = result.updates || {};
 
-    await dbRun(
+    await db.run(
       `UPDATE sessions
        SET privateKey = COALESCE(?, privateKey),
            publicKey = COALESCE(?, publicKey),
@@ -198,7 +174,7 @@ router.post('/:id/command', async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   try {
-    const row = await dbGet('SELECT * FROM sessions WHERE id = ?', [req.params.id]);
+    const row = await db.get('SELECT * FROM sessions WHERE id = ?', [req.params.id]);
     if (!row) {
       return res.status(404).json({ error: 'Session not found' });
     }
@@ -217,7 +193,7 @@ router.delete('/:id', async (req, res) => {
       console.warn(`Provider termination failed for session ${row.id}:`, providerError.message);
     }
 
-    await dbRun('DELETE FROM sessions WHERE id = ?', [row.id]);
+    await db.run('DELETE FROM sessions WHERE id = ?', [row.id]);
 
     const response = {
       message: `Session ${row.id} (${row.provider}) terminated and removed from orchestrator.`
@@ -238,7 +214,7 @@ router.post('/terminate-all', async (req, res) => {
     // STOP ALL KEEP-ALIVES FIRST
     keepAliveService.stopAllKeepAlives();
 
-    const rows = await dbAll('SELECT * FROM sessions');
+    const rows = await db.all('SELECT * FROM sessions');
     const results = [];
 
     for (const row of rows) {
@@ -259,7 +235,7 @@ router.post('/terminate-all', async (req, res) => {
       }
 
       try {
-        await dbRun('DELETE FROM sessions WHERE id = ?', [row.id]);
+        await db.run('DELETE FROM sessions WHERE id = ?', [row.id]);
         result.deleted = true;
       } catch (dbError) {
         result.errors.push(`dbDelete: ${dbError.message}`);

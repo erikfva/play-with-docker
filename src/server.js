@@ -23,6 +23,7 @@ async function startServer() {
   try {
     await initGoogleCredentialsFromS3IfNeeded();
     await db.ready;
+    console.log('db ready in server');
     app.listen(port, () => {
       console.log(`Server running on port ${port}`);
     });

@@ -1,45 +1,59 @@
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
+const { Pool } = require('pg');
 
-const dbPath = path.resolve(__dirname, '../../sessions.db');
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) {
-    console.error('Could not connect to database', err);
-  } else {
-    console.log('Connected to database');
-  }
+const connectionString = process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/play_with_docker';
+
+const pool = new Pool({
+  connectionString,
+  // Uncomment SSL config if your provider requires it
+  // ssl: {
+  //   rejectUnauthorized: false
+  // }
 });
 
-function run(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function runCallback(err) {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(this);
-      }
-    });
+function convertSql(sql, params = []) {
+  let index = 0;
+  const text = sql.replace(/\?/g, () => {
+    index += 1;
+    return `$${index}`;
   });
+  return { text, values: params };
 }
 
-function all(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) {
-        reject(err);
-      } else {
-        resolve(rows);
-      }
-    });
-  });
+async function run(sql, params = []) {
+  const { text, values } = convertSql(sql, params);
+  return pool.query(text, values);
 }
 
-async function ensureColumn(columns, name, sql) {
-  if (!columns.includes(name)) {
-    await run(sql);
-    console.log(`Added ${name} column`);
+async function all(sql, params = []) {
+  const { text, values } = convertSql(sql, params);
+  const result = await pool.query(text, values);
+  return result.rows;
+}
+
+async function get(sql, params = []) {
+  const rows = await all(sql, params);
+  return rows.length ? rows[0] : null;
+}
+
+async function ensureColumn(tableName, columnName, ddl) {
+  const checkResult = await pool.query(
+    `SELECT column_name FROM information_schema.columns WHERE lower(table_name) = lower($1) AND lower(column_name) = lower($2)`,
+    [tableName, columnName]
+  );
+
+  if (checkResult.rowCount === 0) {
+    await run(ddl);
+    console.log(`Added ${columnName} column`);
   }
 }
+
+const db = {
+  run,
+  all,
+  get,
+  pool,
+  ready: null
+};
 
 db.ready = (async () => {
   await run(`CREATE TABLE IF NOT EXISTS sessions (
@@ -53,27 +67,23 @@ db.ready = (async () => {
     publicKey TEXT,
     status TEXT DEFAULT 'PENDING',
     metadata TEXT,
-    createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    createdAt TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
   )`);
 
-  const rows = await all('PRAGMA table_info(sessions)');
-  const columns = rows.map((r) => r.name);
-
-  await ensureColumn(columns, 'provider', "ALTER TABLE sessions ADD COLUMN provider TEXT DEFAULT 'gcs'");
-  await ensureColumn(columns, 'providerSessionId', 'ALTER TABLE sessions ADD COLUMN providerSessionId TEXT');
-  await ensureColumn(columns, 'envName', 'ALTER TABLE sessions ADD COLUMN envName TEXT');
-  await ensureColumn(columns, 'sshCommand', 'ALTER TABLE sessions ADD COLUMN sshCommand TEXT');
-  await ensureColumn(columns, 'webHost', 'ALTER TABLE sessions ADD COLUMN webHost TEXT');
-  await ensureColumn(columns, 'privateKey', 'ALTER TABLE sessions ADD COLUMN privateKey TEXT');
-  await ensureColumn(columns, 'publicKey', 'ALTER TABLE sessions ADD COLUMN publicKey TEXT');
-  await ensureColumn(columns, 'status', "ALTER TABLE sessions ADD COLUMN status TEXT DEFAULT 'PENDING'");
-  await ensureColumn(columns, 'metadata', 'ALTER TABLE sessions ADD COLUMN metadata TEXT');
+  await ensureColumn('sessions', 'provider', "ALTER TABLE sessions ADD COLUMN provider TEXT DEFAULT 'gcs'");
+  await ensureColumn('sessions', 'providerSessionId', 'ALTER TABLE sessions ADD COLUMN providerSessionId TEXT');
+  await ensureColumn('sessions', 'envName', 'ALTER TABLE sessions ADD COLUMN envName TEXT');
+  await ensureColumn('sessions', 'sshCommand', 'ALTER TABLE sessions ADD COLUMN sshCommand TEXT');
+  await ensureColumn('sessions', 'webHost', 'ALTER TABLE sessions ADD COLUMN webHost TEXT');
+  await ensureColumn('sessions', 'privateKey', 'ALTER TABLE sessions ADD COLUMN privateKey TEXT');
+  await ensureColumn('sessions', 'publicKey', 'ALTER TABLE sessions ADD COLUMN publicKey TEXT');
+  await ensureColumn('sessions', 'status', "ALTER TABLE sessions ADD COLUMN status TEXT DEFAULT 'PENDING'");
+  await ensureColumn('sessions', 'metadata', 'ALTER TABLE sessions ADD COLUMN metadata TEXT');
 
   await run("UPDATE sessions SET provider = 'gcs' WHERE provider IS NULL OR provider = ''");
   await run('UPDATE sessions SET providerSessionId = envName WHERE providerSessionId IS NULL AND envName IS NOT NULL');
-})().catch((err) => {
-  console.error('Database initialization failed:', err);
-  throw err;
-});
+
+  console.log('Connected to PostgreSQL database');
+})();
 
 module.exports = db;
