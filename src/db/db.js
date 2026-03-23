@@ -2,12 +2,33 @@ const { Pool } = require('pg');
 
 const connectionString = process.env.DATABASE_URL_CONN || 'postgres://postgres:postgres@localhost:5432/play_with_docker';
 
+// Parse connection string to extract host/port for diagnostics
+const connectionUrl = new URL(connectionString);
+const dbHost = connectionUrl.hostname;
+const dbPort = connectionUrl.port || 5432;
+
+console.log(`[DB] Configured to connect to: ${dbHost}:${dbPort}`);
+
 const pool = new Pool({
   connectionString,
+  // Increase timeouts for remote connections
+  connectionTimeoutMillis: 60000,  // 60 seconds for remote DB
+  idleTimeoutMillis: 30000,
+  statement_timeout: 60000,         // 60 second query timeout
   // Uncomment SSL config if your provider requires it
   // ssl: {
   //   rejectUnauthorized: false
   // }
+});
+
+// Handle connection errors
+pool.on('error', (err) => {
+  console.error('[DB] Pool error:', {
+    code: err.code,
+    message: err.message,
+    address: err.address,
+    port: err.port
+  });
 });
 
 function convertSql(sql, params = []) {
@@ -56,7 +77,24 @@ const db = {
 };
 
 db.ready = (async () => {
-  await run(`CREATE TABLE IF NOT EXISTS sessions (
+  try {
+    console.log('[DB] Attempting to connect...');
+    const client = await pool.connect();
+    console.log('[DB] ✓ Connection successful to', dbHost + ':' + dbPort);
+    client.release();
+  } catch (err) {
+    console.error('[DB] ✗ Connection FAILED:', {
+      error: err.message,
+      code: err.code,
+      host: dbHost,
+      port: dbPort,
+      timeout: err.code === 'ETIMEDOUT' ? 'Connection timeout - check firewall on server' : 'See code above'
+    });
+    throw err;
+  }
+
+  try {
+    await run(`CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     provider TEXT DEFAULT 'gcs',
     providerSessionId TEXT,
@@ -83,7 +121,11 @@ db.ready = (async () => {
   await run("UPDATE sessions SET provider = 'gcs' WHERE provider IS NULL OR provider = ''");
   await run('UPDATE sessions SET providerSessionId = envName WHERE providerSessionId IS NULL AND envName IS NOT NULL');
 
-  console.log('Connected to PostgreSQL database');
+    console.log('[DB] ✓ Schema initialized successfully');
+  } catch (err) {
+    console.error('[DB] ✗ Schema initialization failed:', err.message);
+    throw err;
+  }
 })();
 
 module.exports = db;
