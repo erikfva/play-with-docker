@@ -3,6 +3,20 @@ const gcsService = require('../gcs-service');
 const sshService = require('../ssh-service');
 const { SessionNotReadyError } = require('../errors/provider-errors');
 
+function isExpectedShutdownDisconnect(error) {
+  if (!error || !error.message) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+  return (
+    message.includes('connection') ||
+    message.includes('closed') ||
+    message.includes('eof') ||
+    message.includes('socket hang up')
+  );
+}
+
 class GcsProvider extends BaseProvider {
   constructor() {
     super('gcs');
@@ -174,7 +188,45 @@ class GcsProvider extends BaseProvider {
 
   async terminateSession(sessionRow) {
     const providerSessionId = this.getProviderSessionId(sessionRow);
-    if (!providerSessionId || !sessionRow.publicKey) {
+    if (!providerSessionId) {
+      return;
+    }
+
+    try {
+      const status = await gcsService.getCloudShellStatus(providerSessionId);
+
+      if (status.status === 'RUNNING' && status.sshHost && status.sshUsername) {
+        let privateKey = sessionRow.privateKey;
+
+        if (!privateKey) {
+          const keys = await sshService.generateKeyPair();
+          await gcsService.addPublicKey(keys.publicKey, providerSessionId);
+          privateKey = keys.privateKey;
+        }
+
+        try {
+          await sshService.executeCommand(
+            {
+              host: status.sshHost,
+              port: status.sshPort || 22,
+              username: status.sshUsername
+            },
+            'sudo poweroff -f',
+            privateKey
+          );
+        } catch (error) {
+          if (!isExpectedShutdownDisconnect(error)) {
+            throw error;
+          }
+        }
+
+        return;
+      }
+    } catch (error) {
+      console.warn('GCS shutdown failed during termination:', error.message);
+    }
+
+    if (!sessionRow.publicKey) {
       return;
     }
 
