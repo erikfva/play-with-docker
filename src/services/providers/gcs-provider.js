@@ -13,7 +13,8 @@ function isExpectedShutdownDisconnect(error) {
     message.includes('connection') ||
     message.includes('closed') ||
     message.includes('eof') ||
-    message.includes('socket hang up')
+    message.includes('socket hang up') ||
+    message.includes('powering off')
   );
 }
 
@@ -23,7 +24,8 @@ class GcsProvider extends BaseProvider {
   }
 
   getProviderSessionId(sessionRow) {
-    return sessionRow.providerSessionId || sessionRow.envName;
+    const { providersessionid, envname } = sessionRow;
+    return providersessionid || envname;
   }
 
   getKeepAliveConfig() {
@@ -205,6 +207,7 @@ class GcsProvider extends BaseProvider {
         }
 
         try {
+          console.log(`[GCS] Attempting graceful shutdown of session ${sessionRow.id} via SSH command...`);
           await sshService.executeCommand(
             {
               host: status.sshHost,
