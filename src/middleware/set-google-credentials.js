@@ -17,7 +17,7 @@ async function setGoogleCredentials(req, res, next) {
   }
  
   try {
-    const outputPath = await initGoogleCredentialsFromS3IfNeeded(headerGoogleCredentials);
+    await initGoogleCredentialsFromS3IfNeeded(headerGoogleCredentials);
     return next();
   } catch (error) {
     return res.status(500).json({ error: error.message || 'Failed to initialize Google credentials from S3'   });
