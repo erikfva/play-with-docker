@@ -1,4 +1,4 @@
-@baseUrl = https://play-with-docker-bidk.onrender.com/api/v1
+@baseUrl = http://localhost:3000/api/v1
 @s3EndPoint = https://s3.
 @s3AccessKeyId = 8S
 @s3SecretAccessKey = mi
@@ -13,12 +13,27 @@ GET http://localhost:3000/health
 GET {{baseUrl}}/sessions?status=RUNNING
 X-Server-Token: {{serverToken}}
 
+@googleCredentials = gcloud/project-xxxxxx-de207fd1f8b1.json 
+
+### 2.1 List Active Sessions with custom Google Credentials Header
+GET {{baseUrl}}/sessions?status=RUNNING
+X-Server-Token: {{serverToken}}
+X-Google-Credentials: {{googleCredentials}}
+
 ### 3. Create a New Cloud Shell Session
 # This will trigger the Google Cloud Shell start-up process
 # @name createSession
 POST {{baseUrl}}/sessions
 Content-Type: application/json
 X-Server-Token: {{serverToken}}
+
+### 3.1. Create a New Cloud Shell Session with custom Google Credentials Header
+# This will trigger the Google Cloud Shell start-up process
+# @name createSession
+POST {{baseUrl}}/sessions
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+X-Google-Credentials: {{googleCredentials}}
 
 ###
 #@sessionId = 21327c99-5ac5-4a6f-9630-de6fb418c821 
@@ -33,6 +48,7 @@ X-Server-Token: {{serverToken}}
 POST {{baseUrl}}/sessions/{{sessionId}}/command
 Content-Type: application/json
 X-Server-Token: {{serverToken}}
+X-Google-Credentials: {{googleCredentials}}
 
 {
     "command": "ls -la"
