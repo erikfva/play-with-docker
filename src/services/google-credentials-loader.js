@@ -2,6 +2,7 @@ const fs = require('fs/promises');
 const os = require('os');
 const path = require('path');
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+const loadedCredentialsFiles = new Set();
 
 function isS3fsEnabled() {
   const raw = String(process.env.S3FS_ENABLED ?? '1').trim().toLowerCase();
@@ -71,37 +72,55 @@ function buildS3Client() {
   return new S3Client(clientConfig);
 }
 
-async function initGoogleCredentialsFromS3IfNeeded() {
+async function initGoogleCredentialsFromS3IfNeeded( googleCredentials ) {
   if (isS3fsEnabled()) {
     console.log('Credential mode: s3fs (filesystem path from GOOGLE_APPLICATION_CREDENTIALS)');
     return;
   }
 
   console.log('Credential mode: s3-api (download GOOGLE_APPLICATION_CREDENTIALS from object storage)');
-  const credentialsRef = (process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
+  const credentialsRef = (googleCredentials || process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
   if (!credentialsRef) {
     console.log('Credential mode: s3-api skipped (GOOGLE_APPLICATION_CREDENTIALS is empty)');
     return;
   }
 
+  const outputPath = path.join(os.tmpdir(), credentialsRef);
+  //Check if credential file already exist
+  if (loadedCredentialsFiles.has(credentialsRef)) {
+    console.log(`Reusing existing credentials file: ${credentialsRef}`);
+    return outputPath;
+  }
+
   const { bucket, key } = resolveBucketAndKey(credentialsRef);
   const s3 = buildS3Client();
-  const response = await s3.send(
-    new GetObjectCommand({
-      Bucket: bucket,
-      Key: key
-    })
-  );
-
+  let response;
+  try {
+    response = await s3.send(
+      new GetObjectCommand({
+        Bucket: bucket,
+        Key: key
+      })
+    );
+  } catch (error) {
+    throw new Error(`Failed to fetch credentials from s3://${bucket}/${key}: ${error.message}`);
+  }
   if (!response.Body) {
     throw new Error(`S3 object has no body: s3://${bucket}/${key}`);
   }
 
   const fileBuffer = await streamToBuffer(response.Body);
-  const outputPath = path.join(os.tmpdir(), `google-credentials-${process.pid}.json`);
+  await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.writeFile(outputPath, fileBuffer, { mode: 0o600 });
+  
+  if(!process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS) {
+    process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS = outputPath;
+  }
+
   process.env.GOOGLE_APPLICATION_CREDENTIALS = outputPath;
   console.log(`Loaded GOOGLE_APPLICATION_CREDENTIALS from s3://${bucket}/${key}`);
+  loadedCredentialsFiles.add(credentialsRef);
+  return outputPath;
 }
 
 module.exports = {

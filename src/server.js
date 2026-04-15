@@ -8,6 +8,7 @@ const bodyParser = require('body-parser');
 const db = require('./db/db');
 const sessionRoutes = require('./routes/sessions');
 const { requireServerToken } = require('./middleware/require-server-token');
+const { setGoogleCredentials } = require('./middleware/set-google-credentials')
 const { initGoogleCredentialsFromS3IfNeeded } = require('./services/google-credentials-loader');
 const keepAliveService = require('./services/keep-alive-service');
 
@@ -17,7 +18,7 @@ const port = process.env.PORT || 3000;
 app.use(bodyParser.json());
 
 // Routes
-app.use('/api/v1/sessions', requireServerToken, sessionRoutes);
+app.use('/api/v1/sessions', requireServerToken, setGoogleCredentials, sessionRoutes);
 
 // Health Check
 app.get('/health', (req, res) => {
