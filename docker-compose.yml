@@ -3,7 +3,7 @@ services:
     build: .
     image: erikvargas/play-with-docker:latest
     ports:
-      - "${PORT:-3000}:3000"
+      - "${PORT:-3000}:${PORT:-3000}"
     cap_add:
       - SYS_ADMIN
     devices:
