@@ -1,6 +1,6 @@
 // Only load dotenv in development, not in production (like Render)
 if (process.env.NODE_ENV !== 'production') {
-  require('dotenv').config();
+  require('dotenv').config({override: true});
 }
 
 const express = require('express');
