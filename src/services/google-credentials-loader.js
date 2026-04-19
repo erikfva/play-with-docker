@@ -89,6 +89,7 @@ async function initGoogleCredentialsFromS3IfNeeded( googleCredentials ) {
   //Check if credential file already exist
   if (loadedCredentialsFiles.has(credentialsRef)) {
     console.log(`Reusing existing credentials file: ${credentialsRef}`);
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = outputPath;
     return outputPath;
   }
 
