@@ -17,7 +17,7 @@ function mapErrorToHttp(res, error, fallbackMessage) {
   }
 
   console.error(error);
-  return res.status(500).json({ error: fallbackMessage });
+  return res.status(error.code || 500).json({ error: error.message || fallbackMessage });
 }
 
 function parseMetadata(rawMetadata) {
