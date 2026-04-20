@@ -1,5 +1,7 @@
 FROM node:20-bullseye-slim
 
+LABEL org.opencontainers.image.source="https://github.com/erikfva/vm-manager"
+
 WORKDIR /app
 
 RUN apt-get update \
