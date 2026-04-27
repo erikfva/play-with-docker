@@ -1,3 +1,7 @@
+// Demo stub only — Play with Docker (https://labs.play-with-docker.com) was deprecated
+// as of March 2026 and is no longer available. This provider exists as a template
+// reference for implementing new providers.
+
 const BaseProvider = require('./base-provider');
 const { ProviderNotImplementedError } = require('../errors/provider-errors');
 

@@ -9,7 +9,7 @@ Expose one stable API to create and manage temporary VPS-like development sessio
 
 Initial provider scope:
 - `gcs` (Google Cloud Shell) - implemented
-- `pwd` (Play with Docker) - adapter scaffolded, not implemented yet
+- `pwd` (Play with Docker) - demo stub only; service deprecated as of March 2026, will not be implemented
 
 Post-MVP target:
 - `aws` (adapter to be added later)
@@ -30,7 +30,7 @@ Each provider implements the same interface:
 
 - `src/services/providers/base-provider.js` - provider interface
 - `src/services/providers/gcs-provider.js` - GCS adapter implementation
-- `src/services/providers/pwd-provider.js` - PWD stub (Not Implemented)
+- `src/services/providers/pwd-provider.js` - PWD demo stub (Play with Docker deprecated March 2026, not implemented)
 - `src/services/provider-factory.js` - provider resolution and registry
 - `src/services/errors/provider-errors.js` - normalized provider error classes
 
@@ -38,7 +38,7 @@ Each provider implements the same interface:
 
 Persist provider-neutral fields in `sessions`:
 - `id` (internal UUID)
-- `provider` (`gcs`, `pwd`, future `aws`)
+- `provider` (`gcs`, `pwd` [demo stub], future `aws`)
 - `providerSessionId` (provider-native session/environment ID)
 - `status`
 - `sshCommand`
@@ -107,7 +107,7 @@ Rules:
 - [x] Execute command through provider adapter (`gcs`)
 - [x] Terminate session with provider hook + DB cleanup
 - [x] Persist provider/session mapping in SQLite
-- [ ] Implement full `pwd` provider behavior
+- [ ] Implement full `pwd` provider behavior (skipped — Play with Docker deprecated as of March 2026, `pwd` is a demo stub only)
 - [ ] Add provider-level integration test coverage
 
 ## 7. Risks and Constraints

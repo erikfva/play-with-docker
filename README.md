@@ -2,6 +2,8 @@
 
 This is a **multi-provider VPS orchestrator** that exposes a unified API to manage temporary virtual development environments.
 
+> **Note:** The `pwd` (Play with Docker) provider is a demo stub only. The Play with Docker service ([labs.play-with-docker.com](https://labs.play-with-docker.com)) has been deprecated and is no longer available as of March 2026. The `pwd` provider will not be implemented and exists solely as a template reference for adding new providers.
+
 ## Requirements
 
 - Docker + Docker Compose

@@ -5,7 +5,7 @@
 This project is a Node.js API that creates and manages temporary remote development sessions behind a provider abstraction.
 
 - Implemented provider: `gcs` (Google Cloud Shell)
-- Registered but not implemented: `pwd` (Play with Docker)
+- Registered but not implemented: `pwd` (Play with Docker) — demo stub only; the Play with Docker service was deprecated as of March 2026 and will not be implemented. Exists as a template reference for new providers.
 
 The API persists session records locally, refreshes provider state on demand, executes remote shell commands over SSH for active Google Cloud Shell sessions, and runs provider-aware keep-alive recovery after restarts.
 
@@ -50,7 +50,7 @@ Implemented in current code:
 
 Not implemented:
 
-- `pwd` provider lifecycle methods (`createSession`, `refreshSession`, `executeCommand`, `terminateSession`)
+- `pwd` provider lifecycle methods (`createSession`, `refreshSession`, `executeCommand`, `terminateSession`) — demo stub only, Play with Docker service deprecated as of March 2026
 - Automated API docs or Swagger endpoint
 - Test suite automation beyond the checked-in `tests/api-tests.http` request collection
 
@@ -158,7 +158,7 @@ Container/runtime details:
 
 ## 9. Current Risks and Gaps
 
-- `pwd` appears as a supported provider in discovery but every operation returns `501 Not Implemented`.
+- `pwd` appears as a supported provider in discovery but every operation returns `501 Not Implemented` — this is intentional; the Play with Docker service was deprecated as of March 2026, so `pwd` is a demo stub and template reference only.
 - Credential handling is easy to misconfigure because startup, Compose, and request middleware use both `GOOGLE_APPLICATION_CREDENTIALS` and `GOOGLE_APPLICATION_DEFAULT_CREDENTIALS`.
 - The API persists private SSH keys in PostgreSQL, so database access is security-sensitive.
 - GCS shutdown and refresh paths are best-effort; local records can diverge from remote state temporarily.
