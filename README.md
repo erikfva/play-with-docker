@@ -92,6 +92,12 @@ curl http://localhost:3000/api/v1/sessions/providers/supported \
   -H "x-server-token: $SERVER_TOKEN"
 ```
 
+List available Google credentials:
+```bash
+curl http://localhost:3000/api/v1/sessions/google-credentials \
+  -H "x-server-token: $SERVER_TOKEN"
+```
+
 Run command in session:
 ```bash
 curl -X POST http://localhost:3000/api/v1/sessions/<SESSION_ID>/command \

@@ -84,7 +84,7 @@ const { listAvailableCredentials } = require('../services/credentials-lister');
 ```
 
 ```javascript
-router.get('/credentials', async (req, res) => {
+router.get('/google-credentials', async (req, res) => {
   try {
     const prefix = req.query.prefix;
     const result = await listAvailableCredentials(prefix);
@@ -107,7 +107,7 @@ Example for README:
 ```markdown
 List available credentials:
 ```bash
-curl http://localhost:3000/api/v1/sessions/credentials \
+curl http://localhost:3000/api/v1/sessions/google-credentials \
   -H "x-server-token: $SERVER_TOKEN"
 ```
 ```

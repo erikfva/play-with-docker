@@ -125,5 +125,8 @@ async function initGoogleCredentialsFromS3IfNeeded( googleCredentials ) {
 }
 
 module.exports = {
+  isS3fsEnabled,
+  buildS3Client,
+  resolveBucketAndKey,
   initGoogleCredentialsFromS3IfNeeded
 };
