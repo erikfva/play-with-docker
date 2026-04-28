@@ -21,14 +21,14 @@ Current behavior:
 - The `x-google-credentials` header allows per-request override, but clients must know the valid key names in advance.
 
 Required behavior:
-- A new endpoint `GET /api/v1/sessions/credentials` returns a list of available credential files.
+- A new endpoint `GET /api/v1/sessions/google-credentials` returns a list of available Google credential files.
 - The list is derived from the configured credential source (S3 bucket listing or filesystem directory).
 - Clients can use this list to populate a dropdown or validation set before creating sessions.
 
 ## 4. Scope
 
 In scope:
-- New `GET /api/v1/sessions/credentials` endpoint (token-protected).
+- New `GET /api/v1/sessions/google-credentials` endpoint (token-protected).
 - S3 mode: list `.json` objects under the configured `S3_BUCKET` prefix.
 - s3fs mode: list `.json` files under the `GOOGLE_APPLICATION_CREDENTIALS` directory or `S3_MOUNT_DIR`.
 - Response includes file names/keys and optionally a display label.
@@ -41,7 +41,7 @@ Out of scope:
 
 ## 5. Functional Requirements
 
-1. New endpoint `GET /api/v1/sessions/credentials` must require server token authentication (`x-server-token` or `Authorization: Bearer`).
+1. New endpoint `GET /api/v1/sessions/google-credentials` must require server token authentication (`x-server-token` or `Authorization: Bearer`).
 
 2. The endpoint must inspect the current credential mode and list available `.json` files accordingly:
 

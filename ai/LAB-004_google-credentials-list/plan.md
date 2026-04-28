@@ -107,7 +107,7 @@ Example for README:
 ```markdown
 List available credentials:
 ```bash
-curl http://localhost:3000/api/v1/sessions/credentials \
+curl http://localhost:3000/api/v1/sessions/google-credentials \
   -H "x-server-token: $SERVER_TOKEN"
 ```
 ```
