@@ -70,6 +70,7 @@ Routes:
 - `POST /api/v1/sessions/:id/command`
 - `DELETE /api/v1/sessions/:id`
 - `POST /api/v1/sessions/terminate-all`
+- `GET /api/v1/sessions/google-credentials`
 - `GET /health` (no token required)
 
 Behavior details:

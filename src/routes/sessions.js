@@ -4,6 +4,7 @@ const db = require('../db/db');
 const { getProvider, listProviders, normalizeProviderName } = require('../services/provider-factory');
 const { ProviderError } = require('../services/errors/provider-errors');
 const keepAliveService = require('../services/keep-alive-service');
+const { listAvailableCredentials } = require('../services/credentials-lister');
 
 const router = express.Router();
 
@@ -206,6 +207,16 @@ router.delete('/:id', async (req, res) => {
     return res.json(response);
   } catch (error) {
     return mapErrorToHttp(res, error, 'Failed to terminate session');
+  }
+});
+
+router.get('/google-credentials', async (req, res) => {
+  try {
+    const prefix = req.query.prefix || '';
+    const result = await listAvailableCredentials(prefix);
+    return res.json(result);
+  } catch (error) {
+    return mapErrorToHttp(res, error, 'Failed to list credentials');
   }
 });
 
