@@ -47,6 +47,9 @@ Implemented in current code:
 - Start provider-aware keep-alive after session creation.
 - Recover keep-alive timers on startup and delete stale inactive GCS sessions from the database.
 - Return structured provider errors for unsupported providers, unimplemented providers, and non-ready sessions.
+- Automatic SSH key generation and management for sessions that don't have keys yet.
+- Database updates during keep-alive operations (when SSH keys are generated).
+- Graceful session termination via SSH poweroff command.
 
 Not implemented:
 
@@ -78,6 +81,7 @@ Behavior details:
 - `POST /api/v1/sessions` defaults to provider `gcs` when no provider is supplied.
 - `POST /api/v1/sessions/:id/command` returns `409` when the provider session is not ready.
 - Session refresh and provider termination are best-effort in some paths; the API may still return session data or delete the local record when a provider cleanup step fails.
+- Keep-alive mechanism sends SSH commands every 15 minutes to prevent GCS session timeout (20 minutes).
 
 ## 6. Data Model
 
@@ -100,7 +104,7 @@ Columns currently managed by the app:
 Usage notes:
 
 - `metadata` is stored as JSON text.
-- SSH key material is persisted in the database once generated for a session.
+- SSH key material is persisted in the database once generated for a session (during first command execution or keep-alive).
 - Older rows are normalized on startup so `provider` defaults to `gcs` and `providerSessionId` is backfilled from `envName`.
 
 ## 7. Credentials and Environment
@@ -157,7 +161,20 @@ Container/runtime details:
 - Installs build tools, OpenSSH client, `fuse`, and `s3fs`
 - Compose enables `/dev/fuse`, `SYS_ADMIN`, and `apparmor:unconfined` for mount mode
 
-## 9. Current Risks and Gaps
+## 9. Keep-Alive Mechanism
+
+The system implements provider-aware keep-alive to maintain active sessions:
+
+- **GCS Provider**: Sends SSH keep-alive commands every 15 minutes (before the 20-minute timeout)
+- Automatically generates SSH keys for sessions that don't have them yet
+- Updates database with newly generated SSH keys during keep-alive operations
+- Handles suspended sessions by attempting to resume them
+- Skips keep-alive for non-running sessions until they become active
+- Recovers keep-alive timers on startup from persisted sessions
+- Cleans up stale GCS sessions that are no longer active remotely
+- Providers can disable keep-alive (like PWD provider) if not needed
+
+## 10. Current Risks and Gaps
 
 - `pwd` appears as a supported provider in discovery but every operation returns `501 Not Implemented` — this is intentional; the Play with Docker service was deprecated as of March 2026, so `pwd` is a demo stub and template reference only.
 - Credential handling is easy to misconfigure because startup, Compose, and request middleware use both `GOOGLE_APPLICATION_CREDENTIALS` and `GOOGLE_APPLICATION_DEFAULT_CREDENTIALS`.
