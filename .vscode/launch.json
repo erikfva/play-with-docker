@@ -1,0 +1,39 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "Launch Play with Docker API",
+            "program": "${workspaceFolder}/src/server.js",
+            "preLaunchTask": "npm: install",
+            "env": {
+                "NODE_ENV": "development",
+                "PORT": "3000",
+                "SERVER_TOKEN": "your-debug-token",
+                "DATABASE_URL_CONN": "postgres://postgres:postgres@localhost:5432/play_with_docker",
+                "GOOGLE_APPLICATION_DEFAULT_CREDENTIALS": "/path/to/your/google-credentials.json",
+                "S3FS_ENABLED": "0",
+                "S3_BUCKET": "your-test-bucket",
+                "AWS_ACCESS_KEY_ID": "your-access-key-id",
+                "AWS_SECRET_ACCESS_KEY": "your-secret-access-key"
+            },
+            "console": "integratedTerminal",
+            "internalConsoleOptions": "neverOpen",
+            "skipFiles": [
+                "<node_internals>/**"
+            ]
+        },
+        {
+            "type": "node",
+            "request": "attach",
+            "name": "Attach to Play with Docker API",
+            "port": 9229,
+            "address": "localhost",
+            "restart": true,
+            "skipFiles": [
+                "<node_internals>/**"
+            ]
+        }
+    ]
+}

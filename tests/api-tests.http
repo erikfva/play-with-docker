@@ -4,7 +4,7 @@
 @s3SecretAccessKey = mi
 @s3Region = 8S
 @tokenNgrok = 3M
-@serverToken = ZZ
+@serverToken = ZZ8dnFx2CRItYfg0iGQ0
 
 ### 1. Health Check
 GET http://localhost:3000/health
@@ -141,4 +141,12 @@ X-Server-Token: {{serverToken}}
 
 ### 13. Terminate All Sessions
 POST {{baseUrl}}/sessions/terminate-all
+X-Server-Token: {{serverToken}}
+
+### 14. List Available Google Credentials
+GET {{baseUrl}}/sessions/google-credentials
+X-Server-Token: {{serverToken}}
+
+### 14.1. List Available Google Credentials with Prefix Filter
+GET {{baseUrl}}/sessions/google-credentials?prefix=gcloud/
 X-Server-Token: {{serverToken}}
