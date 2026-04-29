@@ -18,7 +18,18 @@ function mapErrorToHttp(res, error, fallbackMessage) {
   }
 
   console.error(error);
-  return res.status(error.code || 500).json({ error: error.message || fallbackMessage });
+  const statusCode = Number.isInteger(error.statusCode)
+    ? error.statusCode
+    : Number.isInteger(error.status)
+      ? error.status
+      : Number.isInteger(error.code)
+        ? error.code
+        : 500;
+
+  return res.status(statusCode).json({
+    error: error.message || fallbackMessage,
+    code: error.code
+  });
 }
 
 function parseMetadata(rawMetadata) {
@@ -73,6 +84,16 @@ router.post('/', async (req, res) => {
 
 router.get('/providers/supported', (req, res) => {
   res.json({ providers: listProviders() });
+});
+
+router.get('/google-credentials', async (req, res) => {
+  try {
+    const prefix = req.query.prefix || '';
+    const result = await listAvailableCredentials(prefix);
+    return res.json(result);
+  } catch (error) {
+    return mapErrorToHttp(res, error, 'Failed to list credentials');
+  }
 });
 
 router.get('/', async (req, res) => {
@@ -207,16 +228,6 @@ router.delete('/:id', async (req, res) => {
     return res.json(response);
   } catch (error) {
     return mapErrorToHttp(res, error, 'Failed to terminate session');
-  }
-});
-
-router.get('/google-credentials', async (req, res) => {
-  try {
-    const prefix = req.query.prefix || '';
-    const result = await listAvailableCredentials(prefix);
-    return res.json(result);
-  } catch (error) {
-    return mapErrorToHttp(res, error, 'Failed to list credentials');
   }
 });
 
