@@ -1,10 +1,12 @@
 const GcsProvider = require('./providers/gcs-provider');
 const PwdProvider = require('./providers/pwd-provider');
+const CodeSandboxProvider = require('./providers/codesandbox-provider');
 const { UnsupportedProviderError } = require('./errors/provider-errors');
 
 const providers = {
   gcs: new GcsProvider(),
-  pwd: new PwdProvider()
+  pwd: new PwdProvider(),
+  codesandbox: new CodeSandboxProvider()
 };
 
 function normalizeProviderName(provider) {

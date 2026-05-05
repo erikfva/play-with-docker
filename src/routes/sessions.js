@@ -5,6 +5,7 @@ const { getProvider, listProviders, normalizeProviderName } = require('../servic
 const { ProviderError } = require('../services/errors/provider-errors');
 const keepAliveService = require('../services/keep-alive-service');
 const { listAvailableCredentials } = require('../services/credentials-lister');
+const { initGoogleCredentialsFromS3IfNeeded } = require('../services/google-credentials-loader');
 
 const router = express.Router();
 
@@ -48,22 +49,79 @@ router.post('/', async (req, res) => {
   const providerName = normalizeProviderName(req.body?.provider || 'gcs');
 
   try {
+    // Initialize provider-aware credentials
+    if (providerName === 'gcs') {
+      const googleCredentials = process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS;
+      if (googleCredentials) {
+        await initGoogleCredentialsFromS3IfNeeded(googleCredentials);
+      }
+    }
+
     const provider = getProvider(providerName);
-    const created = await provider.createSession(req.body || {});
+    const created = await provider.createSession({
+      ...(req.body || {}),
+      credentialRef: req.headers['x-codesandbox-credentials']
+    });
     const id = uuidv4();
 
-    await db.run(
-      `INSERT INTO sessions (id, provider, providerSessionId, envName, status, metadata)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [
-        id,
-        provider.name,
-        created.providerSessionId,
-        created.providerSessionId,
-        created.status || 'STARTING',
-        created.metadata ? JSON.stringify(created.metadata) : null
-      ]
-    );
+    try {
+      await db.run(
+        `INSERT INTO sessions (id, provider, providerSessionId, envName, status, credentialRef, credentialFingerprint, metadata)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          provider.name,
+          created.providerSessionId,
+          created.envName || created.providerSessionId,
+          created.status || 'STARTING',
+          created.credentialRef || null,
+          created.credentialFingerprint || null,
+          created.metadata ? JSON.stringify(created.metadata) : null
+        ]
+      );
+    } catch (dbError) {
+      // Handle unique constraint violation for CodeSandbox one-VM-per-token
+      if (dbError.code === '23505' && providerName === 'codesandbox') {
+        // Unique index violation on credentialFingerprint
+        // Return the existing session
+        const existingSession = await db.get(
+          'SELECT * FROM sessions WHERE credentialFingerprint = ? AND provider = ? AND status NOT IN (?, ?, ?)',
+          [created.credentialFingerprint, 'codesandbox', 'TERMINATED', 'DELETED', 'FAILED']
+        );
+
+        if (existingSession) {
+          return res.status(409).json({
+            error: 'A CodeSandbox session with this token already exists',
+            code: 'CONFLICT',
+            details: {
+              existingSessionId: existingSession.id,
+              message: 'Use the existing session or terminate it first'
+            }
+          });
+        }
+
+        // If we can't find the session but got a unique violation, something is wrong
+        // Best-effort cleanup: try to delete the sandbox that was just created
+        try {
+          const cleanupProvider = getProvider('codesandbox');
+          await cleanupProvider.terminateSession({
+            providerSessionId: created.providerSessionId,
+            credentialRef: created.credentialRef,
+            credentialFingerprint: created.credentialFingerprint
+          });
+        } catch (cleanupError) {
+          console.warn(`[Session Create] Failed to cleanup orphaned CodeSandbox VM ${created.providerSessionId}: ${cleanupError.message}`);
+        }
+
+        return res.status(500).json({
+          error: 'Failed to create session due to credential conflict',
+          code: 'INTERNAL_ERROR'
+        });
+      }
+
+      // For any other error, throw it
+      throw dbError;
+    }
 
     const sessionRow = await db.get('SELECT * FROM sessions WHERE id = ?', [id]);
 

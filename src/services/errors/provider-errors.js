@@ -36,9 +36,40 @@ class SessionNotReadyError extends ProviderError {
   }
 }
 
+class InvalidCredentialsError extends ProviderError {
+  constructor(message) {
+    super(message, {
+      code: 'INVALID_CREDENTIALS',
+      statusCode: 400,
+      details: { reason: 'credentials_invalid' }
+    });
+  }
+}
+
+class ConflictError extends ProviderError {
+  constructor(message) {
+    super(message, {
+      code: 'CONFLICT',
+      statusCode: 409
+    });
+  }
+}
+
+class ProviderUnavailableError extends ProviderError {
+  constructor(message) {
+    super(message, {
+      code: 'PROVIDER_UNAVAILABLE',
+      statusCode: 503
+    });
+  }
+}
+
 module.exports = {
   ProviderError,
   UnsupportedProviderError,
   ProviderNotImplementedError,
-  SessionNotReadyError
+  SessionNotReadyError,
+  InvalidCredentialsError,
+  ConflictError,
+  ProviderUnavailableError
 };

@@ -128,5 +128,6 @@ module.exports = {
   isS3fsEnabled,
   buildS3Client,
   resolveBucketAndKey,
-  initGoogleCredentialsFromS3IfNeeded
+  initGoogleCredentialsFromS3IfNeeded,
+  streamToBuffer
 };

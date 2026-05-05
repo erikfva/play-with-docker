@@ -18,7 +18,7 @@ const port = process.env.PORT || 3000;
 app.use(bodyParser.json());
 
 // Routes
-app.use('/api/v1/sessions', requireServerToken, setGoogleCredentials, sessionRoutes);
+app.use('/api/v1/sessions', requireServerToken, sessionRoutes);
 
 // Health Check
 app.get('/health', (req, res) => {
