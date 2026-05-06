@@ -1,10 +1,10 @@
 @baseUrl = http://localhost:3000/api/v1
-@s3EndPoint = https://s3.
-@s3AccessKeyId = 8S
-@s3SecretAccessKey = mi
-@s3Region = 8S
+@s3EndPoint = {{$dotenv S3_ENDPOINT}}
+@s3AccessKeyId = {{$dotenv AWS_ACCESS_KEY_ID}}
+@s3SecretAccessKey = {{$dotenv AWS_SECRET_ACCESS_KEY}}
+@s3Region = {{$dotenv S3_REGION}}
 @tokenNgrok = 3M
-@serverToken = ZZ8dnFx2CRItYfg0iGQ0
+@serverToken = {{$dotenv SERVER_TOKEN}}
 
 ### 1. Health Check
 GET http://localhost:3000/health
@@ -225,6 +225,15 @@ X-Server-Token: {{serverToken}}
 
 {
     "command": "free -h && lscpu"
+}
+
+### 19.2 Execute Basic Shell Command in CodeSandbox Session
+POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "docker run -d -e PUID=1000 -e PGID=1000 -e TZ=Etc/UTC -e PASSWORD=password -e HASHED_PASSWORD= -e SUDO_PASSWORD=password -e SUDO_PASSWORD_HASH= -e DEFAULT_WORKSPACE=/config/workspace -e S3_ACCESS_KEY_ID={{s3AccessKeyId}} -e S3_SECRET_ACCESS_KEY={{s3SecretAccessKey}} -e S3_BUCKET=code-server -e S3_ENDPOINT={{s3EndPoint}} -e S3_REGION={{s3Region}} -e INIT_FILE=init-code-server.sh -e GIT_USER_NAME=erikfva -e GIT_USER_EMAIL=erik.vargas@yandex.com -e TOKEN_NGROK={{tokenNgrok}} -e HTTPS_PORTS=8443,8081 -p 8443:8443 -p 8081:8081 -p 3000:3000 -v /config:/config -v /var/run/docker.sock:/var/run/docker.sock --restart unless-stopped --privileged --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined --network=host erikvargas/code-server:latest"
 }
 
 ### 20. Terminate CodeSandbox Session
