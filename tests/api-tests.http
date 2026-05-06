@@ -157,13 +157,14 @@ X-Server-Token: {{serverToken}}
 # configured through CODESANDBOX_DEFAULT_CREDENTIALS or x-codesandbox-credentials.
 
 @codeSandboxTitle = lab-codesandbox-smoke-test
+@codeSandboxCredentials = codesandbox/etecnologysys.json
 
 ### 15. List Supported Providers - Should Include codesandbox
 GET {{baseUrl}}/sessions/providers/supported
 X-Server-Token: {{serverToken}}
 
 ### 16. Create a CodeSandbox Session
-# @name createCodeSandboxSession
+# @name createCodeSandboxSessionDefault
 POST {{baseUrl}}/sessions
 Content-Type: application/json
 X-Server-Token: {{serverToken}}
@@ -171,6 +172,22 @@ X-Server-Token: {{serverToken}}
 {
     "provider": "codesandbox",
     "title": "{{codeSandboxTitle}}",
+    "privacy": "public-hosts",
+    "vmTier": "Nano",
+    "hibernationTimeoutSeconds": 86400
+}
+
+### 16.1. Create a CodeSandbox Session with custom Credentials Header
+# Sends the CodeSandbox credential JSON file reference explicitly.
+# @name createCodeSandboxSession
+POST {{baseUrl}}/sessions
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+X-CodeSandbox-Credentials: {{codeSandboxCredentials}}
+
+{
+    "provider": "codesandbox",
+    "title": "{{codeSandboxTitle}}-with-credentials",
     "privacy": "public-hosts",
     "vmTier": "Nano",
     "hibernationTimeoutSeconds": 86400
@@ -189,7 +206,7 @@ Content-Type: application/json
 X-Server-Token: {{serverToken}}
 
 {
-    "command": "pwd && node --version"
+    "command": "pwd && echo codesandbox-command-ok"
 }
 
 ### 19. Execute Basic Shell Command in CodeSandbox Session
@@ -198,7 +215,16 @@ Content-Type: application/json
 X-Server-Token: {{serverToken}}
 
 {
-    "command": "echo hello-from-codesandbox"
+    "command": "docker ps"
+}
+
+### 19.1 Execute Basic Shell Command in CodeSandbox Session
+POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "free -h && lscpu"
 }
 
 ### 20. Terminate CodeSandbox Session

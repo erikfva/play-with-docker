@@ -13,6 +13,7 @@ async function withCredentialDir(fn) {
     CODESANDBOX_CREDENTIALS_DIR: process.env.CODESANDBOX_CREDENTIALS_DIR,
     CODESANDBOX_DEFAULT_CREDENTIALS: process.env.CODESANDBOX_DEFAULT_CREDENTIALS,
     S3FS_ENABLED: process.env.S3FS_ENABLED,
+    S3_MOUNT_DIR: process.env.S3_MOUNT_DIR,
     S3_BUCKET: process.env.S3_BUCKET
   };
 
@@ -52,6 +53,36 @@ test('loads a valid CodeSandbox credential file and computes a fingerprint', asy
     assert.equal(result.credentialRef, 'valid.json');
     assert.match(result.credentialFingerprint, /^sha256:[a-f0-9]{64}$/);
     assert.notEqual(result.credentialFingerprint, 'test-token');
+  });
+});
+
+test('loads from CodeSandbox credential directory when S3FS is disabled', async () => {
+  await withCredentialDir(async (dir) => {
+    process.env.S3FS_ENABLED = '0';
+    process.env.S3_BUCKET = 'play-with-docker';
+    await fs.writeFile(path.join(dir, 'disk-mode.json'), JSON.stringify({ token: 'disk-token' }));
+
+    const result = await loadCodeSandboxCredentials('disk-mode.json');
+
+    assert.equal(result.token, 'disk-token');
+    assert.equal(result.credentialRef, 'disk-mode.json');
+    assert.match(result.credentialFingerprint, /^sha256:[a-f0-9]{64}$/);
+  });
+});
+
+test('falls back to S3_MOUNT_DIR when CodeSandbox credential directory is unset', async () => {
+  await withCredentialDir(async (dir) => {
+    process.env.S3FS_ENABLED = '0';
+    process.env.S3_BUCKET = 'play-with-docker';
+    process.env.S3_MOUNT_DIR = dir;
+    delete process.env.CODESANDBOX_CREDENTIALS_DIR;
+    await fs.writeFile(path.join(dir, 'mount-dir.json'), JSON.stringify({ token: 'mount-token' }));
+
+    const result = await loadCodeSandboxCredentials('mount-dir.json');
+
+    assert.equal(result.token, 'mount-token');
+    assert.equal(result.credentialRef, 'mount-dir.json');
+    assert.match(result.credentialFingerprint, /^sha256:[a-f0-9]{64}$/);
   });
 });
 

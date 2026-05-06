@@ -14,7 +14,8 @@ const {
 // Import VMTier constants from SDK
 const { VMTier } = require('@codesandbox/sdk');
 
-const CODESANDBOX_DOCKER_TEMPLATE_ID = 'docker';
+const CODESANDBOX_DOCKER_TEMPLATE_ALIAS = 'docker';
+const DEFAULT_CODESANDBOX_DOCKER_TEMPLATE_ID = 'hsd8ke';
 
 function parseMetadata(metadata) {
   if (!metadata) {
@@ -235,7 +236,7 @@ class CodeSandboxProvider extends BaseProvider {
     }
 
     this.validateDockerTemplateOnly(templateId);
-    options.id = CODESANDBOX_DOCKER_TEMPLATE_ID;
+    options.id = this.getDockerTemplateId();
 
     // Add description if provided
     if (description) {
@@ -265,7 +266,7 @@ class CodeSandboxProvider extends BaseProvider {
       return;
     }
 
-    if (String(templateId).trim().toLowerCase() === CODESANDBOX_DOCKER_TEMPLATE_ID) {
+    if (String(templateId).trim().toLowerCase() === CODESANDBOX_DOCKER_TEMPLATE_ALIAS) {
       return;
     }
 
@@ -273,6 +274,10 @@ class CodeSandboxProvider extends BaseProvider {
       code: 'CODESANDBOX_TEMPLATE_UNSUPPORTED',
       statusCode: 400
     });
+  }
+
+  getDockerTemplateId() {
+    return process.env.CODESANDBOX_DOCKER_TEMPLATE_ID || DEFAULT_CODESANDBOX_DOCKER_TEMPLATE_ID;
   }
 
   normalizeAutomaticWakeupConfig(value) {
@@ -545,10 +550,25 @@ class CodeSandboxProvider extends BaseProvider {
         return;
       }
 
-      // Delete sandbox
+      try {
+        await client.sandboxes.shutdown(providerSessionId);
+        console.log(`[CodeSandbox] Shutdown session ${providerSessionId}`);
+      } catch (shutdownError) {
+        if (isNotFoundError(shutdownError)) {
+          console.log(`[CodeSandbox] Session ${providerSessionId} already absent before shutdown`);
+        } else {
+          console.warn(`[CodeSandbox] Failed to shutdown session ${providerSessionId} before delete: ${shutdownError.message}`);
+        }
+      }
+
       await client.sandboxes.delete(providerSessionId);
       console.log(`[CodeSandbox] Deleted session ${providerSessionId}`);
     } catch (error) {
+      if (isNotFoundError(error)) {
+        console.log('[CodeSandbox] Session already deleted during termination');
+        return;
+      }
+
       console.error('[CodeSandbox] Terminate session failed:', error.message);
       throw this.translateError(error);
     }
@@ -565,6 +585,22 @@ class CodeSandboxProvider extends BaseProvider {
     // CodeSandbox SDK errors
     if (error.message) {
       const msg = error.message.toLowerCase();
+
+      if (
+        error.name === 'CommandError'
+        || Number.isInteger(error.exitCode)
+        || msg.includes('command failed')
+        || msg.includes('non-zero exit code')
+      ) {
+        return new ProviderError('CodeSandbox command failed', {
+          code: 'CODESANDBOX_COMMAND_FAILED',
+          statusCode: 500,
+          details: {
+            exitCode: Number.isInteger(error.exitCode) ? error.exitCode : undefined,
+            output: typeof error.output === 'string' ? error.output : undefined
+          }
+        });
+      }
 
       if (msg.includes('token') && msg.includes('invalid')) {
         return new InvalidCredentialsError('CodeSandbox token is invalid');

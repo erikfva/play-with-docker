@@ -20,6 +20,10 @@ function getCredentialsDirectory() {
   return process.env.CODESANDBOX_CREDENTIALS_DIR || process.env.S3_MOUNT_DIR || '/tmp/codesandbox';
 }
 
+function shouldResolveRelativeRefsFromFilesystem() {
+  return Boolean(process.env.CODESANDBOX_CREDENTIALS_DIR || process.env.S3_MOUNT_DIR) || isS3fsEnabled();
+}
+
 function resolveCredentialReference(credentialRef) {
   if (!credentialRef) {
     throw codeSandboxCredentialError(
@@ -46,7 +50,7 @@ function resolveCredentialReference(credentialRef) {
   }
 
   const bucket = process.env.S3_BUCKET;
-  if (bucket && !isS3fsEnabled()) {
+  if (bucket && !shouldResolveRelativeRefsFromFilesystem()) {
     // S3 API mode: treat as object key under S3_BUCKET
     const key = credentialRef.replace(/^\/+/, '');
     return {
