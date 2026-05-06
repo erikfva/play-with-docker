@@ -8,8 +8,6 @@ const bodyParser = require('body-parser');
 const db = require('./db/db');
 const sessionRoutes = require('./routes/sessions');
 const { requireServerToken } = require('./middleware/require-server-token');
-const { setGoogleCredentials } = require('./middleware/set-google-credentials')
-const { initGoogleCredentialsFromS3IfNeeded } = require('./services/google-credentials-loader');
 const keepAliveService = require('./services/keep-alive-service');
 
 const app = express();
@@ -27,7 +25,6 @@ app.get('/health', (req, res) => {
 
 async function startServer() {
   try {
-    await initGoogleCredentialsFromS3IfNeeded();
     await db.ready;
     console.log('db ready in server');
 

@@ -18,10 +18,11 @@
   - Account for PostgreSQL lowercasing of unquoted identifiers.
   - Keep provider helpers tolerant of both camelCase and lowercase row properties.
 
-- [ ] LAB-005-T04: Add active-token uniqueness enforcement.
+- [ ] LAB-005-T04: Add sandbox/session-per-token uniqueness enforcement.
   - Add startup creation for a PostgreSQL partial unique index on active CodeSandbox `credentialFingerprint`.
   - Add an `ensureIndex` helper or direct `CREATE UNIQUE INDEX IF NOT EXISTS` bootstrap call.
   - Treat `TERMINATED`, `DELETED`, and `FAILED` as terminal statuses.
+  - Return the existing session for the token when a duplicate create is requested.
 
 ## 3. Credential Loading
 
@@ -70,9 +71,11 @@
 
 - [ ] LAB-005-T11: Implement CodeSandbox create flow.
   - Load selected credential.
-  - Enforce one active VM per token before provider create.
+  - Check for an existing session for the token before provider create.
+  - Return the existing session instead of creating another sandbox when one exists.
   - Build SDK create options.
-  - Map `templateId` to SDK `id`.
+  - Always set SDK `id` to `docker`.
+  - Reject non-Docker legacy `templateId` values before calling CodeSandbox.
   - Map string `vmTier` to SDK `VMTier`.
   - Support `title`, `description`, `tags`, `privacy`, `path`, `hibernationTimeoutSeconds`, and `automaticWakeupConfig`.
   - Return normalized session data with credential fields.
@@ -113,7 +116,7 @@
   - Pass `x-codesandbox-credentials` into provider context.
   - Persist `webHost`, `sshCommand`, `credentialRef`, and `credentialFingerprint` when returned.
   - Store `envName` as `created.envName || created.providerSessionId`.
-  - Handle unique-index conflicts as `409`.
+  - Handle unique-index conflicts by returning the existing CodeSandbox session.
   - Best-effort delete the just-created sandbox if DB insert fails after provider create.
 
 - [ ] LAB-005-T18: Update command route only if needed.
@@ -141,12 +144,12 @@
 - [ ] LAB-005-T20: Update docs.
   - Update `README.md`.
   - Update `ai/project-overview.md`.
-  - Document credential JSON format, `CODESANDBOX_DEFAULT_CREDENTIALS`, `x-codesandbox-credentials`, one-VM-per-token behavior, and termination semantics.
+  - Document credential JSON format, `CODESANDBOX_DEFAULT_CREDENTIALS`, `x-codesandbox-credentials`, Docker-only creation, one sandbox/session per token behavior, and termination semantics.
 
 - [ ] LAB-005-T21: Update HTTP request collection.
   - Ensure `tests/api-tests.http` has CodeSandbox create/get/command/delete requests.
   - Use `x-codesandbox-credentials`.
-  - Add duplicate active-token conflict check.
+  - Add duplicate token reuse check.
   - Add missing/malformed credential scenario notes.
 
 ## 8. Verification
@@ -169,8 +172,8 @@
   - Provider discovery includes `codesandbox`.
   - CodeSandbox routes do not require Google credentials.
   - GCS routes still support `x-google-credentials`.
-  - Duplicate active token returns `409`.
-  - DB unique-index conflict triggers best-effort sandbox cleanup.
+  - Duplicate token returns the existing session without creating a new sandbox.
+  - DB unique-index conflict triggers best-effort sandbox cleanup and returns the existing session.
 
 - [ ] LAB-005-T25: Run verification.
   - Run automated tests if configured.
@@ -182,9 +185,11 @@
 
 - [ ] `codesandbox` appears in supported providers.
 - [ ] CodeSandbox session create/get/command/delete works.
+- [ ] CodeSandbox creation uses the Docker template only.
 - [ ] CodeSandbox token is loaded from JSON file in S3 or server directory.
 - [ ] Raw token is never returned, logged, or persisted.
-- [ ] One active CodeSandbox VM per token is enforced.
+- [ ] One CodeSandbox sandbox/session per token is enforced.
+- [ ] Duplicate CodeSandbox create requests for the same token reuse and return the existing session.
 - [ ] CodeSandbox routes do not require Google credential configuration.
 - [ ] Existing GCS behavior is preserved.
 - [ ] Docs and HTTP examples are updated.

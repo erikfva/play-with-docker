@@ -123,7 +123,31 @@ db.ready = (async () => {
   await run("UPDATE sessions SET provider = 'gcs' WHERE provider IS NULL OR provider = ''");
   await run('UPDATE sessions SET providerSessionId = envName WHERE providerSessionId IS NULL AND envName IS NOT NULL');
 
-  // Add unique index for active CodeSandbox sessions (one VM per token)
+  const duplicateCodeSandboxSessions = await all(`
+    SELECT
+      credentialFingerprint,
+      COUNT(*) AS activeCount,
+      ARRAY_AGG(id ORDER BY createdAt DESC, id DESC) AS sessionIds
+    FROM sessions
+    WHERE provider = 'codesandbox'
+      AND credentialFingerprint IS NOT NULL
+      AND COALESCE(status, '') NOT IN ('TERMINATED', 'DELETED', 'FAILED')
+    GROUP BY credentialFingerprint
+    HAVING COUNT(*) > 1
+  `);
+
+  if (duplicateCodeSandboxSessions.length > 0) {
+    const duplicateSummary = duplicateCodeSandboxSessions
+      .map((row) => `${row.credentialfingerprint || row.credentialFingerprint}: ${(row.sessionids || row.sessionIds || []).join(', ')}`)
+      .join('; ');
+
+    throw new Error(
+      `Cannot create CodeSandbox token uniqueness index while duplicate non-terminal sessions exist. ` +
+      `Terminate or mark older duplicate sessions as TERMINATED, DELETED, or FAILED first. Duplicates: ${duplicateSummary}`
+    );
+  }
+
+  // Add unique index for active CodeSandbox sessions (one sandbox/session per token)
   await run(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_codesandbox_active_token
     ON sessions (credentialFingerprint)

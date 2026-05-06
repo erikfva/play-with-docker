@@ -150,3 +150,81 @@ X-Server-Token: {{serverToken}}
 ### 14.1. List Available Google Credentials with Prefix Filter
 GET {{baseUrl}}/sessions/google-credentials?prefix=gcloud/
 X-Server-Token: {{serverToken}}
+
+###
+# CodeSandbox Provider Tests
+# Requires the LAB-005 implementation and a CodeSandbox credential JSON file
+# configured through CODESANDBOX_DEFAULT_CREDENTIALS or x-codesandbox-credentials.
+
+@codeSandboxTitle = lab-codesandbox-smoke-test
+
+### 15. List Supported Providers - Should Include codesandbox
+GET {{baseUrl}}/sessions/providers/supported
+X-Server-Token: {{serverToken}}
+
+### 16. Create a CodeSandbox Session
+# @name createCodeSandboxSession
+POST {{baseUrl}}/sessions
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "provider": "codesandbox",
+    "title": "{{codeSandboxTitle}}",
+    "privacy": "public-hosts",
+    "vmTier": "Nano",
+    "hibernationTimeoutSeconds": 86400
+}
+
+###
+@codeSandboxSessionId = {{createCodeSandboxSession.response.body.$.id}}
+
+### 17. Get CodeSandbox Session Details
+GET {{baseUrl}}/sessions/{{codeSandboxSessionId}}
+X-Server-Token: {{serverToken}}
+
+### 18. Execute Command in CodeSandbox Session
+POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "pwd && node --version"
+}
+
+### 19. Execute Basic Shell Command in CodeSandbox Session
+POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "echo hello-from-codesandbox"
+}
+
+### 20. Terminate CodeSandbox Session
+DELETE {{baseUrl}}/sessions/{{codeSandboxSessionId}}
+X-Server-Token: {{serverToken}}
+
+### 21. Reject Non-Docker CodeSandbox Template
+# Expected: 400 CODESANDBOX_TEMPLATE_UNSUPPORTED.
+POST {{baseUrl}}/sessions
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "provider": "codesandbox",
+    "title": "non-docker-template-check",
+    "templateId": "node"
+}
+
+### 22. CodeSandbox Create Without Server Configuration
+# Run this after starting the server without CODESANDBOX_DEFAULT_CREDENTIALS.
+# Expected: structured configuration error and no persisted session.
+POST {{baseUrl}}/sessions
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "provider": "codesandbox",
+    "title": "missing-config-check"
+}

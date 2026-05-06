@@ -1,8 +1,8 @@
 const BaseProvider = require('./base-provider');
+const db = require('../../db/db');
 const codesandboxClient = require('./codesandbox/client');
 const { loadCodeSandboxCredentials } = require('./codesandbox/credentials-loader');
 const { mapToSession } = require('./codesandbox/session-mapper');
-const db = require('../../db/db');
 const {
   ProviderError,
   SessionNotReadyError,
@@ -13,6 +13,52 @@ const {
 
 // Import VMTier constants from SDK
 const { VMTier } = require('@codesandbox/sdk');
+
+const CODESANDBOX_DOCKER_TEMPLATE_ID = 'docker';
+
+function parseMetadata(metadata) {
+  if (!metadata) {
+    return {};
+  }
+
+  if (typeof metadata === 'object') {
+    return metadata;
+  }
+
+  try {
+    return JSON.parse(metadata);
+  } catch (_) {
+    return {};
+  }
+}
+
+function getRowValue(row, camelName, lowerName) {
+  return row[camelName] || row[lowerName];
+}
+
+function normalizeSessionRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    provider: row.provider,
+    providerSessionId: getRowValue(row, 'providerSessionId', 'providersessionid'),
+    envName: getRowValue(row, 'envName', 'envname'),
+    status: row.status,
+    webHost: getRowValue(row, 'webHost', 'webhost'),
+    sshCommand: getRowValue(row, 'sshCommand', 'sshcommand'),
+    credentialRef: getRowValue(row, 'credentialRef', 'credentialref'),
+    credentialFingerprint: getRowValue(row, 'credentialFingerprint', 'credentialfingerprint'),
+    metadata: parseMetadata(row.metadata)
+  };
+}
+
+function isNotFoundError(error) {
+  const message = String(error?.message || '').toLowerCase();
+  return message.includes('not found') || message.includes('does not exist') || message.includes('404');
+}
 
 class CodeSandboxProvider extends BaseProvider {
   constructor() {
@@ -38,19 +84,25 @@ class CodeSandboxProvider extends BaseProvider {
    */
   async isSessionActive(sessionRow) {
     try {
+      const metadata = parseMetadata(sessionRow.metadata);
       // Handle PostgreSQL lowercasing of unquoted identifiers
-      const credentialFingerprint = sessionRow.credentialFingerprint || sessionRow.credentialfingerprint || sessionRow.metadata?.credentialFingerprint;
-      const providerSessionId = sessionRow.providerSessionId || sessionRow.providersessionid;
+      const credentialRef = getRowValue(sessionRow, 'credentialRef', 'credentialref') || metadata.credentialRef;
+      const providerSessionId = getRowValue(sessionRow, 'providerSessionId', 'providersessionid');
 
       if (!providerSessionId) {
         return false;
       }
 
-      const client = codesandboxClient.getClient(credentialFingerprint);
+      if (!credentialRef) {
+        return false;
+      }
 
-      // Try to get sandbox status without waking it
-      const sandbox = await client.sandboxes.get(providerSessionId);
-      return sandbox.status === 'RUNNING';
+      const credentialData = await loadCodeSandboxCredentials(credentialRef);
+      const client = codesandboxClient.getClient(credentialData.token);
+
+      const running = await client.sandboxes.listRunning();
+      return Array.isArray(running?.vms)
+        && running.vms.some((vm) => vm.id === providerSessionId);
     } catch (error) {
       console.warn(`[CodeSandbox] Failed to check session active status: ${error.message}`);
       return false;
@@ -75,13 +127,13 @@ class CodeSandboxProvider extends BaseProvider {
    * @param {string} options.credentialRef - Optional credential reference from header
    * @param {string} options.title - Sandbox title
    * @param {string} options.description - Sandbox description
-   * @param {string} options.templateId - Template ID to fork from
+   * @param {string} options.templateId - Optional legacy template value; only "docker" is accepted
    * @param {string} options.tags - Tags array
    * @param {string} options.privacy - Privacy setting (public, private, public-hosts)
    * @param {string} options.path - Path in sandbox
    * @param {string} options.vmTier - VM tier (Nano, Micro, Small, Medium, Large)
    * @param {number} options.hibernationTimeoutSeconds - Hibernation timeout in seconds
-   * @param {boolean} options.automaticWakeupConfig - Automatic wakeup configuration
+   * @param {Object|boolean} options.automaticWakeupConfig - Automatic wakeup configuration
    * @returns {Object} Normalized session data
    */
   async createSession(options = {}) {
@@ -99,12 +151,23 @@ class CodeSandboxProvider extends BaseProvider {
     } = options || {};
 
     try {
+      this.validateDockerTemplateOnly(templateId);
+
       // Step 1: Load credentials
       const credentialData = await loadCodeSandboxCredentials(credentialRef);
       const { token, credentialRef: resolvedRef, credentialFingerprint } = credentialData;
 
-      // Step 2: Enforce one active VM per token
-      await this.enforceOneActiveSessionPerToken(credentialFingerprint);
+      // Step 2: Reuse an existing sandbox/session for this token when present
+      const existingSession = await this.findActiveSessionForToken(credentialFingerprint);
+      if (existingSession) {
+        const reusableSession = await this.getReusableExistingSession(existingSession, token);
+        if (reusableSession) {
+          return {
+            existing: true,
+            session: reusableSession
+          };
+        }
+      }
 
       // Step 3: Build SDK create options
       const createOptions = this.buildCreateOptions({
@@ -159,22 +222,20 @@ class CodeSandboxProvider extends BaseProvider {
     const defaultHibernation = hibernationTimeoutSeconds !== undefined
       ? hibernationTimeoutSeconds
       : parseInt(process.env.CODESANDBOX_HIBERNATION_TIMEOUT_SECONDS || '86400', 10);
-    const defaultWakeup = automaticWakeupConfig !== undefined
-      ? automaticWakeupConfig
-      : process.env.CODESANDBOX_AUTOMATIC_WAKEUP === 'true';
-
     // Build options object
     const options = {
       title: defaultTitle,
       privacy: defaultPrivacy,
-      hibernationTimeoutSeconds: defaultHibernation,
-      automaticWakeupConfig: defaultWakeup
+      hibernationTimeoutSeconds: defaultHibernation
     };
 
-    // Add template ID if provided
-    if (templateId) {
-      options.id = templateId;
+    const wakeupConfig = this.normalizeAutomaticWakeupConfig(automaticWakeupConfig);
+    if (wakeupConfig) {
+      options.automaticWakeupConfig = wakeupConfig;
     }
+
+    this.validateDockerTemplateOnly(templateId);
+    options.id = CODESANDBOX_DOCKER_TEMPLATE_ID;
 
     // Add description if provided
     if (description) {
@@ -199,6 +260,47 @@ class CodeSandboxProvider extends BaseProvider {
     return options;
   }
 
+  validateDockerTemplateOnly(templateId) {
+    if (!templateId) {
+      return;
+    }
+
+    if (String(templateId).trim().toLowerCase() === CODESANDBOX_DOCKER_TEMPLATE_ID) {
+      return;
+    }
+
+    throw new ProviderError('CodeSandbox provider only supports Docker sandboxes', {
+      code: 'CODESANDBOX_TEMPLATE_UNSUPPORTED',
+      statusCode: 400
+    });
+  }
+
+  normalizeAutomaticWakeupConfig(value) {
+    if (value && typeof value === 'object') {
+      return {
+        http: Boolean(value.http),
+        websocket: Boolean(value.websocket)
+      };
+    }
+
+    if (typeof value === 'boolean') {
+      return {
+        http: value,
+        websocket: false
+      };
+    }
+
+    if (process.env.CODESANDBOX_AUTOMATIC_WAKEUP === undefined) {
+      return null;
+    }
+
+    const enabled = String(process.env.CODESANDBOX_AUTOMATIC_WAKEUP).trim().toLowerCase() === 'true';
+    return {
+      http: enabled,
+      websocket: false
+    };
+  }
+
   /**
    * Map VM tier string to SDK VMTier enum
    */
@@ -208,8 +310,6 @@ class CodeSandboxProvider extends BaseProvider {
     switch (normalized) {
       case 'NANO':
         return VMTier.Nano;
-      case 'NANO2':
-        return VMTier.Nano2;
       case 'MICRO':
         return VMTier.Micro;
       case 'SMALL':
@@ -220,26 +320,90 @@ class CodeSandboxProvider extends BaseProvider {
         return VMTier.Large;
       case 'XLARGE':
         return VMTier.XLarge;
+      case 'PICO':
+        return VMTier.Pico;
       default:
-        throw new Error(`Unsupported VM tier: ${tierString}. Supported: Nano, Nano2, Micro, Small, Medium, Large, XLarge`);
+        throw new Error(`Unsupported VM tier: ${tierString}. Supported: Pico, Nano, Micro, Small, Medium, Large, XLarge`);
     }
   }
 
   /**
-   * Enforce one active session per token
+   * Enforce one sandbox/session per token
    * Uses database unique index for race-safe enforcement
    */
-  async enforceOneActiveSessionPerToken(credentialFingerprint) {
+  async findActiveSessionForToken(credentialFingerprint) {
     if (!credentialFingerprint) {
       throw new Error('credentialFingerprint is required for one-session-per-token enforcement');
     }
 
     try {
-      // The unique index will prevent duplicates at database level
-      // We don't need to check here; the insert will fail if duplicate exists
-      return;
+      return db.get(
+        `SELECT * FROM sessions
+         WHERE provider = ?
+           AND credentialFingerprint = ?
+           AND (status IS NULL OR status NOT IN (?, ?, ?))
+         LIMIT 1`,
+        ['codesandbox', credentialFingerprint, 'TERMINATED', 'DELETED', 'FAILED']
+      );
     } catch (error) {
-      throw new Error(`Failed to enforce one-session-per-token: ${error.message}`);
+      if (error instanceof ProviderError) {
+        throw error;
+      }
+
+      throw new Error(`Failed to find CodeSandbox session for token: ${error.message}`);
+    }
+  }
+
+  async getReusableExistingSession(existingSession, token) {
+    const normalized = normalizeSessionRow(existingSession);
+    if (!normalized?.providerSessionId) {
+      await this.markSessionStale(existingSession.id, 'Missing CodeSandbox providerSessionId');
+      return null;
+    }
+
+    const client = codesandboxClient.getClient(token);
+    try {
+      const sandbox = await client.sandboxes.get(normalized.providerSessionId);
+      return {
+        ...normalized,
+        envName: sandbox.title || normalized.envName || normalized.providerSessionId,
+        status: sandbox.status ? mapStatus(sandbox.status) : normalized.status,
+        metadata: {
+          ...(normalized.metadata || {}),
+          ...(sandbox.title ? { title: sandbox.title } : {}),
+          ...(sandbox.privacy ? { privacy: sandbox.privacy } : {}),
+          ...(sandbox.tags ? { tags: sandbox.tags } : {})
+        }
+      };
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        await this.markSessionStale(existingSession.id, error.message);
+        return null;
+      }
+
+      throw error;
+    }
+  }
+
+  async markSessionStale(sessionId, reason) {
+    if (!sessionId) {
+      return;
+    }
+
+    await db.run(
+      `UPDATE sessions
+       SET status = ?,
+           metadata = COALESCE(metadata, ?)
+       WHERE id = ?`,
+      ['DELETED', JSON.stringify({ staleReason: reason }), sessionId]
+    );
+    console.warn(`[CodeSandbox] Marked stale session ${sessionId} as DELETED: ${reason}`);
+  }
+
+  async enforceOneActiveSessionPerToken(credentialFingerprint) {
+    const existingSession = await this.findActiveSessionForToken(credentialFingerprint);
+    if (existingSession) {
+      throw new ConflictError('A CodeSandbox session with this token already exists');
     }
   }
 
@@ -248,11 +412,17 @@ class CodeSandboxProvider extends BaseProvider {
    */
   async refreshSession(sessionRow) {
     try {
-      const credentialFingerprint = sessionRow.credentialFingerprint || sessionRow.metadata?.credentialFingerprint;
-      const credentialRef = sessionRow.credentialRef || sessionRow.metadata?.credentialRef;
+      const metadata = parseMetadata(sessionRow.metadata);
+      // Handle PostgreSQL lowercasing of unquoted identifiers
+      const credentialFingerprint = getRowValue(sessionRow, 'credentialFingerprint', 'credentialfingerprint') || metadata.credentialFingerprint;
+      const credentialRef = getRowValue(sessionRow, 'credentialRef', 'credentialref') || metadata.credentialRef;
+      const providerSessionId = getRowValue(sessionRow, 'providerSessionId', 'providersessionid');
 
       if (!credentialFingerprint || !credentialRef) {
         throw new Error('Session is missing credential information');
+      }
+      if (!providerSessionId) {
+        throw new Error('Session is missing providerSessionId');
       }
 
       // Load token from credential reference
@@ -260,7 +430,7 @@ class CodeSandboxProvider extends BaseProvider {
       const client = codesandboxClient.getClient(credentialData.token);
 
       // Get sandbox details (non-waking lookup)
-      const sandbox = await client.sandboxes.get(sessionRow.providerSessionId);
+      const sandbox = await client.sandboxes.get(providerSessionId);
 
       // Map to refresh response
       const refreshData = this.mapRefreshData(sandbox, credentialRef, credentialFingerprint);
@@ -274,9 +444,11 @@ class CodeSandboxProvider extends BaseProvider {
 
   mapRefreshData(sandbox, credentialRef, credentialFingerprint) {
     return {
-      status: mapStatus(sandbox.status || 'RUNNING'),
+      status: sandbox.status ? mapStatus(sandbox.status) : undefined,
       metadata: {
         ...(sandbox.title ? { title: sandbox.title } : {}),
+        ...(sandbox.privacy ? { privacy: sandbox.privacy } : {}),
+        ...(sandbox.tags ? { tags: sandbox.tags } : {}),
         ...(sandbox.cluster ? { cluster: sandbox.cluster } : {}),
         ...(sandbox.bootupType ? { bootupType: sandbox.bootupType } : {}),
         ...(sandbox.isUpToDate !== undefined ? { isUpToDate: sandbox.isUpToDate } : {}),
@@ -295,10 +467,11 @@ class CodeSandboxProvider extends BaseProvider {
     }
 
     try {
+      const metadata = parseMetadata(sessionRow.metadata);
       // Handle PostgreSQL lowercasing of unquoted identifiers
-      const credentialFingerprint = sessionRow.credentialFingerprint || sessionRow.credentialfingerprint || sessionRow.metadata?.credentialFingerprint;
-      const credentialRef = sessionRow.credentialRef || sessionRow.credentialref || sessionRow.metadata?.credentialRef;
-      const providerSessionId = sessionRow.providerSessionId || sessionRow.providersessionid;
+      const credentialFingerprint = getRowValue(sessionRow, 'credentialFingerprint', 'credentialfingerprint') || metadata.credentialFingerprint;
+      const credentialRef = getRowValue(sessionRow, 'credentialRef', 'credentialref') || metadata.credentialRef;
+      const providerSessionId = getRowValue(sessionRow, 'providerSessionId', 'providersessionid');
 
       if (!credentialFingerprint || !credentialRef) {
         throw new Error('Session is missing credential information');
@@ -313,18 +486,13 @@ class CodeSandboxProvider extends BaseProvider {
       }
 
       const sandboxId = providerSessionId;
+      let sandbox;
 
-      // Resume sandbox if suspended
-      const sandbox = await client.sandboxes.get(sandboxId);
-
-      if (sandbox.status !== 'RUNNING') {
-        // Attempt to resume
-        try {
-          await client.sandboxes.resume(sandboxId);
-          console.log(`[CodeSandbox] Resumed session ${sandboxId}`);
-        } catch (resumeError) {
-          throw new SessionNotReadyError(`Session is ${sandbox.status} and could not be resumed: ${resumeError.message}`);
-        }
+      try {
+        sandbox = await client.sandboxes.resume(sandboxId);
+        console.log(`[CodeSandbox] Resumed session ${sandboxId}`);
+      } catch (resumeError) {
+        throw new SessionNotReadyError(`Session ${sandboxId} could not be resumed: ${resumeError.message}`);
       }
 
       // Connect to sandbox
@@ -357,10 +525,11 @@ class CodeSandboxProvider extends BaseProvider {
    */
   async terminateSession(sessionRow) {
     try {
+      const metadata = parseMetadata(sessionRow.metadata);
       // Handle PostgreSQL lowercasing of unquoted identifiers
-      const credentialFingerprint = sessionRow.credentialFingerprint || sessionRow.credentialfingerprint || sessionRow.metadata?.credentialFingerprint;
-      const credentialRef = sessionRow.credentialRef || sessionRow.credentialref || sessionRow.metadata?.credentialRef;
-      const providerSessionId = sessionRow.providerSessionId || sessionRow.providersessionid;
+      const credentialFingerprint = getRowValue(sessionRow, 'credentialFingerprint', 'credentialfingerprint') || metadata.credentialFingerprint;
+      const credentialRef = getRowValue(sessionRow, 'credentialRef', 'credentialref') || metadata.credentialRef;
+      const providerSessionId = getRowValue(sessionRow, 'providerSessionId', 'providersessionid');
 
       if (!credentialFingerprint || !credentialRef) {
         console.warn('[CodeSandbox] Session missing credential information during termination');
@@ -402,7 +571,7 @@ class CodeSandboxProvider extends BaseProvider {
       }
 
       if (msg.includes('not found') || msg.includes('does not exist')) {
-        return new ProviderError('Session not found', 404, 'CODESANDBOX_NOT_FOUND');
+        return new ProviderError('Session not found', { code: 'CODESANDBOX_NOT_FOUND', statusCode: 404 });
       }
 
       if (msg.includes('already exists') || msg.includes('conflict')) {

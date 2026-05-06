@@ -75,6 +75,10 @@ function buildS3Client() {
 async function initGoogleCredentialsFromS3IfNeeded( googleCredentials ) {
   if (isS3fsEnabled()) {
     console.log('Credential mode: s3fs (filesystem path from GOOGLE_APPLICATION_CREDENTIALS)');
+    // Ensure GOOGLE_APPLICATION_CREDENTIALS is set to the mounted path
+    if (process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+      process.env.GOOGLE_APPLICATION_CREDENTIALS = process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS;
+    }
     return;
   }
 

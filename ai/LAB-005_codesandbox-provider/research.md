@@ -37,6 +37,7 @@ Plan impact:
 The docs show two valid creation paths:
 - Create a default sandbox with `sdk.sandboxes.create()`.
 - Create from a template or existing sandbox with `sdk.sandboxes.create({ id: "template-or-sandbox-id" })`.
+- The current project requirement restricts provider creation to Docker sandboxes, so the implementation should use the CodeSandbox Docker template id.
 
 Supported create options documented by CodeSandbox include:
 - `id`
@@ -61,8 +62,8 @@ Sandbox objects expose at least:
 - `bootupType`
 
 Plan impact:
-- The plan's `templateId` should map to the SDK `id` field.
-- The provider can support default sandbox creation when no template is configured.
+- The provider should map the Docker sandbox policy to SDK `id: "docker"`.
+- The provider should not expose arbitrary template selection.
 - The plan should add optional `path` and `automaticWakeupConfig` support if operator control is needed.
 
 ### 3.3 VM Tier Requirements
@@ -175,7 +176,7 @@ The HTTP request collection should include:
 ## 5. Plan Corrections Recommended
 
 1. Prefer `CSB_API_KEY` as the documented env var and keep `CODESANDBOX_API_KEY` as an alias.
-2. Map project-level `templateId` to SDK create option `id`.
+2. Map the Docker-only creation policy to SDK create option `id: "docker"`.
 3. Add optional support for SDK create options `path` and `automaticWakeupConfig`.
 4. Map string VM tier names to `VMTier` constants before calling the SDK.
 5. Do not guarantee `exitCode` in command responses unless implementation verifies it from the SDK return value.

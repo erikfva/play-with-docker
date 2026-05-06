@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test"
   },
   "repository": {
     "type": "git",
@@ -20,7 +20,7 @@
   "homepage": "https://github.com/erikfva/play-with-docker#readme",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1011.0",
-    "@codesandbox/sdk": "^2.4.2",
+    "@codesandbox/sdk": "2.4.2",
     "body-parser": "^2.2.2",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",

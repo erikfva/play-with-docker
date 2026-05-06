@@ -18,7 +18,7 @@ Add CodeSandbox as a supported provider in the current session orchestrator whil
 
 The provider should let clients:
 - Discover CodeSandbox as an available provider.
-- Create a CodeSandbox-backed session.
+- Create a Docker-based CodeSandbox session.
 - Inspect the session state.
 - Run shell commands in the session.
 - Terminate the session when it is no longer needed.
@@ -38,7 +38,9 @@ CodeSandbox credentials must be stored as JSON files in an operator-controlled S
 }
 ```
 
-To avoid overloading free or low-capacity CodeSandbox accounts, the orchestrator must allow only one active CodeSandbox VM per token.
+To avoid overloading free or low-capacity CodeSandbox accounts, the orchestrator must allow only one CodeSandbox sandbox/session per token. If a client asks to create another session with a token that already has a sandbox/session, the API must return the existing session instead of creating another sandbox.
+
+CodeSandbox session creation is limited to Docker sandboxes. Clients must not be able to create other CodeSandbox template types through this provider.
 
 ## 5. Problem Statement
 
@@ -49,9 +51,9 @@ Current behavior:
 
 Required behavior:
 - Users can choose CodeSandbox when creating a session.
-- CodeSandbox sessions behave consistently with the existing session lifecycle.
+- CodeSandbox sessions are Docker-based and behave consistently with the existing session lifecycle.
 - Users or operators can select which CodeSandbox token file is used for a session.
-- The API prevents creating more than one active CodeSandbox session for the same token.
+- The API prevents creating more than one CodeSandbox sandbox/session for the same token and reuses the existing session when a duplicate create is requested.
 - Existing Google Cloud Shell behavior remains unchanged.
 
 ## 6. Scope
@@ -63,7 +65,8 @@ In scope:
 - Execute commands in CodeSandbox sessions.
 - Terminate CodeSandbox sessions.
 - Load CodeSandbox token files from S3 or a server directory.
-- Enforce one active CodeSandbox VM per token.
+- Enforce one CodeSandbox sandbox/session per token and return the existing session for duplicate create requests.
+- Restrict CodeSandbox creation to Docker sandboxes.
 - Document operator requirements and user-visible behavior.
 
 Out of scope:
@@ -86,9 +89,10 @@ Out of scope:
 7. If a CodeSandbox session can be resumed by the provider, command execution should recover the session before running the command.
 8. Clients must be able to terminate CodeSandbox sessions through the existing session termination endpoint.
 9. Provider errors must be returned as clear API errors without exposing secrets.
-10. The API must reject creation of a second active CodeSandbox session that would use the same token.
+10. The API must not create a second CodeSandbox sandbox/session that would use the same token; it must return the existing session instead.
 11. Session creation must fail clearly when the server cannot find, read, or validate the selected CodeSandbox token file.
-12. Existing Google Cloud Shell and Play with Docker discovery behavior must not regress.
+12. CodeSandbox session creation must only create Docker sandboxes.
+13. Existing Google Cloud Shell and Play with Docker discovery behavior must not regress.
 
 ## 8. User-Visible Behavior
 
@@ -108,6 +112,8 @@ X-CodeSandbox-Credentials: codesandbox/account-a.json
 
 The API response should follow the same general shape as other session providers and include enough information for clients to identify and reuse the session.
 
+If the selected CodeSandbox token already has a session, the create endpoint should return the existing session information and indicate that the existing sandbox/session was reused. No additional CodeSandbox sandbox should be created.
+
 Command execution example:
 
 ```json
@@ -122,16 +128,17 @@ The API response should include the command result or a clear error if the comma
 
 1. Given the server is configured for CodeSandbox, when a client lists supported providers, then `codesandbox` is included.
 2. Given the server is configured for CodeSandbox, when a client creates a session with provider `codesandbox`, then a CodeSandbox-backed session is created and persisted.
-3. Given a valid CodeSandbox credential JSON file exists, when a client creates a session with provider `codesandbox`, then the token from that file is used to create the session.
-4. Given a CodeSandbox session exists, when a client retrieves the session, then the response identifies it as a CodeSandbox session and includes current state.
-5. Given a CodeSandbox session exists, when a client runs a shell command, then the API returns the command result.
-6. Given a CodeSandbox session is inactive but recoverable, when a client runs a command, then the provider attempts to recover the session before executing the command.
-7. Given a CodeSandbox session exists, when a client terminates it, then the API attempts provider cleanup and removes the local session according to the existing termination behavior.
-8. Given CodeSandbox returns an error, then the API returns a sanitized provider error without leaking credentials.
-9. Given a CodeSandbox token already has an active session, when a client tries to create another CodeSandbox session with the same token, then the API rejects the request and returns the existing session reference or a clear conflict error.
-10. Given the selected CodeSandbox credential file is missing, malformed, or lacks `token`, then the API returns a clear credential error and no session is persisted.
-11. Given existing Google Cloud Shell flows, then create, list, refresh, command, keep-alive, and terminate behavior remain unchanged.
-12. Given the deprecated Play with Docker provider, then it remains a registered stub and is not reimplemented by this story.
+3. Given the server is configured for CodeSandbox, when a client creates a session with provider `codesandbox`, then the created session is Docker-based.
+4. Given a valid CodeSandbox credential JSON file exists, when a client creates a session with provider `codesandbox`, then the token from that file is used to create the session.
+5. Given a CodeSandbox session exists, when a client retrieves the session, then the response identifies it as a CodeSandbox session and includes current state.
+6. Given a CodeSandbox session exists, when a client runs a shell command, then the API returns the command result.
+7. Given a CodeSandbox session is inactive but recoverable, when a client runs a command, then the provider attempts to recover the session before executing the command.
+8. Given a CodeSandbox session exists, when a client terminates it, then the API attempts provider cleanup and removes the local session according to the existing termination behavior.
+9. Given CodeSandbox returns an error, then the API returns a sanitized provider error without leaking credentials.
+10. Given a CodeSandbox token already has a session, when a client tries to create another CodeSandbox session with the same token, then the API returns the existing session and does not create a new sandbox.
+11. Given the selected CodeSandbox credential file is missing, malformed, or lacks `token`, then the API returns a clear credential error and no session is persisted.
+12. Given existing Google Cloud Shell flows, then create, list, refresh, command, keep-alive, and terminate behavior remain unchanged.
+13. Given the deprecated Play with Docker provider, then it remains a registered stub and is not reimplemented by this story.
 
 ## 10. Non-Functional Requirements
 
@@ -146,14 +153,15 @@ The API response should include the command result or a clear error if the comma
 - CodeSandbox account limits, pricing, or free-tier behavior may change.
 - CodeSandbox session lifecycle may not exactly match Google Cloud Shell lifecycle.
 - Termination semantics may be destructive if users expect sandbox state to persist.
-- Incorrect token/session locking could allow more than one VM per token.
+- Incorrect token/session locking could allow more than one sandbox/session per token.
 
 ## 12. Definition of Done
 
 - CodeSandbox appears in supported provider discovery.
 - CodeSandbox sessions can be created, inspected, used for commands, and terminated.
+- CodeSandbox session creation is limited to Docker sandboxes.
 - CodeSandbox token JSON files can be loaded from S3 or server directory.
-- One active CodeSandbox VM per token is enforced.
+- One CodeSandbox sandbox/session per token is enforced.
 - Missing, malformed, or invalid credential files return clear API errors.
 - Existing provider behavior is not regressed.
 - Operator documentation is updated.

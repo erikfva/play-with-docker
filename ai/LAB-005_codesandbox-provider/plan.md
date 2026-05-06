@@ -20,11 +20,12 @@ Current project shape:
 CodeSandbox integration target:
 - Use `@codesandbox/sdk`.
 - Use CodeSandbox sandbox creation for session creation.
+- Create Docker sandboxes only by using the CodeSandbox Docker template.
 - Use SDK command execution instead of SSH.
 - Use SDK resume/connect behavior before command execution when needed.
 - Use SDK delete for session termination.
 - Load CodeSandbox tokens from JSON credential files, following the same S3/server-directory pattern used by Google credentials.
-- Enforce one active CodeSandbox VM per token to avoid overloading free or low-capacity accounts.
+- Enforce one CodeSandbox sandbox/session per token to avoid overloading free or low-capacity accounts.
 
 Live SDK smoke-test result:
 - `new CodeSandbox(token)` is the verified constructor shape for the installed SDK version.
@@ -169,24 +170,24 @@ Resolution rules:
 Security rules:
 - Never log or return the raw token.
 - Do not persist the raw token in `sessions.metadata`.
-- Store a stable token fingerprint for one-VM-per-token enforcement.
+- Store a stable token fingerprint for one sandbox/session per token enforcement.
 - Use a cryptographic hash such as SHA-256 over the token for `credentialFingerprint`.
 - Reject filesystem references that resolve outside the configured credentials directory.
-- Redact credential references from errors if they may reveal sensitive bucket/key layout.
+- Provider errors may include full S3 bucket/key or filesystem paths to make operator troubleshooting direct.
 
 Implementation notes:
 - Reuse helper logic from `src/services/google-credentials-loader.js` where practical.
 - Reuse `buildS3Client()` and `streamToBuffer()` patterns, or extract shared S3 credential-object loading helpers if implementation duplication becomes meaningful.
 - Cache downloaded credential files in `/tmp` only if the cache key is the credential reference and file permissions are restrictive.
 
-### Step 6: One Active VM Per Token Enforcement
+### Step 6: One Sandbox/Session Per Token Enforcement
 
 Before creating a CodeSandbox sandbox:
 1. Load the selected credential JSON.
 2. Compute `credentialFingerprint`.
 3. Query existing `sessions` rows for provider `codesandbox` with non-terminal status and matching `credentialFingerprint`.
-4. If a matching active row exists, return a `409` conflict instead of creating another CodeSandbox sandbox.
-5. Include the existing session ID in the error details when safe.
+4. If a matching non-terminal session row exists, return that existing session instead of creating another CodeSandbox sandbox.
+5. Include a response flag or equivalent response field so clients can tell the existing sandbox/session was reused.
 
 Initial non-terminal statuses:
 - `STARTING`
@@ -227,7 +228,7 @@ Recommended database direction:
 
 - This index is the preferred enforcement mechanism because the app can run in more than one process.
 - Also keep an in-process lock keyed by `credentialFingerprint` to avoid double provider calls inside one process before the insert reaches the database.
-- If the insert fails on the unique index, attempt best-effort deletion of the newly created CodeSandbox sandbox and return `409`.
+- If the insert fails on the unique index, attempt best-effort deletion of the newly created CodeSandbox sandbox and return the existing session for that token.
 - Add an `ensureIndex` or direct startup `CREATE INDEX IF NOT EXISTS` call in `src/db/db.js`; the current bootstrap has `ensureColumn` only.
 
 ### Step 7: Session Mapper
@@ -269,7 +270,6 @@ Rules:
 ### Step 8: Provider Creation Behavior
 
 Support request options:
-- `templateId` mapped to SDK create option `id`
 - `title`
 - `description`
 - `tags`
@@ -282,7 +282,6 @@ Support request options:
 Environment defaults:
 
 ```env
-CODESANDBOX_TEMPLATE_ID=...
 CODESANDBOX_DEFAULT_PRIVACY=public-hosts
 CODESANDBOX_DEFAULT_VM_TIER=Nano
 CODESANDBOX_HIBERNATION_TIMEOUT_SECONDS=86400
@@ -291,13 +290,20 @@ CODESANDBOX_AUTOMATIC_WAKEUP=false
 
 Request values override environment defaults.
 
+Template policy:
+- The provider must always create Docker sandboxes.
+- SDK create options must set `id: "docker"`.
+- `CODESANDBOX_TEMPLATE_ID` is not supported because arbitrary templates are outside this story.
+- If legacy clients send `templateId`, only `docker` is accepted; any other value should return a clear 400 provider error before calling CodeSandbox.
+
 Creation flow:
 1. Resolve the CodeSandbox credential reference from `x-codesandbox-credentials` or `CODESANDBOX_DEFAULT_CREDENTIALS`.
 2. Load and validate the credential JSON.
 3. Compute token fingerprint.
-4. Enforce one active VM per token before calling CodeSandbox.
+4. Look up an existing session for the token before calling CodeSandbox.
+   - If one exists, return the existing session and do not call CodeSandbox create.
 5. Build SDK create options.
-6. Map project `templateId` or `CODESANDBOX_TEMPLATE_ID` to SDK option `id`.
+6. Set SDK option `id` to `docker` and reject non-Docker template requests.
 7. Map string VM tier names to SDK `VMTier` constants.
 8. Instantiate SDK with `new CodeSandbox(token)`.
 9. Use `sdk.sandboxes.create(...)`.
@@ -318,11 +324,12 @@ Route integration required:
 
 - The route insert must persist provider-returned `webHost`, `sshCommand`, `metadata`, `credentialRef`, and `credentialFingerprint` when present.
 - The route insert should use `created.envName || created.providerSessionId` instead of always storing `created.providerSessionId` in `envName`.
-- If the DB unique index rejects the insert after a CodeSandbox sandbox was created, the route or provider must delete that sandbox best-effort before returning `409`.
+- If the DB unique index rejects the insert after a CodeSandbox sandbox was created, the route or provider must delete that sandbox best-effort before returning the existing session.
 - Cleanup after failed insert can call `provider.terminateSession(...)` with a constructed temporary row containing `providerSessionId`, `credentialRef`, `credentialFingerprint`, and `metadata`.
 
-Verified default creation:
-- `sdk.sandboxes.create({ title, privacy: "private", hibernationTimeoutSeconds: 300 })` succeeded during the smoke test without a template.
+Verified creation:
+- The initial smoke test proved default sandbox creation works, but the product requirement now restricts the provider to Docker sandboxes only.
+- Creation should call `sdk.sandboxes.create({ id: "docker", ... })`.
 
 Lifecycle default:
 - Prefer `hibernationTimeoutSeconds=86400` and `automaticWakeupConfig=false` when the orchestrator actively deletes sessions on termination.
@@ -470,7 +477,7 @@ Expected mapping:
 | Malformed credential JSON | `500` |
 | Credential JSON missing `token` | `500` |
 | Credential path escapes allowed directory | `400` |
-| Active session already exists for token | `409` |
+| Active session already exists for token | `200` with existing session data |
 | Create failed | `502` |
 | Remote sandbox not found | `404` |
 | Command failed | `502` |
@@ -493,7 +500,7 @@ Document:
 - Default credential env var.
 - Request header for credential selection.
 - Optional provider defaults.
-- One active CodeSandbox VM per token behavior.
+- One CodeSandbox sandbox/session per token behavior.
 - CodeSandbox is account/plan/usage-limit dependent.
 - Commands use provider SDK, not SSH.
 - Termination deletes the sandbox in the initial implementation.
@@ -507,7 +514,7 @@ Unit test targets:
 - Malformed JSON handling.
 - Missing `token` field handling.
 - Token fingerprint calculation without exposing token.
-- One active VM per token conflict handling.
+- One sandbox/session per token reuse behavior.
 - Filesystem credential path traversal rejection.
 - Request options and env defaults mapping.
 - SDK constructor receives the token string, not `{ apiKey: token }`.
@@ -520,8 +527,8 @@ Unit test targets:
 Integration test targets with mocked SDK:
 - Create session with `provider: "codesandbox"`.
 - Create session with `x-codesandbox-credentials`.
-- Reject duplicate active session using the same token.
-- Unique-index conflict after provider create triggers best-effort sandbox cleanup.
+- Reuse duplicate session using the same token.
+- Unique-index conflict after provider create triggers best-effort sandbox cleanup and returns the existing session.
 - List supported providers includes `codesandbox`.
 - Get session refreshes CodeSandbox metadata.
 - Get session does not wake/resume CodeSandbox when no non-waking status lookup is available.
@@ -576,7 +583,6 @@ Optional:
 
 ```env
 CODESANDBOX_CREDENTIALS_DIR=/mnt/s3/codesandbox
-CODESANDBOX_TEMPLATE_ID=...
 CODESANDBOX_DEFAULT_PRIVACY=public-hosts
 CODESANDBOX_DEFAULT_VM_TIER=Nano
 CODESANDBOX_HIBERNATION_TIMEOUT_SECONDS=86400
@@ -606,8 +612,8 @@ Column naming note:
 2. Add SDK client helper.
 3. Add CodeSandbox credentials loader.
 4. Add token fingerprint helper.
-5. Add one-active-VM-per-token enforcement.
-6. Add `credentialRef` and `credentialFingerprint` session columns plus active-token unique index.
+5. Add one sandbox/session per token enforcement.
+6. Add `credentialRef` and `credentialFingerprint` session columns plus sandbox/session-per-token unique index.
 7. Refactor global Google credential middleware into provider-aware route handling.
 8. Update session route creation to pass `x-codesandbox-credentials` into provider context and persist credential fields.
 9. Add session mapper.
@@ -652,5 +658,4 @@ Implementation consequences:
 
 1. Should termination delete CodeSandbox sandboxes permanently, or should clients be able to choose hibernate instead?
 2. Should the API expose CodeSandbox preview hosts in the normalized session response?
-3. Should `templateId` be required for predictable environments, or should default sandbox creation be accepted?
-4. Should CodeSandbox credential files be listed through a new discovery endpoint similar to Google credentials?
+3. Should CodeSandbox credential files be listed through a new discovery endpoint similar to Google credentials?

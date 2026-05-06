@@ -1,11 +1,15 @@
 const fs = require('fs/promises');
-const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
-const { buildS3Client: buildBaseS3Client, resolveBucketAndKey, streamToBuffer } = require('../../../services/google-credentials-loader');
+const { GetObjectCommand } = require('@aws-sdk/client-s3');
+const { buildS3Client: buildBaseS3Client, streamToBuffer } = require('../../../services/google-credentials-loader');
+const { ProviderError } = require('../../errors/provider-errors');
 
 const loadedCredentials = new Map();
+
+function codeSandboxCredentialError(message, code, statusCode = 400) {
+  return new ProviderError(message, { code, statusCode });
+}
 
 function isS3fsEnabled() {
   const raw = String(process.env.S3FS_ENABLED ?? '1').trim().toLowerCase();
@@ -18,15 +22,19 @@ function getCredentialsDirectory() {
 
 function resolveCredentialReference(credentialRef) {
   if (!credentialRef) {
-    throw new Error('CODESANDBOX_DEFAULT_CREDENTIALS is not configured');
+    throw codeSandboxCredentialError(
+      'CODESANDBOX_DEFAULT_CREDENTIALS is not configured',
+      'CODESANDBOX_CREDENTIALS_MISSING'
+    );
   }
 
   if (credentialRef.startsWith('s3://')) {
     const withoutScheme = credentialRef.slice('s3://'.length);
     const slashIndex = withoutScheme.indexOf('/');
     if (slashIndex <= 0 || slashIndex === withoutScheme.length - 1) {
-      throw new Error(
-        `CodeSandbox credential reference must include bucket and key for s3:// references (got: ${credentialRef})`
+      throw codeSandboxCredentialError(
+        'CodeSandbox credential reference must include bucket and key for s3:// references',
+        'CODESANDBOX_CREDENTIALS_PATH_INVALID'
       );
     }
     return {
@@ -73,7 +81,10 @@ function resolveCredentialReference(credentialRef) {
   // - relative path is absolute (shouldn't happen but be safe)
   // - relative path is empty (same directory)
   if (relative.startsWith('..') || path.isAbsolute(relative) || relative === '') {
-    throw new Error(`CodeSandbox credential path escapes allowed directory: ${credentialRef}`);
+    throw codeSandboxCredentialError(
+      'CodeSandbox credential path escapes allowed directory',
+      'CODESANDBOX_CREDENTIALS_PATH_INVALID'
+    );
   }
 
   return {
@@ -106,11 +117,17 @@ async function loadCredentialFile(credentialRefObj) {
         })
       );
     } catch (error) {
-      throw new Error(`Failed to fetch CodeSandbox credentials from s3://${credentialRefObj.bucket}/${credentialRefObj.key}: ${error.message}`);
+      throw codeSandboxCredentialError(
+        `Failed to fetch CodeSandbox credentials from s3://${credentialRefObj.bucket}/${credentialRefObj.key}: ${error.message}`,
+        'CODESANDBOX_CREDENTIALS_MISSING'
+      );
     }
 
     if (!response.Body) {
-      throw new Error(`S3 object has no body: s3://${credentialRefObj.bucket}/${credentialRefObj.key}`);
+      throw codeSandboxCredentialError(
+        `S3 object has no body: s3://${credentialRefObj.bucket}/${credentialRefObj.key}`,
+        'CODESANDBOX_CREDENTIALS_INVALID'
+      );
     }
 
     fileBuffer = await streamToBuffer(response.Body);
@@ -119,7 +136,10 @@ async function loadCredentialFile(credentialRefObj) {
     try {
       fileBuffer = await fs.readFile(credentialRefObj.path);
     } catch (error) {
-      throw new Error(`Failed to read CodeSandbox credentials from ${credentialRefObj.path}: ${error.message}`);
+      throw codeSandboxCredentialError(
+        `Failed to read CodeSandbox credentials from ${credentialRefObj.path}: ${error.message}`,
+        'CODESANDBOX_CREDENTIALS_MISSING'
+      );
     }
   }
 
@@ -127,16 +147,22 @@ async function loadCredentialFile(credentialRefObj) {
   try {
     credentialData = JSON.parse(fileBuffer.toString('utf8'));
   } catch (error) {
-    throw new Error(`CodeSandbox credentials file is not valid JSON: ${error.message}`);
+    throw codeSandboxCredentialError(
+      `CodeSandbox credentials file is not valid JSON: ${error.message}`,
+      'CODESANDBOX_CREDENTIALS_INVALID'
+    );
   }
 
   if (!credentialData || typeof credentialData.token !== 'string' || !credentialData.token.trim()) {
-    throw new Error('CodeSandbox credentials file must contain a non-empty "token" field');
+    throw codeSandboxCredentialError(
+      'CodeSandbox credentials file must contain a non-empty "token" field',
+      'CODESANDBOX_TOKEN_MISSING'
+    );
   }
 
   const token = credentialData.token.trim();
 
-  // Compute fingerprint for one-VM-per-token enforcement
+  // Compute fingerprint for one sandbox/session per token enforcement
   const fingerprint = crypto.createHash('sha256').update(token).digest('hex');
 
   const result = {
@@ -160,7 +186,10 @@ async function loadCodeSandboxCredentials(credentialRefOrHeader) {
   } else if (process.env.CODESANDBOX_DEFAULT_CREDENTIALS) {
     credentialRef = process.env.CODESANDBOX_DEFAULT_CREDENTIALS;
   } else {
-    throw new Error('CODESANDBOX_DEFAULT_CREDENTIALS is not configured');
+    throw codeSandboxCredentialError(
+      'CODESANDBOX_DEFAULT_CREDENTIALS is not configured',
+      'CODESANDBOX_CREDENTIALS_MISSING'
+    );
   }
 
   // Resolve reference to actual source
