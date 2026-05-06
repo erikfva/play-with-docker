@@ -367,12 +367,16 @@ router.delete('/:id', async (req, res) => {
       await provider.terminateSession(row);
     } catch (providerError) {
       console.warn(`Provider termination failed for session ${row.id}:`, providerError.message);
+      if (row.provider === 'codesandbox') {
+        throw providerError;
+      }
     }
 
     await db.run('DELETE FROM sessions WHERE id = ?', [row.id]);
 
     const response = {
-      message: `Session ${row.id} (${row.provider}) terminated and removed from orchestrator.`
+      message: `Session ${row.id} (${row.provider}) terminated and removed from orchestrator.`,
+      providerCleanup: row.provider === 'codesandbox' ? 'deleted' : 'attempted'
     };
 
     if (stats) {
@@ -412,6 +416,10 @@ router.post('/terminate-all', async (req, res) => {
         result.terminated = true;
       } catch (providerError) {
         result.errors.push(`terminateSession: ${providerError.message}`);
+        if (row.provider === 'codesandbox') {
+          results.push(result);
+          continue;
+        }
       }
 
       try {
