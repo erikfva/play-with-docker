@@ -54,11 +54,14 @@ function getRowValue(row, camelName, lowerName) {
 }
 
 function buildCreateResponseFromSession(row, reusedExisting = false) {
+  const metadata = parseMetadata(row.metadata) || {};
+
   return {
     id: row.id,
     provider: row.provider,
     providerSessionId: getRowValue(row, 'providerSessionId', 'providersessionid'),
     status: row.status,
+    dockerHost: metadata.dockerHost || null,
     reusedExisting
   };
 }
@@ -214,7 +217,8 @@ router.post('/', async (req, res) => {
       id,
       provider: provider.name,
       providerSessionId: created.providerSessionId,
-      status: created.status || 'STARTING'
+      status: created.status || 'STARTING',
+      dockerHost: created.metadata?.dockerHost || null
     });
   } catch (error) {
     return mapErrorToHttp(res, error, 'Failed to create session');

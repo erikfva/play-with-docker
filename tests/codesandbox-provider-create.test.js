@@ -70,6 +70,17 @@ test('creates CodeSandbox sessions from the Docker template id, not the docker s
               bootupType: 'FORK',
               isUpToDate: true
             };
+          },
+          resume: async (sandboxId) => {
+            assert.equal(sandboxId, 'created-sandbox-id');
+            return {
+              connect: async () => ({
+                commands: {
+                  run: async () => 'DOCKER_HOST=tcp://192.168.241.2:2375\n'
+                },
+                dispose: async () => undefined
+              })
+            };
           }
         }
       }),
@@ -94,6 +105,7 @@ test('creates CodeSandbox sessions from the Docker template id, not the docker s
     assert.equal(session.providerSessionId, 'created-sandbox-id');
     assert.equal(session.credentialRef, 'account.json');
     assert.match(session.credentialFingerprint, /^sha256:[a-f0-9]{64}$/);
+    assert.equal(session.metadata.dockerHost, 'tcp://192.168.241.2:2375');
   });
 });
 
@@ -159,6 +171,58 @@ test('executes CodeSandbox commands through resume, connect, run, and dispose', 
       ['dispose']
     ]);
     assert.equal(result.output, 'command-output');
+  });
+});
+
+test('injects prepared Docker host into CodeSandbox command execution', async () => {
+  await withCredentialDir(async (dir) => {
+    const calls = [];
+    const dbPath = require.resolve('../src/db/db');
+    const clientPath = require.resolve('../src/services/providers/codesandbox/client');
+    const providerPath = require.resolve('../src/services/providers/codesandbox-provider');
+
+    delete require.cache[providerPath];
+    stubModule(dbPath, {
+      get: async () => null,
+      run: async () => undefined,
+      all: async () => [],
+      pool: { end: async () => undefined },
+      ready: Promise.resolve()
+    });
+    stubModule(clientPath, {
+      getClient: () => ({
+        sandboxes: {
+          resume: async () => ({
+            connect: async () => ({
+              commands: {
+                run: async (command) => {
+                  calls.push(command);
+                  return 'command-output';
+                }
+              },
+              dispose: async () => undefined
+            })
+          })
+        }
+      }),
+      clearCache: () => undefined
+    });
+
+    await fs.writeFile(path.join(dir, 'account.json'), JSON.stringify({ token: 'test-token' }));
+
+    const CodeSandboxProvider = require('../src/services/providers/codesandbox-provider');
+    const provider = new CodeSandboxProvider();
+    await provider.executeCommand(
+      {
+        providerSessionId: 'sandbox-id',
+        credentialRef: 'account.json',
+        credentialFingerprint: 'sha256:test',
+        metadata: JSON.stringify({ dockerHost: 'tcp://192.168.241.2:2375' })
+      },
+      'docker ps'
+    );
+
+    assert.equal(calls[0], "export DOCKER_HOST='tcp://192.168.241.2:2375'; docker ps");
   });
 });
 

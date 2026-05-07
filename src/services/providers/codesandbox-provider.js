@@ -16,6 +16,7 @@ const { VMTier } = require('@codesandbox/sdk');
 
 const CODESANDBOX_DOCKER_TEMPLATE_ALIAS = 'docker';
 const DEFAULT_CODESANDBOX_DOCKER_TEMPLATE_ID = 'hsd8ke';
+const DOCKER_HOST_ENV_FILE = '/tmp/codesandbox-docker-host.env';
 
 function parseMetadata(metadata) {
   if (!metadata) {
@@ -192,6 +193,20 @@ class CodeSandboxProvider extends BaseProvider {
 
       // Step 6: Map to normalized session
       const session = mapToSession(sandbox, resolvedRef, credentialFingerprint);
+      let dockerHostSetup;
+
+      try {
+        dockerHostSetup = await this.prepareDockerHostProxy(client, sandbox.id);
+      } catch (bootstrapError) {
+        await this.cleanupSandboxAfterCreateFailure(client, sandbox.id, bootstrapError.message);
+        throw bootstrapError;
+      }
+
+      session.metadata = {
+        ...(session.metadata || {}),
+        dockerHost: dockerHostSetup.dockerHost,
+        dockerHostProxy: dockerHostSetup
+      };
 
       return session;
     } catch (error) {
@@ -369,6 +384,8 @@ class CodeSandboxProvider extends BaseProvider {
     const client = codesandboxClient.getClient(token);
     try {
       const sandbox = await client.sandboxes.get(normalized.providerSessionId);
+      const dockerHostSetup = await this.prepareDockerHostProxy(client, normalized.providerSessionId);
+
       return {
         ...normalized,
         envName: sandbox.title || normalized.envName || normalized.providerSessionId,
@@ -377,7 +394,9 @@ class CodeSandboxProvider extends BaseProvider {
           ...(normalized.metadata || {}),
           ...(sandbox.title ? { title: sandbox.title } : {}),
           ...(sandbox.privacy ? { privacy: sandbox.privacy } : {}),
-          ...(sandbox.tags ? { tags: sandbox.tags } : {})
+          ...(sandbox.tags ? { tags: sandbox.tags } : {}),
+          dockerHost: dockerHostSetup.dockerHost,
+          dockerHostProxy: dockerHostSetup
         }
       };
     } catch (error) {
@@ -438,7 +457,7 @@ class CodeSandboxProvider extends BaseProvider {
       const sandbox = await client.sandboxes.get(providerSessionId);
 
       // Map to refresh response
-      const refreshData = this.mapRefreshData(sandbox, credentialRef, credentialFingerprint);
+      const refreshData = this.mapRefreshData(sandbox, credentialRef, credentialFingerprint, metadata);
 
       return refreshData;
     } catch (error) {
@@ -447,10 +466,11 @@ class CodeSandboxProvider extends BaseProvider {
     }
   }
 
-  mapRefreshData(sandbox, credentialRef, credentialFingerprint) {
+  mapRefreshData(sandbox, credentialRef, credentialFingerprint, existingMetadata = {}) {
     return {
       status: sandbox.status ? mapStatus(sandbox.status) : undefined,
       metadata: {
+        ...(existingMetadata || {}),
         ...(sandbox.title ? { title: sandbox.title } : {}),
         ...(sandbox.privacy ? { privacy: sandbox.privacy } : {}),
         ...(sandbox.tags ? { tags: sandbox.tags } : {}),
@@ -473,6 +493,7 @@ class CodeSandboxProvider extends BaseProvider {
 
     try {
       const metadata = parseMetadata(sessionRow.metadata);
+      const dockerHost = metadata.dockerHost;
       // Handle PostgreSQL lowercasing of unquoted identifiers
       const credentialFingerprint = getRowValue(sessionRow, 'credentialFingerprint', 'credentialfingerprint') || metadata.credentialFingerprint;
       const credentialRef = getRowValue(sessionRow, 'credentialRef', 'credentialref') || metadata.credentialRef;
@@ -505,7 +526,7 @@ class CodeSandboxProvider extends BaseProvider {
 
       try {
         // Execute command
-        const result = await connectedClient.commands.run(command);
+        const result = await connectedClient.commands.run(this.withDockerHostEnv(command, dockerHost));
 
         // Return normalized output
         return {
@@ -523,6 +544,99 @@ class CodeSandboxProvider extends BaseProvider {
       console.error('[CodeSandbox] Execute command failed:', error.message);
       throw this.translateError(error);
     }
+  }
+
+  async prepareDockerHostProxy(client, sandboxId) {
+    if (!sandboxId) {
+      throw new Error('CodeSandbox Docker host bootstrap requires a sandbox id');
+    }
+
+    let sandbox;
+    try {
+      sandbox = await client.sandboxes.resume(sandboxId);
+      console.log(`[CodeSandbox] Resumed session ${sandboxId} for Docker host bootstrap`);
+    } catch (resumeError) {
+      throw new SessionNotReadyError(`Session ${sandboxId} could not be resumed for Docker host bootstrap: ${resumeError.message}`);
+    }
+
+    const connectedClient = await sandbox.connect();
+    try {
+      const output = await connectedClient.commands.run(this.buildDockerHostBootstrapCommand());
+      const dockerHost = this.parseDockerHostFromBootstrapOutput(output);
+
+      if (!dockerHost) {
+        throw new Error(`Docker host bootstrap did not return DOCKER_HOST. Output: ${String(output || '').trim()}`);
+      }
+
+      return {
+        dockerHost,
+        envFile: DOCKER_HOST_ENV_FILE,
+        port: 2375,
+        preparedAt: new Date().toISOString()
+      };
+    } finally {
+      try {
+        await connectedClient.dispose();
+      } catch (disposeError) {
+        console.warn(`[CodeSandbox] Failed to dispose bootstrap client: ${disposeError.message}`);
+      }
+    }
+  }
+
+  async cleanupSandboxAfterCreateFailure(client, sandboxId, reason) {
+    if (!sandboxId) {
+      return;
+    }
+
+    try {
+      await client.sandboxes.shutdown(sandboxId);
+    } catch (shutdownError) {
+      if (!isNotFoundError(shutdownError)) {
+        console.warn(`[CodeSandbox] Failed to shutdown sandbox ${sandboxId} after create failure: ${shutdownError.message}`);
+      }
+    }
+
+    try {
+      await client.sandboxes.delete(sandboxId);
+      console.warn(`[CodeSandbox] Deleted sandbox ${sandboxId} after create bootstrap failure: ${reason}`);
+    } catch (deleteError) {
+      if (!isNotFoundError(deleteError)) {
+        console.warn(`[CodeSandbox] Failed to delete sandbox ${sandboxId} after create failure: ${deleteError.message}`);
+      }
+    }
+  }
+
+  buildDockerHostBootstrapCommand() {
+    return [
+      'set -eu',
+      'if ! command -v socat >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y socat; fi',
+      'HOST_IP=$(ip -4 addr show scope global | awk \'/192\\.168\\./ { split($2,a,"/"); print a[1]; exit }\')',
+      'if [ -z "$HOST_IP" ]; then HOST_IP=$(ip route | awk \'/default/ { print $3; exit }\'); fi',
+      'test -n "$HOST_IP"',
+      'DOCKER_HOST_VALUE="tcp://$HOST_IP:2375"',
+      `printf 'DOCKER_HOST=%s\\n' "$DOCKER_HOST_VALUE" | tee ${DOCKER_HOST_ENV_FILE} >/dev/null`,
+      'printf \'export DOCKER_HOST=%s\\n\' "$DOCKER_HOST_VALUE" | sudo tee /etc/profile.d/codesandbox-docker-host.sh >/dev/null',
+      'if sudo test -f /etc/environment && sudo grep -q "^DOCKER_HOST=" /etc/environment; then sudo sed -i "s#^DOCKER_HOST=.*#DOCKER_HOST=$DOCKER_HOST_VALUE#" /etc/environment; else printf \'DOCKER_HOST=%s\\n\' "$DOCKER_HOST_VALUE" | sudo tee -a /etc/environment >/dev/null; fi',
+      'if ss -ltn | awk \'$4 ~ /:2375$/ { found=1 } END { exit !found }\'; then :; else setsid socat TCP-LISTEN:2375,bind=$HOST_IP,reuseaddr,fork UNIX-CONNECT:/var/run/docker.sock </dev/null >/tmp/docker-socket-proxy.log 2>&1 & fi',
+      'sleep 1',
+      'if ! ss -ltn | awk \'$4 ~ /:2375$/ { found=1 } END { exit !found }\'; then cat /tmp/docker-socket-proxy.log; exit 1; fi',
+      'printf \'DOCKER_HOST=%s\\n\' "$DOCKER_HOST_VALUE"'
+    ].join('\n');
+  }
+
+  parseDockerHostFromBootstrapOutput(output) {
+    const text = String(output || '');
+    const match = text.match(/DOCKER_HOST=(tcp:\/\/[^\s]+)/);
+    return match ? match[1] : null;
+  }
+
+  withDockerHostEnv(command, dockerHost) {
+    if (!dockerHost) {
+      return command;
+    }
+
+    const escapedDockerHost = dockerHost.replace(/'/g, "'\"'\"'");
+    return `export DOCKER_HOST='${escapedDockerHost}'; ${command}`;
   }
 
   /**
