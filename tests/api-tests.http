@@ -227,13 +227,65 @@ X-Server-Token: {{serverToken}}
     "command": "free -h && lscpu"
 }
 
-### 19.2 Execute Basic Shell Command in CodeSandbox Session
+### 19.2 Install socat in CodeSandbox Session
 POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
 Content-Type: application/json
 X-Server-Token: {{serverToken}}
 
 {
-    "command": "docker run -d -e PUID=1000 -e PGID=1000 -e TZ=Etc/UTC -e PASSWORD=password -e HASHED_PASSWORD= -e SUDO_PASSWORD=password -e SUDO_PASSWORD_HASH= -e DEFAULT_WORKSPACE=/config/workspace -e S3_ACCESS_KEY_ID={{s3AccessKeyId}} -e S3_SECRET_ACCESS_KEY={{s3SecretAccessKey}} -e S3_BUCKET=code-server -e S3_ENDPOINT={{s3EndPoint}} -e S3_REGION={{s3Region}} -e INIT_FILE=init-code-server.sh -e GIT_USER_NAME=erikfva -e GIT_USER_EMAIL=erik.vargas@yandex.com -e TOKEN_NGROK={{tokenNgrok}} -e HTTPS_PORTS=8443,8081 -p 8443:8443 -p 8081:8081 -p 3000:3000 -v /config:/config -v /var/run/docker.sock:/var/run/docker.sock --restart unless-stopped --privileged --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined --network=host erikvargas/code-server:latest"
+    "command": "if ! command -v socat >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y socat; fi; socat -V | head -n 1"
+}
+
+### 19.3 Get CodeSandbox Docker Host TCP URL
+# Captures the devbox host IP that containers can reach and exposes it as:
+# @codeSandboxDockerHost = tcp://<host-ip>:2375
+# @name getCodeSandboxDockerHost
+POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "HOST_IP=$(ip -4 addr show scope global | awk '/192\\.168\\./ { split($2,a,\"/\"); print a[1]; exit }'); if [ -z \"$HOST_IP\" ]; then HOST_IP=$(ip route | awk '/default/ { print $3; exit }'); fi; test -n \"$HOST_IP\" && printf 'tcp://%s:2375' \"$HOST_IP\""
+}
+
+###
+@codeSandboxDockerHost = {{getCodeSandboxDockerHost.response.body.$.output}}
+
+### 19.4 Start Docker Socket TCP Proxy in CodeSandbox Session
+# Proxies /var/run/docker.sock to {{codeSandboxDockerHost}} for nested containers.
+POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "HOST_IP=$(printf '%s' '{{codeSandboxDockerHost}}' | sed 's#^tcp://##; s#:2375$##'); test -n \"$HOST_IP\" || { echo 'Missing CodeSandbox Docker host IP'; exit 1; }; if ! command -v socat >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y socat; fi; printf 'DOCKER_HOST=%s\\n' '{{codeSandboxDockerHost}}' | tee /tmp/codesandbox-docker-host.env; if ss -ltn | awk '$4 ~ /:2375$/ { found=1 } END { exit !found }'; then echo 'Docker socket proxy already listening'; else setsid socat TCP-LISTEN:2375,bind=$HOST_IP,reuseaddr,fork UNIX-CONNECT:/var/run/docker.sock </dev/null >/tmp/docker-socket-proxy.log 2>&1 & fi; sleep 1; if ! ss -ltn | awk '$4 ~ /:2375$/ { found=1 } END { exit !found }'; then cat /tmp/docker-socket-proxy.log; exit 1; fi; echo 'Docker socket proxy ready'"
+}
+
+### 19.5 Verify Docker Socket TCP Proxy from CodeSandbox Host
+POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": ". /tmp/codesandbox-docker-host.env && docker version"
+}
+
+### 19.6 Verify Docker Socket TCP Proxy from a Container
+POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "docker run --rm -e DOCKER_HOST={{codeSandboxDockerHost}} docker:cli docker version"
+}
+
+### 19.7 Create Code Server Container in CodeSandbox Session
+POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": ". /tmp/codesandbox-docker-host.env && docker run -d -e DOCKER_HOST=$DOCKER_HOST -e PUID=1000 -e PGID=1000 -e TZ=Etc/UTC -e PASSWORD=password -e HASHED_PASSWORD= -e SUDO_PASSWORD=password -e SUDO_PASSWORD_HASH= -e DEFAULT_WORKSPACE=/config/workspace -e S3_ACCESS_KEY_ID={{s3AccessKeyId}} -e S3_SECRET_ACCESS_KEY={{s3SecretAccessKey}} -e S3_BUCKET=code-server -e S3_ENDPOINT={{s3EndPoint}} -e S3_REGION={{s3Region}} -e INIT_FILE=init-code-server.sh -e GIT_USER_NAME=erikfva -e GIT_USER_EMAIL=erik.vargas@yandex.com -e TOKEN_NGROK={{tokenNgrok}} -e HTTPS_PORTS=8443,8081 -p 8443:8443 -p 8081:8081 -p 3000:3000 -v /config:/config --restart unless-stopped --privileged --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined erikvargas/code-server:latest"
 }
 
 ### 20. Terminate CodeSandbox Session
