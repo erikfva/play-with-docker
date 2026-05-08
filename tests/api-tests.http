@@ -1,9 +1,9 @@
 @baseUrl = http://localhost:3000/api/v1
-@s3EndPoint = {{$dotenv S3_ENDPOINT}}
-@s3AccessKeyId = {{$dotenv AWS_ACCESS_KEY_ID}}
-@s3SecretAccessKey = {{$dotenv AWS_SECRET_ACCESS_KEY}}
-@s3Region = {{$dotenv S3_REGION}}
-@tokenNgrok = 3M
+@s3EndPoint = {{$dotenv CODE_S3_ENDPOINT}}
+@s3AccessKeyId = {{$dotenv CODE_AWS_ACCESS_KEY_ID}}
+@s3SecretAccessKey = {{$dotenv CODE_AWS_SECRET_ACCESS_KEY}}
+@s3Region = {{$dotenv CODE_S3_REGION}}
+@tokenNgrok = {{$dotenv CODE_TOKEN_NGROK}}
 @serverToken = {{$dotenv SERVER_TOKEN}}
 
 ### 1. Health Check
@@ -253,7 +253,7 @@ Content-Type: application/json
 X-Server-Token: {{serverToken}}
 
 {
-    "command": "mkdir -p /tmp/config/workspace"
+    "command": "mkdir -p /tmp/config"
 }
 
 ### 19.5 Create Code Server Container in CodeSandbox Session
@@ -262,7 +262,7 @@ Content-Type: application/json
 X-Server-Token: {{serverToken}}
 
 {
-    "command": "docker run -d -e DOCKER_HOST -e PUID=1000 -e PGID=1000 -e TZ=Etc/UTC -e PASSWORD=password -e HASHED_PASSWORD= -e SUDO_PASSWORD=password -e SUDO_PASSWORD_HASH= -e DEFAULT_WORKSPACE=/tmp/config/workspace -e S3_ACCESS_KEY_ID={{s3AccessKeyId}} -e S3_SECRET_ACCESS_KEY={{s3SecretAccessKey}} -e S3_BUCKET=code-server -e S3_ENDPOINT={{s3EndPoint}} -e S3_REGION={{s3Region}} -e INIT_FILE=init-code-server.sh -e GIT_USER_NAME=erikfva -e GIT_USER_EMAIL=erik.vargas@yandex.com -e TOKEN_NGROK={{tokenNgrok}} -e HTTPS_PORTS=8443,8081 -p 8443:8443 -p 8081:8081 -p 3000:3000 -v /tmp/config:/config -v /tmp/config:/tmp/config --restart unless-stopped --privileged --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined erikvargas/code-server:latest"
+    "command": "docker run -d -e HOME=/tmp/config -e DOCKER_HOST -e PUID=1000 -e PGID=1000 -e TZ=Etc/UTC -e PASSWORD=password -e HASHED_PASSWORD= -e SUDO_PASSWORD=password -e SUDO_PASSWORD_HASH= -e DEFAULT_WORKSPACE=/tmp/config/workspace -e S3_ACCESS_KEY_ID={{s3AccessKeyId}} -e S3_SECRET_ACCESS_KEY={{s3SecretAccessKey}} -e S3_BUCKET=code-server -e S3_ENDPOINT={{s3EndPoint}} -e S3_REGION={{s3Region}} -e INIT_FILE=init-code-server.sh -e GIT_USER_NAME=erikfva -e GIT_USER_EMAIL=erik.vargas@yandex.com -e TOKEN_NGROK={{tokenNgrok}} -e HTTPS_PORTS=8443,8081 -p 8443:8443 -p 8081:8081 -p 3000:3000 -v /tmp/config:/config -v /tmp/config:/tmp/config --restart unless-stopped --privileged --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined erikvargas/code-server:latest"
 }
 
 ### 19.6 Read HTTPS URL File From Code Server Container
