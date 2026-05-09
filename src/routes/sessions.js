@@ -150,7 +150,7 @@ router.post('/', async (req, res) => {
     const provider = getProvider(providerName);
     const created = await provider.createSession({
       ...(req.body || {}),
-      credentialRef: req.headers['x-codesandbox-credentials']
+      credentialRef: req.headers['x-codesandbox-credentials'] || req.body?.credentialRef
     });
 
     if (created.existing && created.session) {

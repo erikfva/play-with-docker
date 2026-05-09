@@ -75,6 +75,13 @@ function resolveFilesystemCredentialReference(credentialRef, keyOverride) {
 
 function resolveCredentialReference(credentialRef) {
   if (!credentialRef) {
+    if (isLocalNodeEnv()) {
+      throw codeSandboxCredentialError(
+        `CodeSandbox credentials file is not configured. Set CODESANDBOX_DEFAULT_CREDENTIALS or send x-codesandbox-credentials/credentialRef with a file under ${getCredentialsDirectory()}`,
+        'CODESANDBOX_CREDENTIALS_MISSING'
+      );
+    }
+
     throw codeSandboxCredentialError(
       'CODESANDBOX_DEFAULT_CREDENTIALS is not configured',
       'CODESANDBOX_CREDENTIALS_MISSING'
@@ -152,6 +159,14 @@ async function loadCredentialFile(credentialRefObj) {
     try {
       fileBuffer = await fs.readFile(credentialRefObj.path);
     } catch (error) {
+      if (error.code === 'ENOENT') {
+        throw codeSandboxCredentialError(
+          `CodeSandbox credentials file does not exist: ${credentialRefObj.path}`,
+          'CODESANDBOX_CREDENTIALS_MISSING',
+          404
+        );
+      }
+
       throw codeSandboxCredentialError(
         `Failed to read CodeSandbox credentials from ${credentialRefObj.path}: ${error.message}`,
         'CODESANDBOX_CREDENTIALS_MISSING'
@@ -202,6 +217,13 @@ async function loadCodeSandboxCredentials(credentialRefOrHeader) {
   } else if (process.env.CODESANDBOX_DEFAULT_CREDENTIALS) {
     credentialRef = process.env.CODESANDBOX_DEFAULT_CREDENTIALS;
   } else {
+    if (isLocalNodeEnv()) {
+      throw codeSandboxCredentialError(
+        `CodeSandbox credentials file is not configured. Set CODESANDBOX_DEFAULT_CREDENTIALS or send x-codesandbox-credentials/credentialRef with a file under ${getCredentialsDirectory()}`,
+        'CODESANDBOX_CREDENTIALS_MISSING'
+      );
+    }
+
     throw codeSandboxCredentialError(
       'CODESANDBOX_DEFAULT_CREDENTIALS is not configured',
       'CODESANDBOX_CREDENTIALS_MISSING'

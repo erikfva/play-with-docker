@@ -37,10 +37,20 @@ async function withCredentialDir(fn) {
   }
 }
 
-async function assertProviderError(promise, code) {
+async function assertProviderError(promise, code, messagePattern, statusCode) {
   await assert.rejects(
     promise,
-    (error) => error instanceof ProviderError && error.code === code
+    (error) => {
+      assert.equal(error instanceof ProviderError, true);
+      assert.equal(error.code, code);
+      if (messagePattern) {
+        assert.match(error.message, messagePattern);
+      }
+      if (statusCode) {
+        assert.equal(error.statusCode, statusCode);
+      }
+      return true;
+    }
   );
 }
 
@@ -117,10 +127,24 @@ test('rejects path traversal outside the credential directory', async () => {
 });
 
 test('rejects a missing credential file with a provider-safe error', async () => {
-  await withCredentialDir(async () => {
+  await withCredentialDir(async (dir) => {
     await assertProviderError(
       loadCodeSandboxCredentials('missing.json'),
-      'CODESANDBOX_CREDENTIALS_MISSING'
+      'CODESANDBOX_CREDENTIALS_MISSING',
+      new RegExp(`CodeSandbox credentials file does not exist: ${path.join(dir, 'missing\\.json')}`),
+      404
+    );
+  });
+});
+
+test('reports local CodeSandbox credential configuration options when no ref is configured', async () => {
+  await withCredentialDir(async (dir) => {
+    process.env.NODE_ENV = 'local';
+
+    await assertProviderError(
+      loadCodeSandboxCredentials(),
+      'CODESANDBOX_CREDENTIALS_MISSING',
+      new RegExp(`Set CODESANDBOX_DEFAULT_CREDENTIALS.*${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`)
     );
   });
 });
