@@ -50,6 +50,17 @@ Startup logs show active mode:
 - `Credential mode: s3fs ...`
 - `Credential mode: s3-api ...`
 
+### Local development override (`NODE_ENV=local`)
+
+When `NODE_ENV=local`, the app reads Google credential files from the local folder configured by `S3_MOUNT_DIR` instead of downloading them from S3.
+
+In this mode, `GOOGLE_APPLICATION_CREDENTIALS` can be:
+- `key.json` / `path/to/key.json` under `S3_MOUNT_DIR`
+- `s3://bucket/key.json`, which resolves to `S3_MOUNT_DIR/key.json`
+
+Startup logs show:
+- `Credential mode: local ...`
+
 ## Environment Variables
 
 Core:
@@ -114,4 +125,3 @@ Use:
 - `S3FS_ENABLED=0`
 - S3 API credential loading mode
 - No FUSE mount expectations
-

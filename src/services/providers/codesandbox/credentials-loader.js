@@ -2,7 +2,11 @@ const fs = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
 const { GetObjectCommand } = require('@aws-sdk/client-s3');
-const { buildS3Client: buildBaseS3Client, streamToBuffer } = require('../../../services/google-credentials-loader');
+const {
+  buildS3Client: buildBaseS3Client,
+  isLocalNodeEnv,
+  streamToBuffer
+} = require('../../../services/google-credentials-loader');
 const { ProviderError } = require('../../errors/provider-errors');
 
 const loadedCredentials = new Map();
@@ -21,7 +25,52 @@ function getCredentialsDirectory() {
 }
 
 function shouldResolveRelativeRefsFromFilesystem() {
-  return Boolean(process.env.CODESANDBOX_CREDENTIALS_DIR || process.env.S3_MOUNT_DIR) || isS3fsEnabled();
+  return isLocalNodeEnv() || Boolean(process.env.CODESANDBOX_CREDENTIALS_DIR || process.env.S3_MOUNT_DIR) || isS3fsEnabled();
+}
+
+function parseS3CredentialReference(credentialRef) {
+  const withoutScheme = credentialRef.slice('s3://'.length);
+  const slashIndex = withoutScheme.indexOf('/');
+  if (slashIndex <= 0 || slashIndex === withoutScheme.length - 1) {
+    throw codeSandboxCredentialError(
+      'CodeSandbox credential reference must include bucket and key for s3:// references',
+      'CODESANDBOX_CREDENTIALS_PATH_INVALID'
+    );
+  }
+
+  return {
+    bucket: withoutScheme.slice(0, slashIndex),
+    key: withoutScheme.slice(slashIndex + 1)
+  };
+}
+
+function resolveFilesystemCredentialReference(credentialRef, keyOverride) {
+  const credsDir = getCredentialsDirectory();
+  const ref = keyOverride || credentialRef;
+  let safePath;
+
+  if (path.isAbsolute(ref)) {
+    safePath = path.normalize(ref);
+  } else {
+    safePath = path.normalize(path.join(credsDir, ref));
+  }
+
+  const normalizedCredsDir = path.normalize(credsDir);
+  const normalizedSafePath = path.normalize(safePath);
+  const relative = path.relative(normalizedCredsDir, normalizedSafePath);
+
+  if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw codeSandboxCredentialError(
+      'CodeSandbox credential path escapes allowed directory',
+      'CODESANDBOX_CREDENTIALS_PATH_INVALID'
+    );
+  }
+
+  return {
+    type: 'filesystem',
+    path: safePath,
+    originalRef: credentialRef
+  };
 }
 
 function resolveCredentialReference(credentialRef) {
@@ -33,18 +82,15 @@ function resolveCredentialReference(credentialRef) {
   }
 
   if (credentialRef.startsWith('s3://')) {
-    const withoutScheme = credentialRef.slice('s3://'.length);
-    const slashIndex = withoutScheme.indexOf('/');
-    if (slashIndex <= 0 || slashIndex === withoutScheme.length - 1) {
-      throw codeSandboxCredentialError(
-        'CodeSandbox credential reference must include bucket and key for s3:// references',
-        'CODESANDBOX_CREDENTIALS_PATH_INVALID'
-      );
+    const { bucket, key } = parseS3CredentialReference(credentialRef);
+    if (isLocalNodeEnv()) {
+      return resolveFilesystemCredentialReference(credentialRef, key);
     }
+
     return {
       type: 's3',
-      bucket: withoutScheme.slice(0, slashIndex),
-      key: withoutScheme.slice(slashIndex + 1),
+      bucket,
+      key,
       originalRef: credentialRef
     };
   }
@@ -61,41 +107,7 @@ function resolveCredentialReference(credentialRef) {
     };
   }
 
-  // Filesystem mode (s3fs or local directory)
-  const credsDir = getCredentialsDirectory();
-  let safePath;
-
-  if (credentialRef.startsWith('/')) {
-    // Absolute path
-    safePath = path.normalize(credentialRef);
-  } else {
-    // Relative path
-    safePath = path.normalize(path.join(credsDir, credentialRef));
-  }
-
-  // Security: ensure path is within credentials directory
-  const normalizedCredsDir = path.normalize(credsDir);
-  const normalizedSafePath = path.normalize(safePath);
-
-  // Use path.relative to check if target is inside base directory
-  const relative = path.relative(normalizedCredsDir, normalizedSafePath);
-
-  // Reject if:
-  // - relative path starts with '..' (escapes directory)
-  // - relative path is absolute (shouldn't happen but be safe)
-  // - relative path is empty (same directory)
-  if (relative.startsWith('..') || path.isAbsolute(relative) || relative === '') {
-    throw codeSandboxCredentialError(
-      'CodeSandbox credential path escapes allowed directory',
-      'CODESANDBOX_CREDENTIALS_PATH_INVALID'
-    );
-  }
-
-  return {
-    type: 'filesystem',
-    path: safePath,
-    originalRef: credentialRef
-  };
+  return resolveFilesystemCredentialReference(credentialRef);
 }
 
 function buildS3Client() {

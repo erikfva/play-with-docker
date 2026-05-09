@@ -10,6 +10,7 @@ const { loadCodeSandboxCredentials } = require('../src/services/providers/codesa
 async function withCredentialDir(fn) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codesandbox-creds-'));
   const previousEnv = {
+    NODE_ENV: process.env.NODE_ENV,
     CODESANDBOX_CREDENTIALS_DIR: process.env.CODESANDBOX_CREDENTIALS_DIR,
     CODESANDBOX_DEFAULT_CREDENTIALS: process.env.CODESANDBOX_DEFAULT_CREDENTIALS,
     S3FS_ENABLED: process.env.S3FS_ENABLED,
@@ -82,6 +83,26 @@ test('falls back to S3_MOUNT_DIR when CodeSandbox credential directory is unset'
 
     assert.equal(result.token, 'mount-token');
     assert.equal(result.credentialRef, 'mount-dir.json');
+    assert.match(result.credentialFingerprint, /^sha256:[a-f0-9]{64}$/);
+  });
+});
+
+test('resolves s3 credential references from S3_MOUNT_DIR when NODE_ENV is local', async () => {
+  await withCredentialDir(async (dir) => {
+    process.env.NODE_ENV = 'local';
+    process.env.S3FS_ENABLED = '0';
+    process.env.S3_BUCKET = 'play-with-docker';
+    process.env.S3_MOUNT_DIR = dir;
+    delete process.env.CODESANDBOX_CREDENTIALS_DIR;
+
+    const nestedDir = path.join(dir, 'codesandbox');
+    await fs.mkdir(nestedDir);
+    await fs.writeFile(path.join(nestedDir, 'account.json'), JSON.stringify({ token: 'local-s3-ref-token' }));
+
+    const result = await loadCodeSandboxCredentials('s3://play-with-docker/codesandbox/account.json');
+
+    assert.equal(result.token, 'local-s3-ref-token');
+    assert.equal(result.credentialRef, 's3://play-with-docker/codesandbox/account.json');
     assert.match(result.credentialFingerprint, /^sha256:[a-f0-9]{64}$/);
   });
 });

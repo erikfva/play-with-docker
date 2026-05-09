@@ -13,7 +13,7 @@ GET http://localhost:3000/health
 GET {{baseUrl}}/sessions?status=RUNNING
 X-Server-Token: {{serverToken}}
 
-@googleCredentials = gcloud/project-xxxxxx-de207fd1f8b1.json 
+@googleCredentials = gcloud/test-credential.json 
 
 ### 2.1 List Active Sessions with custom Google Credentials Header
 GET {{baseUrl}}/sessions?status=RUNNING

@@ -9,6 +9,23 @@ function isS3fsEnabled() {
   return ['1', 'true', 'yes', 'on'].includes(raw);
 }
 
+function isLocalNodeEnv() {
+  return String(process.env.NODE_ENV || '').trim().toLowerCase() === 'local';
+}
+
+function getLocalCredentialsDirectory() {
+  const directory = (process.env.S3_MOUNT_DIR || '').trim();
+  if (!directory) {
+    throw new Error('S3_MOUNT_DIR is required when NODE_ENV=local');
+  }
+  return directory;
+}
+
+function isPathInsideDirectory(directory, targetPath) {
+  const relative = path.relative(directory, targetPath);
+  return relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
 function resolveBucketAndKey(credentialsRef) {
   if (credentialsRef.startsWith('s3://')) {
     const withoutScheme = credentialsRef.slice('s3://'.length);
@@ -37,6 +54,34 @@ function resolveBucketAndKey(credentialsRef) {
   }
 
   return { bucket, key };
+}
+
+function resolveLocalCredentialsPath(credentialsRef) {
+  const ref = (credentialsRef || '').trim();
+  if (!ref) {
+    throw new Error('GOOGLE_APPLICATION_CREDENTIALS cannot be empty when NODE_ENV=local');
+  }
+
+  const directory = path.resolve(getLocalCredentialsDirectory());
+  let localPath;
+
+  if (ref.startsWith('s3://')) {
+    const { key } = resolveBucketAndKey(ref);
+    localPath = path.resolve(directory, key);
+  } else if (path.isAbsolute(ref)) {
+    const absolutePath = path.resolve(ref);
+    localPath = isPathInsideDirectory(directory, absolutePath)
+      ? absolutePath
+      : path.resolve(directory, ref.replace(/^\/+/, ''));
+  } else {
+    localPath = path.resolve(directory, ref);
+  }
+
+  if (!isPathInsideDirectory(directory, localPath)) {
+    throw new Error('GOOGLE_APPLICATION_CREDENTIALS path escapes S3_MOUNT_DIR when NODE_ENV=local');
+  }
+
+  return localPath;
 }
 
 async function streamToBuffer(stream) {
@@ -73,6 +118,27 @@ function buildS3Client() {
 }
 
 async function initGoogleCredentialsFromS3IfNeeded( googleCredentials ) {
+  if (isLocalNodeEnv()) {
+    console.log('Credential mode: local (read GOOGLE_APPLICATION_CREDENTIALS from S3_MOUNT_DIR)');
+    const credentialsRef = (googleCredentials || process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
+    if (!credentialsRef) {
+      console.log('Credential mode: local skipped (GOOGLE_APPLICATION_CREDENTIALS is empty)');
+      return;
+    }
+
+    const localPath = resolveLocalCredentialsPath(credentialsRef);
+    try {
+      await fs.access(localPath);
+    } catch (error) {
+      throw new Error(`Failed to read local credentials from ${localPath}: ${error.message}`);
+    }
+
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = localPath;
+    loadedCredentialsFiles.add(credentialsRef);
+    console.log(`Loaded GOOGLE_APPLICATION_CREDENTIALS from local file ${localPath}`);
+    return localPath;
+  }
+
   if (isS3fsEnabled()) {
     console.log('Credential mode: s3fs (filesystem path from GOOGLE_APPLICATION_CREDENTIALS)');
     // Ensure GOOGLE_APPLICATION_CREDENTIALS is set to the mounted path
@@ -130,8 +196,10 @@ async function initGoogleCredentialsFromS3IfNeeded( googleCredentials ) {
 
 module.exports = {
   isS3fsEnabled,
+  isLocalNodeEnv,
   buildS3Client,
   resolveBucketAndKey,
+  resolveLocalCredentialsPath,
   initGoogleCredentialsFromS3IfNeeded,
   streamToBuffer
 };
