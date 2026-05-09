@@ -185,6 +185,45 @@ The HTTP request collection should include:
 8. Keep initial terminate-as-delete behavior only for ephemeral sessions and document that it removes sandbox persistence.
 9. Keep CodeSandbox keep-alive disabled; use resume-on-demand and provider lifecycle management instead.
 
-## 6. Conclusion
+## 6. Completion Review
+
+Reviewed on 2026-05-09 against the current repository implementation.
+
+- [x] SDK dependency and authentication model reviewed.
+  - `@codesandbox/sdk` is installed and pinned in `package.json`.
+  - `src/services/providers/codesandbox/client.js` instantiates the SDK with the verified token-string constructor shape.
+  - Runtime provider flow currently prefers credential JSON files rather than direct `CSB_API_KEY` use; this is consistent with the story's credential-file requirement.
+- [x] Docker-only sandbox creation reviewed.
+  - `src/services/providers/codesandbox-provider.js` rejects non-Docker `templateId` values with `CODESANDBOX_TEMPLATE_UNSUPPORTED`.
+  - Creation uses a fixed Docker template id through `getDockerTemplateId()`, defaulting to `hsd8ke`, with `CODESANDBOX_DOCKER_TEMPLATE_ID` override support.
+  - `tests/codesandbox-provider-create.test.js` verifies the provider does not pass the plain `docker` slug and creates from the expected Docker template id.
+- [x] Optional create options reviewed.
+  - The provider supports `title`, `description`, `tags`, `privacy`, `path`, `vmTier`, `hibernationTimeoutSeconds`, and `automaticWakeupConfig`.
+- [x] VM tier handling reviewed.
+  - Request/env tier strings are mapped to SDK `VMTier` constants before creation.
+  - Unsupported tier names fail before the SDK create call.
+- [x] Command execution reviewed.
+  - Command execution resumes the sandbox, connects, runs the string command with `client.commands.run(...)`, and returns `{ output }` through the route-compatible API shape.
+  - The route does not require an exit code in successful command responses.
+- [x] Resume and clean boot handling reviewed.
+  - Command execution resumes by sandbox id before connecting.
+  - `bootupType` is persisted in metadata when supplied by the SDK.
+  - The implementation performs Docker host bootstrap before returning created/reused sessions; there is no separate `CLEAN` boot setup wait beyond that provider preparation.
+- [x] Client disposal reviewed.
+  - Connected clients are disposed in `finally` blocks after command execution and Docker host bootstrap.
+- [x] Delete and lifecycle behavior reviewed.
+  - Termination shuts down the sandbox VM and then deletes the sandbox.
+  - CodeSandbox keep-alive is disabled and command execution resumes on demand.
+  - Public README/project overview documentation still needs to describe CodeSandbox delete semantics for operators.
+- [x] Pricing and account-limit assumption reviewed.
+  - The implementation does not present CodeSandbox as unlimited free infrastructure.
+  - Public README/project overview documentation still needs to state that usage depends on the operator's CodeSandbox account, credits, plan, and concurrency limits.
+- [x] API validation coverage reviewed.
+  - `tests/api-tests.http` includes provider discovery, create, details, command execution, termination, unsupported template, and missing configuration scenarios for CodeSandbox.
+  - Focused Node tests cover credential loading, Docker template creation, command execution/disposal, Docker host injection, command failure translation, and termination behavior.
+
+Research completion status: done. Remaining follow-up from this review is documentation cleanup in `README.md` and `ai/project-overview.md` for CodeSandbox operator limits and delete-on-terminate semantics.
+
+## 7. Conclusion
 
 The LAB-005 plan is feasible against the current CodeSandbox SDK documentation. The main required adjustment is precision: CodeSandbox is SDK-based, uses `CSB_API_KEY` by default, command execution requires a connected sandbox client, and lifecycle management should explicitly choose delete or hibernate based on whether the project treats sessions as ephemeral.
