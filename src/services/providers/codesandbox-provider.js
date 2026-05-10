@@ -35,7 +35,7 @@ function parseMetadata(metadata) {
 }
 
 function getRowValue(row, camelName, lowerName) {
-  return row[camelName] || row[lowerName];
+  return row[camelName] ?? row[lowerName];
 }
 
 function normalizeSessionRow(row) {
@@ -211,7 +211,7 @@ class CodeSandboxProvider extends BaseProvider {
       return session;
     } catch (error) {
       console.error('[CodeSandbox] Create session failed:', error.message);
-      throw this.translateError(error);
+      throw this.translateError(error, 'create');
     }
   }
 
@@ -325,7 +325,7 @@ class CodeSandboxProvider extends BaseProvider {
    * Map VM tier string to SDK VMTier enum
    */
   mapVmTierString(tierString) {
-    const normalized = tierString.toUpperCase();
+    const normalized = String(tierString || '').trim().toUpperCase();
 
     switch (normalized) {
       case 'NANO':
@@ -343,7 +343,13 @@ class CodeSandboxProvider extends BaseProvider {
       case 'PICO':
         return VMTier.Pico;
       default:
-        throw new Error(`Unsupported VM tier: ${tierString}. Supported: Pico, Nano, Micro, Small, Medium, Large, XLarge`);
+        throw new ProviderError(`Unsupported CodeSandbox VM tier: ${tierString}`, {
+          code: 'CODESANDBOX_CREATE_FAILED',
+          statusCode: 400,
+          details: {
+            supportedVmTiers: ['Pico', 'Nano', 'Micro', 'Small', 'Medium', 'Large', 'XLarge']
+          }
+        });
     }
   }
 
@@ -462,7 +468,7 @@ class CodeSandboxProvider extends BaseProvider {
       return refreshData;
     } catch (error) {
       console.error('[CodeSandbox] Refresh session failed:', error.message);
-      throw this.translateError(error);
+      throw this.translateError(error, 'refresh');
     }
   }
 
@@ -488,7 +494,10 @@ class CodeSandboxProvider extends BaseProvider {
    */
   async executeCommand(sessionRow, command) {
     if (!command || typeof command !== 'string') {
-      throw new Error('Command must be a non-empty string');
+      throw new ProviderError('Command must be a non-empty string', {
+        code: 'CODESANDBOX_COMMAND_INVALID',
+        statusCode: 400
+      });
     }
 
     try {
@@ -542,7 +551,7 @@ class CodeSandboxProvider extends BaseProvider {
       }
     } catch (error) {
       console.error('[CodeSandbox] Execute command failed:', error.message);
-      throw this.translateError(error);
+      throw this.translateError(error, 'command');
     }
   }
 
@@ -675,7 +684,19 @@ class CodeSandboxProvider extends BaseProvider {
         }
       }
 
-      await client.sandboxes.delete(providerSessionId);
+      try {
+        await client.sandboxes.delete(providerSessionId);
+      } catch (deleteError) {
+        if (isNotFoundError(deleteError)) {
+          console.log('[CodeSandbox] Session already deleted during termination');
+          return;
+        }
+
+        throw new ProviderError('CodeSandbox delete failed', {
+          code: 'CODESANDBOX_DELETE_FAILED',
+          statusCode: 502
+        });
+      }
       console.log(`[CodeSandbox] Deleted session ${providerSessionId}`);
     } catch (error) {
       if (isNotFoundError(error)) {
@@ -684,14 +705,14 @@ class CodeSandboxProvider extends BaseProvider {
       }
 
       console.error('[CodeSandbox] Terminate session failed:', error.message);
-      throw this.translateError(error);
+      throw this.translateError(error, 'delete');
     }
   }
 
   /**
    * Translate various errors into provider-safe errors
    */
-  translateError(error) {
+  translateError(error, operation = 'provider') {
     if (error instanceof ProviderError) {
       return error;
     }
@@ -731,6 +752,34 @@ class CodeSandboxProvider extends BaseProvider {
       if (msg.includes('api key') || msg.includes('credentials')) {
         return new InvalidCredentialsError('CodeSandbox credentials are invalid');
       }
+    }
+
+    if (operation === 'create') {
+      return new ProviderError('CodeSandbox create failed', {
+        code: 'CODESANDBOX_CREATE_FAILED',
+        statusCode: 502
+      });
+    }
+
+    if (operation === 'delete') {
+      return new ProviderError('CodeSandbox delete failed', {
+        code: 'CODESANDBOX_DELETE_FAILED',
+        statusCode: 502
+      });
+    }
+
+    if (operation === 'command') {
+      return new ProviderError('CodeSandbox command failed', {
+        code: 'CODESANDBOX_COMMAND_FAILED',
+        statusCode: 502
+      });
+    }
+
+    if (operation === 'refresh') {
+      return new ProviderError('CodeSandbox session refresh failed', {
+        code: 'CODESANDBOX_REFRESH_FAILED',
+        statusCode: 502
+      });
     }
 
     // Generic provider unavailable

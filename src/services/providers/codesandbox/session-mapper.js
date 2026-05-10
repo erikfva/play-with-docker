@@ -68,15 +68,6 @@ function cleanMetadata(metadata) {
   // Remove raw token if accidentally included
   delete result.token;
 
-  // Remove credentialFingerprint if it contains the actual token (security)
-  if (result.credentialFingerprint && result.credentialFingerprint.includes(':')) {
-    // Keep only the hash prefix
-    const parts = result.credentialFingerprint.split(':');
-    if (parts.length > 1) {
-      result.credentialFingerprint = parts[0] + ':' + parts[1].substring(0, 8) + '...';
-    }
-  }
-
   return result;
 }
 

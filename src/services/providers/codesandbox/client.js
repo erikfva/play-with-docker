@@ -1,7 +1,5 @@
 const { CodeSandbox } = require('@codesandbox/sdk');
-
-// Fix path for root require
-const path = require('path');
+const crypto = require('crypto');
 
 /**
  * CodeSandbox SDK Client Factory
@@ -25,11 +23,12 @@ class CodeSandboxClient {
       throw new Error('CodeSandbox token is required');
     }
 
-    const cacheKey = `token:${token.trim()}`;
+    const trimmedToken = token.trim();
+    const cacheKey = crypto.createHash('sha256').update(trimmedToken).digest('hex');
 
     if (!this.instances.has(cacheKey)) {
       // Use the verified constructor shape: new CodeSandbox(token)
-      const client = new CodeSandbox(token.trim());
+      const client = new CodeSandbox(trimmedToken);
       this.instances.set(cacheKey, client);
       console.log('[CodeSandbox] Created new SDK client');
     }

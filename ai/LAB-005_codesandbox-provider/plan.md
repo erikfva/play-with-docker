@@ -155,17 +155,18 @@ Inputs:
 - Default env var: `CODESANDBOX_DEFAULT_CREDENTIALS`
 - S3 mode setting: reuse `S3FS_ENABLED`
 - S3 bucket/env config: reuse `S3_BUCKET`, `S3_REGION`, `S3_ENDPOINT`, and AWS credential env vars
-- Filesystem fallback directory: `CODESANDBOX_CREDENTIALS_DIR`, falling back to `S3_MOUNT_DIR` when `S3FS_ENABLED=1`
+- Filesystem/local credential directory: reuse `S3_MOUNT_DIR`, matching the Google credential loader pattern
 
 Resolution rules:
 1. If request header `x-codesandbox-credentials` is present, use that credential reference.
 2. Otherwise use `CODESANDBOX_DEFAULT_CREDENTIALS`.
 3. If the reference starts with `s3://`, parse bucket/key from the reference.
-4. If `S3FS_ENABLED=0`, treat non-`s3://` references as S3 object keys under `S3_BUCKET`.
-5. If `S3FS_ENABLED=1`, treat non-`s3://` references as filesystem paths. Relative paths resolve under `CODESANDBOX_CREDENTIALS_DIR` or `S3_MOUNT_DIR`.
-6. Read and parse the JSON file.
-7. Validate that `token` is a non-empty string.
-8. Return `{ token, credentialRef, credentialFingerprint }`.
+4. If `NODE_ENV=local`, resolve credential references from files under `S3_MOUNT_DIR`; `s3://bucket/key.json` resolves to `S3_MOUNT_DIR/key.json`.
+5. If `S3FS_ENABLED=0` and not local, treat non-`s3://` references as S3 object keys under `S3_BUCKET`.
+6. If `S3FS_ENABLED=1` and not local, treat non-`s3://` references as filesystem paths under `S3_MOUNT_DIR`.
+7. Read and parse the JSON file.
+8. Validate that `token` is a non-empty string.
+9. Return `{ token, credentialRef, credentialFingerprint }`.
 
 Security rules:
 - Never log or return the raw token.
@@ -582,7 +583,6 @@ Credential file content:
 Optional:
 
 ```env
-CODESANDBOX_CREDENTIALS_DIR=/mnt/s3/codesandbox
 CODESANDBOX_DEFAULT_PRIVACY=public-hosts
 CODESANDBOX_DEFAULT_VM_TIER=Nano
 CODESANDBOX_HIBERNATION_TIMEOUT_SECONDS=86400

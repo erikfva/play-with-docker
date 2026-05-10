@@ -17,14 +17,14 @@ function stubModule(modulePath, exports) {
 async function withCredentialDir(fn) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codesandbox-provider-creds-'));
   const previousEnv = {
-    CODESANDBOX_CREDENTIALS_DIR: process.env.CODESANDBOX_CREDENTIALS_DIR,
     CODESANDBOX_DOCKER_TEMPLATE_ID: process.env.CODESANDBOX_DOCKER_TEMPLATE_ID,
     S3FS_ENABLED: process.env.S3FS_ENABLED,
+    S3_MOUNT_DIR: process.env.S3_MOUNT_DIR,
     S3_BUCKET: process.env.S3_BUCKET
   };
 
-  process.env.CODESANDBOX_CREDENTIALS_DIR = dir;
-  process.env.S3FS_ENABLED = '0';
+  process.env.S3_MOUNT_DIR = dir;
+  process.env.S3FS_ENABLED = '1';
   process.env.S3_BUCKET = 'play-with-docker';
   delete process.env.CODESANDBOX_DOCKER_TEMPLATE_ID;
 

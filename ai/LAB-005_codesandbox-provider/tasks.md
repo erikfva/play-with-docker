@@ -43,7 +43,8 @@
   - Never log, return, or persist the raw token.
 
 - [x] LAB-005-T07: Add filesystem credential path safety.
-  - Resolve relative paths under `CODESANDBOX_CREDENTIALS_DIR` or `S3_MOUNT_DIR`.
+  - Resolve relative paths under `S3_MOUNT_DIR`, matching the Google credential loader pattern.
+  - Resolve `s3://bucket/key` references to `S3_MOUNT_DIR/key` when `NODE_ENV=local`.
   - Reject path traversal outside the configured credentials directory.
   - Return a provider-safe path error.
 

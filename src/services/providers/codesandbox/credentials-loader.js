@@ -21,11 +21,27 @@ function isS3fsEnabled() {
 }
 
 function getCredentialsDirectory() {
-  return process.env.CODESANDBOX_CREDENTIALS_DIR || process.env.S3_MOUNT_DIR || '/tmp/codesandbox';
+  const directory = (process.env.S3_MOUNT_DIR || '').trim();
+  if (!directory) {
+    throw codeSandboxCredentialError(
+      'S3_MOUNT_DIR is required when loading CodeSandbox credentials from the filesystem',
+      'CODESANDBOX_CREDENTIALS_PATH_INVALID'
+    );
+  }
+
+  return directory;
 }
 
 function shouldResolveRelativeRefsFromFilesystem() {
-  return isLocalNodeEnv() || Boolean(process.env.CODESANDBOX_CREDENTIALS_DIR || process.env.S3_MOUNT_DIR) || isS3fsEnabled();
+  return isLocalNodeEnv() || isS3fsEnabled();
+}
+
+function getCredentialCacheKey(credentialRefObj) {
+  if (credentialRefObj.type === 's3') {
+    return `s3://${credentialRefObj.bucket}/${credentialRefObj.key}`;
+  }
+
+  return `file:${credentialRefObj.path}`;
 }
 
 function parseS3CredentialReference(credentialRef) {
@@ -55,8 +71,8 @@ function resolveFilesystemCredentialReference(credentialRef, keyOverride) {
     safePath = path.normalize(path.join(credsDir, ref));
   }
 
-  const normalizedCredsDir = path.normalize(credsDir);
-  const normalizedSafePath = path.normalize(safePath);
+  const normalizedCredsDir = path.resolve(credsDir);
+  const normalizedSafePath = path.resolve(safePath);
   const relative = path.relative(normalizedCredsDir, normalizedSafePath);
 
   if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
@@ -77,7 +93,7 @@ function resolveCredentialReference(credentialRef) {
   if (!credentialRef) {
     if (isLocalNodeEnv()) {
       throw codeSandboxCredentialError(
-        `CodeSandbox credentials file is not configured. Set CODESANDBOX_DEFAULT_CREDENTIALS or send x-codesandbox-credentials/credentialRef with a file under ${getCredentialsDirectory()}`,
+        `CodeSandbox credentials file is not configured. Set CODESANDBOX_DEFAULT_CREDENTIALS or send x-codesandbox-credentials/credentialRef with a file under S3_MOUNT_DIR`,
         'CODESANDBOX_CREDENTIALS_MISSING'
       );
     }
@@ -122,9 +138,10 @@ function buildS3Client() {
 }
 
 async function loadCredentialFile(credentialRefObj) {
-  if (loadedCredentials.has(credentialRefObj.originalRef)) {
+  const cacheKey = getCredentialCacheKey(credentialRefObj);
+  if (loadedCredentials.has(cacheKey)) {
     console.log(`[CodeSandbox] Reusing existing credentials: ${credentialRefObj.originalRef}`);
-    return loadedCredentials.get(credentialRefObj.originalRef);
+    return loadedCredentials.get(cacheKey);
   }
 
   let fileBuffer;
@@ -202,7 +219,7 @@ async function loadCredentialFile(credentialRefObj) {
     credentialFingerprint: `sha256:${fingerprint}`
   };
 
-  loadedCredentials.set(credentialRefObj.originalRef, result);
+  loadedCredentials.set(cacheKey, result);
 
   return result;
 }
@@ -219,7 +236,7 @@ async function loadCodeSandboxCredentials(credentialRefOrHeader) {
   } else {
     if (isLocalNodeEnv()) {
       throw codeSandboxCredentialError(
-        `CodeSandbox credentials file is not configured. Set CODESANDBOX_DEFAULT_CREDENTIALS or send x-codesandbox-credentials/credentialRef with a file under ${getCredentialsDirectory()}`,
+        `CodeSandbox credentials file is not configured. Set CODESANDBOX_DEFAULT_CREDENTIALS or send x-codesandbox-credentials/credentialRef with a file under S3_MOUNT_DIR`,
         'CODESANDBOX_CREDENTIALS_MISSING'
       );
     }
