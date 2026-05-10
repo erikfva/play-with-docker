@@ -17,6 +17,9 @@ const { VMTier } = require('@codesandbox/sdk');
 const CODESANDBOX_DOCKER_TEMPLATE_ALIAS = 'docker';
 const DEFAULT_CODESANDBOX_DOCKER_TEMPLATE_ID = 'hsd8ke';
 const DOCKER_HOST_ENV_FILE = '/tmp/codesandbox-docker-host.env';
+const DEFAULT_HIBERNATION_TIMEOUT_SECONDS = 86400;
+const DEFAULT_KEEP_ALIVE_INTERVAL_MINUTES = 60;
+const KEEP_ALIVE_COMMAND = 'printf "%s\\n" "$(date -u +%FT%TZ)" > /tmp/play-with-docker-keepalive';
 
 function parseMetadata(metadata) {
   if (!metadata) {
@@ -57,6 +60,43 @@ function normalizeSessionRow(row) {
   };
 }
 
+function parseBoolean(value, defaultValue = false) {
+  if (value === undefined || value === null || value === '') {
+    return defaultValue;
+  }
+
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    return value !== 0;
+  }
+
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+
+  return defaultValue;
+}
+
+function parsePositiveInteger(value, defaultValue) {
+  if (value === undefined || value === null || value === '') {
+    return defaultValue;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return defaultValue;
+  }
+
+  return parsed;
+}
+
 function isNotFoundError(error) {
   const message = String(error?.message || '').toLowerCase();
   return message.includes('not found') || message.includes('does not exist') || message.includes('404');
@@ -71,11 +111,24 @@ class CodeSandboxProvider extends BaseProvider {
    * Get keep-alive configuration for CodeSandbox
    * CodeSandbox supports provider-managed hibernation, so keep-alive is disabled
    */
-  getKeepAliveConfig() {
+  getKeepAliveConfig(sessionRow) {
+    const metadata = parseMetadata(sessionRow?.metadata);
+    const keepAlive = metadata.keepAlive || {};
+    const enabled = parseBoolean(keepAlive.enabled, false);
+
+    if (!enabled) {
+      return {
+        enabled: false,
+        intervalMinutes: null,
+        strategy: 'session-disabled'
+      };
+    }
+
     return {
-      enabled: false,
-      intervalMinutes: null,
-      strategy: 'provider-managed-hibernation'
+      enabled: true,
+      intervalMinutes: parsePositiveInteger(keepAlive.intervalMinutes, DEFAULT_KEEP_ALIVE_INTERVAL_MINUTES),
+      strategy: keepAlive.strategy || 'codesandbox-sdk-command',
+      runOnStart: true
     };
   }
 
@@ -114,13 +167,64 @@ class CodeSandboxProvider extends BaseProvider {
   /**
    * Execute keep-alive (disabled for CodeSandbox)
    */
-  async executeKeepAlive() {
-    // Keep-alive is disabled; CodeSandbox uses provider-managed hibernation
-    return {
-      success: false,
-      action: 'disabled',
-      message: 'Keep-alive is disabled for CodeSandbox provider'
-    };
+  async executeKeepAlive(sessionRow) {
+    const metadata = parseMetadata(sessionRow.metadata);
+    const credentialRef = getRowValue(sessionRow, 'credentialRef', 'credentialref') || metadata.credentialRef;
+    const providerSessionId = getRowValue(sessionRow, 'providerSessionId', 'providersessionid');
+
+    if (!providerSessionId || !credentialRef) {
+      return {
+        success: false,
+        action: 'missing-session-data',
+        message: 'CodeSandbox keep-alive skipped because session is missing providerSessionId or credentialRef',
+        updates: {}
+      };
+    }
+
+    let connectedClient;
+    try {
+      const credentialData = await loadCodeSandboxCredentials(credentialRef);
+      const client = codesandboxClient.getClient(credentialData.token);
+      const sandbox = await client.sandboxes.resume(providerSessionId);
+      connectedClient = await sandbox.connect();
+      const output = await connectedClient.commands.run(KEEP_ALIVE_COMMAND);
+      const updatedMetadata = {
+        ...metadata,
+        keepAlive: {
+          ...(metadata.keepAlive || {}),
+          enabled: true,
+          lastRunAt: new Date().toISOString(),
+          lastAction: 'sdk-command'
+        }
+      };
+
+      return {
+        success: true,
+        action: 'keep-alive-sent',
+        message: String(output || 'CodeSandbox keep-alive command completed').trim(),
+        updates: {
+          status: 'RUNNING',
+          metadata: updatedMetadata
+        }
+      };
+    } catch (error) {
+      console.warn(`[CodeSandbox] Keep-alive failed for session ${sessionRow.id}: ${error.message}`);
+      return {
+        success: false,
+        action: 'error',
+        message: error.message,
+        error: error.message,
+        updates: {}
+      };
+    } finally {
+      if (connectedClient?.dispose) {
+        try {
+          await connectedClient.dispose();
+        } catch (disposeError) {
+          console.warn(`[CodeSandbox] Failed to dispose keep-alive client: ${disposeError.message}`);
+        }
+      }
+    }
   }
 
   /**
@@ -149,11 +253,21 @@ class CodeSandboxProvider extends BaseProvider {
       path,
       vmTier,
       hibernationTimeoutSeconds,
-      automaticWakeupConfig
+      automaticWakeupConfig,
+      keepAliveEnabled,
+      keepAliveIntervalMinutes
     } = options || {};
 
     try {
       this.validateDockerTemplateOnly(templateId);
+      const keepAliveConfig = this.buildSessionKeepAliveConfig({
+        keepAliveEnabled: keepAliveEnabled ?? options.CODESANDBOX_KEEP_ALIVE_ENABLED,
+        keepAliveIntervalMinutes: keepAliveIntervalMinutes ?? options.CODESANDBOX_KEEP_ALIVE_INTERVAL_MINUTES,
+        hibernationTimeoutSeconds: hibernationTimeoutSeconds ?? options.CODESANDBOX_HIBERNATION_TIMEOUT_SECONDS,
+        envKeepAliveEnabled: process.env.CODESANDBOX_KEEP_ALIVE_ENABLED,
+        envKeepAliveIntervalMinutes: process.env.CODESANDBOX_KEEP_ALIVE_INTERVAL_MINUTES,
+        envHibernationTimeoutSeconds: process.env.CODESANDBOX_HIBERNATION_TIMEOUT_SECONDS
+      });
 
       // Step 1: Load credentials
       const credentialData = await loadCodeSandboxCredentials(credentialRef);
@@ -181,7 +295,7 @@ class CodeSandboxProvider extends BaseProvider {
         privacy,
         path,
         vmTier,
-        hibernationTimeoutSeconds,
+        hibernationTimeoutSeconds: keepAliveConfig.hibernationTimeoutSeconds,
         automaticWakeupConfig
       });
 
@@ -205,7 +319,8 @@ class CodeSandboxProvider extends BaseProvider {
       session.metadata = {
         ...(session.metadata || {}),
         dockerHost: dockerHostSetup.dockerHost,
-        dockerHostProxy: dockerHostSetup
+        dockerHostProxy: dockerHostSetup,
+        keepAlive: keepAliveConfig
       };
 
       return session;
@@ -235,9 +350,10 @@ class CodeSandboxProvider extends BaseProvider {
     const defaultTitle = title || process.env.CODESANDBOX_DEFAULT_TITLE || 'CodeSandbox Session';
     const defaultPrivacy = privacy || process.env.CODESANDBOX_DEFAULT_PRIVACY || 'public-hosts';
     const defaultVmTier = vmTier || process.env.CODESANDBOX_DEFAULT_VM_TIER || 'Nano';
-    const defaultHibernation = hibernationTimeoutSeconds !== undefined
-      ? hibernationTimeoutSeconds
-      : parseInt(process.env.CODESANDBOX_HIBERNATION_TIMEOUT_SECONDS || '86400', 10);
+    const defaultHibernation = parsePositiveInteger(
+      hibernationTimeoutSeconds,
+      parsePositiveInteger(process.env.CODESANDBOX_HIBERNATION_TIMEOUT_SECONDS, DEFAULT_HIBERNATION_TIMEOUT_SECONDS)
+    );
     // Build options object
     const options = {
       title: defaultTitle,
@@ -274,6 +390,29 @@ class CodeSandboxProvider extends BaseProvider {
     }
 
     return options;
+  }
+
+  buildSessionKeepAliveConfig(options = {}) {
+    const enabled = parseBoolean(
+      options.keepAliveEnabled ?? options.envKeepAliveEnabled,
+      false
+    );
+    const intervalMinutes = parsePositiveInteger(
+      options.keepAliveIntervalMinutes ?? options.envKeepAliveIntervalMinutes,
+      DEFAULT_KEEP_ALIVE_INTERVAL_MINUTES
+    );
+    const hibernationTimeoutSeconds = parsePositiveInteger(
+      options.hibernationTimeoutSeconds ?? options.envHibernationTimeoutSeconds,
+      DEFAULT_HIBERNATION_TIMEOUT_SECONDS
+    );
+
+    return {
+      enabled,
+      intervalMinutes,
+      hibernationTimeoutSeconds,
+      strategy: enabled ? 'codesandbox-sdk-command' : 'session-disabled',
+      createdAt: new Date().toISOString()
+    };
   }
 
   validateDockerTemplateOnly(templateId) {
