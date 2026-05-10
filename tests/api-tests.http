@@ -157,7 +157,7 @@ X-Server-Token: {{serverToken}}
 # configured through CODESANDBOX_DEFAULT_CREDENTIALS or x-codesandbox-credentials.
 
 @codeSandboxTitle = lab-codesandbox-smoke-test
-@codeSandboxCredentials = codesandbox/etecnologysys.json
+@codeSandboxCredentials = codesandbox/sistemamedical.json
 
 ### 15. List Supported Providers - Should Include codesandbox
 GET {{baseUrl}}/sessions/providers/supported
@@ -195,7 +195,7 @@ X-CodeSandbox-Credentials: {{codeSandboxCredentials}}
 
 ###
 @codeSandboxSessionId = {{createCodeSandboxSession.response.body.$.id}}
-# @codeSandboxSessionId = c6b2db8a-9426-482e-8207-5e2a707bb0a0
+#@codeSandboxSessionId = d169511c-0b81-4cc0-836e-0a8e36680179
 #@codeSandboxDockerHost = {{createCodeSandboxSession.response.body.$.dockerHost}}
 
 ### 17. Get CodeSandbox Session Details
@@ -262,7 +262,7 @@ Content-Type: application/json
 X-Server-Token: {{serverToken}}
 
 {
-    "command": "docker run -d -e HOME=/tmp/config -e DOCKER_HOST -e PUID=1000 -e PGID=1000 -e TZ=Etc/UTC -e PASSWORD=password -e HASHED_PASSWORD= -e SUDO_PASSWORD=password -e SUDO_PASSWORD_HASH= -e DEFAULT_WORKSPACE=/tmp/config/workspace -e S3_ACCESS_KEY_ID={{s3AccessKeyId}} -e S3_SECRET_ACCESS_KEY={{s3SecretAccessKey}} -e S3_BUCKET=code-server -e S3_ENDPOINT={{s3EndPoint}} -e S3_REGION={{s3Region}} -e INIT_FILE=init-code-server.sh -e GIT_USER_NAME=erikfva -e GIT_USER_EMAIL=erik.vargas@yandex.com -e TOKEN_NGROK={{tokenNgrok}} -e HTTPS_PORTS=8443,8081 -p 8443:8443 -p 8081:8081 -p 3000:3000 -v /tmp/config:/config -v /tmp/config:/tmp/config --restart unless-stopped --privileged --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined erikvargas/code-server:latest"
+    "command": "docker run -d --add-host dockerhost:192.168.241.2 -e HOME=/tmp/config -e DOCKER_HOST -e PUID=1000 -e PGID=1000 -e TZ=Etc/UTC -e PASSWORD=password -e HASHED_PASSWORD= -e SUDO_PASSWORD=password -e SUDO_PASSWORD_HASH= -e DEFAULT_WORKSPACE=/tmp/config/workspace -e S3_ACCESS_KEY_ID={{s3AccessKeyId}} -e S3_SECRET_ACCESS_KEY={{s3SecretAccessKey}} -e S3_BUCKET=code-server -e S3_ENDPOINT={{s3EndPoint}} -e S3_REGION={{s3Region}} -e INIT_FILE=init-code-server.sh -e GIT_USER_NAME=erikfva -e GIT_USER_EMAIL=erik.vargas@yandex.com -e TOKEN_NGROK={{tokenNgrok}} -e HTTPS_PORTS=8443,8081 -p 8443:8443 -p 8081:8081 -p 3000:3000 -v /tmp/config:/config -v /tmp/config:/tmp/config --restart unless-stopped --privileged --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined erikvargas/code-server:latest"
 }
 
 ### 19.6 Read HTTPS URL File From Code Server Container
