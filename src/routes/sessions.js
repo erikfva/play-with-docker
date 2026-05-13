@@ -231,7 +231,17 @@ router.get('/providers/supported', (req, res) => {
 
 router.get('/google-credentials', async (req, res) => {
   try {
-    const prefix = req.query.prefix || '';
+    const prefix = 'gcloud';
+    const result = await listAvailableCredentials(prefix);
+    return res.json(result);
+  } catch (error) {
+    return mapErrorToHttp(res, error, 'Failed to list credentials');
+  }
+});
+
+router.get('/codesandbox-credentials', async (req, res) => {
+  try {
+    const prefix = 'codesandbox';
     const result = await listAvailableCredentials(prefix);
     return res.json(result);
   } catch (error) {
