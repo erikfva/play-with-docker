@@ -67,24 +67,12 @@ async function listCredentialsFs(directory) {
 }
 
 async function listAvailableCredentials(prefix) {
-  if (isLocalNodeEnv()) {
-    const directory = process.env.S3_MOUNT_DIR || '';
+  const prefixPath = prefix ? '/' + prefix : '';
+  if (false && isLocalNodeEnv() /* || isS3fsEnabled()*/) {
+    const directory = (process.env.S3_MOUNT_DIR || '') + prefixPath;
     const files = await listCredentialsFs(directory);
     const defaultKey = process.env.GOOGLE_APPLICATION_CREDENTIALS || '';
-
-    return { credentials: files, mode: 'local', default: defaultKey };
-  }
-
-  if (isS3fsEnabled()) {
-    const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.S3_MOUNT_DIR || '';
-    const directory = credentialsPath.endsWith('.json')
-      ? path.dirname(credentialsPath)
-      : credentialsPath;
-
-    const files = await listCredentialsFs(directory);
-    const mode = 's3fs';
-    const defaultKey = process.env.GOOGLE_APPLICATION_CREDENTIALS || '';
-
+    const mode = isS3fsEnabled() ? 's3fs' : 'local';
     return { credentials: files, mode, default: defaultKey };
   }
 
