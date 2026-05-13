@@ -68,7 +68,7 @@ async function listCredentialsFs(directory) {
 
 async function listAvailableCredentials(prefix) {
   const prefixPath = prefix ? '/' + prefix : '';
-  if (false && isLocalNodeEnv() /* || isS3fsEnabled()*/) {
+  if (isLocalNodeEnv() || isS3fsEnabled()) {
     const directory = (process.env.S3_MOUNT_DIR || '') + prefixPath;
     const files = await listCredentialsFs(directory);
     const defaultKey = process.env.GOOGLE_APPLICATION_CREDENTIALS || '';
