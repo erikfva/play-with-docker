@@ -226,7 +226,8 @@ router.post('/', async (req, res) => {
 });
 
 router.get('/providers/supported', (req, res) => {
-  res.json({ providers: listProviders() });
+  const providers = listProviders().filter(name => name !== 'pwd');
+  res.json({ providers });
 });
 
 router.get('/google-credentials', async (req, res) => {
