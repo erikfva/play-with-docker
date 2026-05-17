@@ -147,10 +147,6 @@ X-Server-Token: {{serverToken}}
 GET {{baseUrl}}/sessions/google-credentials
 X-Server-Token: {{serverToken}}
 
-### 14.1. List Available Google Credentials with Prefix Filter
-GET {{baseUrl}}/sessions/google-credentials?prefix=gcloud/
-X-Server-Token: {{serverToken}}
-
 ### 14.2. List Available CodeSandbox Credentials
 GET {{baseUrl}}/sessions/codesandbox-credentials
 X-Server-Token: {{serverToken}}
