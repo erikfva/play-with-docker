@@ -8,9 +8,8 @@ const bodyParser = require('body-parser');
 const db = require('./db/db');
 const sessionRoutes = require('./routes/sessions');
 const { requireServerToken } = require('./middleware/require-server-token');
-const { setGoogleCredentials } = require('./middleware/set-google-credentials')
-const { initGoogleCredentialsFromS3IfNeeded } = require('./services/google-credentials-loader');
 const keepAliveService = require('./services/keep-alive-service');
+const { initGoogleCredentialsFromS3IfNeeded } = require('./services/google-credentials-loader');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -18,7 +17,7 @@ const port = process.env.PORT || 3000;
 app.use(bodyParser.json());
 
 // Routes
-app.use('/api/v1/sessions', requireServerToken, setGoogleCredentials, sessionRoutes);
+app.use('/api/v1/sessions', requireServerToken, sessionRoutes);
 
 // Health Check
 app.get('/health', (req, res) => {
@@ -27,11 +26,17 @@ app.get('/health', (req, res) => {
 
 async function startServer() {
   try {
-    await initGoogleCredentialsFromS3IfNeeded();
     await db.ready;
     console.log('db ready in server');
 
     try {
+      const googleCredentials = process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS || process.env.GOOGLE_APPLICATION_CREDENTIALS;
+      if (googleCredentials) {
+        process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS = googleCredentials;
+        process.env.GOOGLE_APPLICATION_CREDENTIALS = googleCredentials;
+        await initGoogleCredentialsFromS3IfNeeded(googleCredentials);
+      }
+
       const recoverySummary = await keepAliveService.recoverKeepAlivesOnStartup();
       if (recoverySummary.scanned > 0) {
         console.log('[KeepAlive][Recovery] Completed:', recoverySummary);

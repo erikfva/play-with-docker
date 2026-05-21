@@ -117,9 +117,44 @@ db.ready = (async () => {
   await ensureColumn('sessions', 'publicKey', 'ALTER TABLE sessions ADD COLUMN publicKey TEXT');
   await ensureColumn('sessions', 'status', "ALTER TABLE sessions ADD COLUMN status TEXT DEFAULT 'PENDING'");
   await ensureColumn('sessions', 'metadata', 'ALTER TABLE sessions ADD COLUMN metadata TEXT');
+  await ensureColumn('sessions', 'credentialRef', 'ALTER TABLE sessions ADD COLUMN credentialRef TEXT');
+  await ensureColumn('sessions', 'credentialFingerprint', 'ALTER TABLE sessions ADD COLUMN credentialFingerprint TEXT');
 
   await run("UPDATE sessions SET provider = 'gcs' WHERE provider IS NULL OR provider = ''");
   await run('UPDATE sessions SET providerSessionId = envName WHERE providerSessionId IS NULL AND envName IS NOT NULL');
+
+  const duplicateCodeSandboxSessions = await all(`
+    SELECT
+      credentialFingerprint,
+      COUNT(*) AS activeCount,
+      ARRAY_AGG(id ORDER BY createdAt DESC, id DESC) AS sessionIds
+    FROM sessions
+    WHERE provider = 'codesandbox'
+      AND credentialFingerprint IS NOT NULL
+      AND COALESCE(status, '') NOT IN ('TERMINATED', 'DELETED', 'FAILED')
+    GROUP BY credentialFingerprint
+    HAVING COUNT(*) > 1
+  `);
+
+  if (duplicateCodeSandboxSessions.length > 0) {
+    const duplicateSummary = duplicateCodeSandboxSessions
+      .map((row) => `${row.credentialfingerprint || row.credentialFingerprint}: ${(row.sessionids || row.sessionIds || []).join(', ')}`)
+      .join('; ');
+
+    throw new Error(
+      `Cannot create CodeSandbox token uniqueness index while duplicate non-terminal sessions exist. ` +
+      `Terminate or mark older duplicate sessions as TERMINATED, DELETED, or FAILED first. Duplicates: ${duplicateSummary}`
+    );
+  }
+
+  // Add unique index for active CodeSandbox sessions (one sandbox/session per token)
+  await run(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_codesandbox_active_token
+    ON sessions (credentialFingerprint)
+    WHERE provider = 'codesandbox'
+      AND credentialFingerprint IS NOT NULL
+      AND COALESCE(status, '') NOT IN ('TERMINATED', 'DELETED', 'FAILED')
+  `);
 
     console.log('[DB] ✓ Schema initialized successfully');
   } catch (err) {

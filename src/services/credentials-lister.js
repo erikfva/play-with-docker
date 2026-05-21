@@ -1,7 +1,12 @@
 const fs = require('fs/promises');
 const path = require('path');
 const { S3Client, ListObjectsV2Command } = require('@aws-sdk/client-s3');
-const { isS3fsEnabled, buildS3Client, resolveBucketAndKey } = require('./google-credentials-loader');
+const {
+  isS3fsEnabled,
+  isLocalNodeEnv,
+  buildS3Client,
+  resolveBucketAndKey
+} = require('./google-credentials-loader');
 
 function createError(message, code, httpStatus) {
   const err = new Error(message);
@@ -62,16 +67,12 @@ async function listCredentialsFs(directory) {
 }
 
 async function listAvailableCredentials(prefix) {
-  if (isS3fsEnabled()) {
-    const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.S3_MOUNT_DIR || '';
-    const directory = credentialsPath.endsWith('.json')
-      ? path.dirname(credentialsPath)
-      : credentialsPath;
-
+  const prefixPath = prefix ? '/' + prefix : '';
+  if (isLocalNodeEnv() || isS3fsEnabled()) {
+    const directory = (process.env.S3_MOUNT_DIR || '') + prefixPath;
     const files = await listCredentialsFs(directory);
-    const mode = 's3fs';
     const defaultKey = process.env.GOOGLE_APPLICATION_CREDENTIALS || '';
-
+    const mode = isS3fsEnabled() ? 's3fs' : 'local';
     return { credentials: files, mode, default: defaultKey };
   }
 

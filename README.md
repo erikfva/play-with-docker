@@ -33,6 +33,11 @@ curl http://localhost:3000/health
 
 The app supports two modes controlled by `S3FS_ENABLED`.
 
+Provider credentials are stored under provider-specific folders in the S3 bucket
+or local mount:
+- Google Cloud Shell (`gcs`): `gcloud/`
+- CodeSandbox (`codesandbox`): `codesandbox/`
+
 ### Mode A: `s3fs` enabled (`S3FS_ENABLED=1`)
 
 - Entrypoint mounts `S3_BUCKET` to `S3_MOUNT_DIR` using `s3fs`.
@@ -43,12 +48,23 @@ The app supports two modes controlled by `S3FS_ENABLED`.
 - No FUSE mount is attempted.
 - At startup, app downloads credentials from S3 using SDK and writes a temp file in `/tmp`.
 - `GOOGLE_APPLICATION_CREDENTIALS` is interpreted as:
-  - `s3://bucket/key.json`, or
-  - `key.json` / `path/to/key.json` (uses `S3_BUCKET`)
+  - `s3://bucket/gcloud/key.json`, or
+  - `gcloud/key.json` (uses `S3_BUCKET`)
 
 Startup logs show active mode:
 - `Credential mode: s3fs ...`
 - `Credential mode: s3-api ...`
+
+### Local development override (`NODE_ENV=local`)
+
+When `NODE_ENV=local`, the app reads Google credential files from the local folder configured by `S3_MOUNT_DIR` instead of downloading them from S3.
+
+In this mode, `GOOGLE_APPLICATION_CREDENTIALS` can be:
+- `gcloud/key.json` under `S3_MOUNT_DIR`
+- `s3://bucket/gcloud/key.json`, which resolves to `S3_MOUNT_DIR/gcloud/key.json`
+
+Startup logs show:
+- `Credential mode: local ...`
 
 ## Environment Variables
 
@@ -114,4 +130,3 @@ Use:
 - `S3FS_ENABLED=0`
 - S3 API credential loading mode
 - No FUSE mount expectations
-

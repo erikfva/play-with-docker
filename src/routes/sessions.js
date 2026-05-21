@@ -5,6 +5,7 @@ const { getProvider, listProviders, normalizeProviderName } = require('../servic
 const { ProviderError } = require('../services/errors/provider-errors');
 const keepAliveService = require('../services/keep-alive-service');
 const { listAvailableCredentials } = require('../services/credentials-lister');
+const { initGoogleCredentialsFromS3IfNeeded } = require('../services/google-credentials-loader');
 
 const router = express.Router();
 
@@ -37,6 +38,10 @@ function parseMetadata(rawMetadata) {
     return null;
   }
 
+  if (typeof rawMetadata === 'object') {
+    return rawMetadata;
+  }
+
   try {
     return JSON.parse(rawMetadata);
   } catch (_) {
@@ -44,26 +49,163 @@ function parseMetadata(rawMetadata) {
   }
 }
 
+function getRowValue(row, camelName, lowerName) {
+  return row?.[camelName] || row?.[lowerName];
+}
+
+function buildCreateResponseFromSession(row, reusedExisting = false) {
+  const metadata = parseMetadata(row.metadata) || {};
+
+  return {
+    id: row.id,
+    provider: row.provider,
+    providerSessionId: getRowValue(row, 'providerSessionId', 'providersessionid'),
+    status: row.status,
+    dockerHost: metadata.dockerHost || null,
+    reusedExisting
+  };
+}
+
+async function initializeGoogleCredentialsForRequest(req) {
+  const googleCredentials = process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS || process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  if (!googleCredentials) {
+    const error = new Error('Google Credentials is not configured');
+    error.statusCode = 500;
+    error.code = 'GOOGLE_CREDENTIALS_MISSING';
+    throw error;
+  }
+
+  process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS = googleCredentials;
+  process.env.GOOGLE_APPLICATION_CREDENTIALS = googleCredentials;
+  await initGoogleCredentialsFromS3IfNeeded(googleCredentials);
+
+  const headerGoogleCredentials = req.headers['x-google-credentials'];
+  if (headerGoogleCredentials) {
+    await initGoogleCredentialsFromS3IfNeeded(headerGoogleCredentials);
+  }
+}
+
+async function cleanupCreatedCodeSandboxSession(created) {
+  if (!created?.providerSessionId) {
+    return;
+  }
+
+  try {
+    const cleanupProvider = getProvider('codesandbox');
+    await cleanupProvider.terminateSession({
+      providerSessionId: created.providerSessionId,
+      credentialRef: created.credentialRef,
+      credentialFingerprint: created.credentialFingerprint
+    });
+  } catch (cleanupError) {
+    console.warn(`[Session Create] Failed to cleanup orphaned CodeSandbox sandbox/session ${created.providerSessionId}: ${cleanupError.message}`);
+  }
+}
+
+async function refreshExistingSessionForCreate(row, provider, requireRefreshSuccess = false) {
+  try {
+    const refreshed = await provider.refreshSession(row);
+    await db.run(
+      `UPDATE sessions
+       SET status = COALESCE(?, status),
+           webHost = COALESCE(?, webHost),
+           sshCommand = COALESCE(?, sshCommand),
+           metadata = COALESCE(?, metadata)
+       WHERE id = ?`,
+      [
+        refreshed.status || null,
+        refreshed.webHost || null,
+        refreshed.sshCommand || null,
+        refreshed.metadata ? JSON.stringify(refreshed.metadata) : null,
+        row.id
+      ]
+    );
+
+    return {
+      ...row,
+      status: refreshed.status || row.status,
+      webHost: refreshed.webHost || getRowValue(row, 'webHost', 'webhost'),
+      sshCommand: refreshed.sshCommand || getRowValue(row, 'sshCommand', 'sshcommand'),
+      metadata: refreshed.metadata || parseMetadata(row.metadata)
+    };
+  } catch (error) {
+    if (requireRefreshSuccess) {
+      throw error;
+    }
+
+    console.warn(`[Session Create] Failed to refresh existing session ${row.id}: ${error.message}`);
+    return row;
+  }
+}
+
 router.post('/', async (req, res) => {
   const providerName = normalizeProviderName(req.body?.provider || 'gcs');
 
   try {
+    // Initialize provider-aware credentials for GCS
+    if (providerName === 'gcs') {
+      await initializeGoogleCredentialsForRequest(req);
+    }
+
     const provider = getProvider(providerName);
-    const created = await provider.createSession(req.body || {});
+    const created = await provider.createSession({
+      ...(req.body || {}),
+      credentialRef: req.headers['x-codesandbox-credentials'] || req.body?.credentialRef
+    });
+
+    if (created.existing && created.session) {
+      const refreshedExisting = await refreshExistingSessionForCreate(created.session, provider);
+      return res.status(200).json(buildCreateResponseFromSession(refreshedExisting, true));
+    }
+
     const id = uuidv4();
 
-    await db.run(
-      `INSERT INTO sessions (id, provider, providerSessionId, envName, status, metadata)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [
-        id,
-        provider.name,
-        created.providerSessionId,
-        created.providerSessionId,
-        created.status || 'STARTING',
-        created.metadata ? JSON.stringify(created.metadata) : null
-      ]
-    );
+    try {
+      await db.run(
+        `INSERT INTO sessions (id, provider, providerSessionId, envName, status, webHost, sshCommand, credentialRef, credentialFingerprint, metadata)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          id,
+          provider.name,
+          created.providerSessionId,
+          created.envName || created.providerSessionId,
+          created.status || 'STARTING',
+          created.webHost || null,
+          created.sshCommand || null,
+          created.credentialRef || null,
+          created.credentialFingerprint || null,
+          created.metadata ? JSON.stringify(created.metadata) : null
+        ]
+      );
+    } catch (dbError) {
+      if (providerName === 'codesandbox') {
+        await cleanupCreatedCodeSandboxSession(created);
+      }
+
+      // Handle unique constraint violation for CodeSandbox one sandbox/session per token
+      if (dbError.code === '23505' && providerName === 'codesandbox') {
+        // Unique index violation on credentialFingerprint
+        // Return the existing session
+        const existingSession = await db.get(
+          'SELECT * FROM sessions WHERE credentialFingerprint = ? AND provider = ? AND (status IS NULL OR status NOT IN (?, ?, ?))',
+          [created.credentialFingerprint, 'codesandbox', 'TERMINATED', 'DELETED', 'FAILED']
+        );
+
+        if (existingSession) {
+          const refreshedExisting = await refreshExistingSessionForCreate(existingSession, provider, true);
+          return res.status(200).json(buildCreateResponseFromSession(refreshedExisting, true));
+        }
+
+        // If we can't find the session but got a unique violation, something is wrong
+        return res.status(500).json({
+          error: 'Failed to create session due to credential conflict',
+          code: 'INTERNAL_ERROR'
+        });
+      }
+
+      // For any other error, throw it
+      throw dbError;
+    }
 
     const sessionRow = await db.get('SELECT * FROM sessions WHERE id = ?', [id]);
 
@@ -75,7 +217,8 @@ router.post('/', async (req, res) => {
       id,
       provider: provider.name,
       providerSessionId: created.providerSessionId,
-      status: created.status || 'STARTING'
+      status: created.status || 'STARTING',
+      dockerHost: created.metadata?.dockerHost || null
     });
   } catch (error) {
     return mapErrorToHttp(res, error, 'Failed to create session');
@@ -83,12 +226,23 @@ router.post('/', async (req, res) => {
 });
 
 router.get('/providers/supported', (req, res) => {
-  res.json({ providers: listProviders() });
+  const providers = listProviders().filter(name => name !== 'pwd');
+  res.json({ providers });
 });
 
 router.get('/google-credentials', async (req, res) => {
   try {
-    const prefix = req.query.prefix || '';
+    const prefix = 'gcloud';
+    const result = await listAvailableCredentials(prefix);
+    return res.json(result);
+  } catch (error) {
+    return mapErrorToHttp(res, error, 'Failed to list credentials');
+  }
+});
+
+router.get('/codesandbox-credentials', async (req, res) => {
+  try {
+    const prefix = 'codesandbox';
     const result = await listAvailableCredentials(prefix);
     return res.json(result);
   } catch (error) {
@@ -119,6 +273,11 @@ router.get('/:id', async (req, res) => {
     const row = await db.get('SELECT * FROM sessions WHERE id = ?', [req.params.id]);
     if (!row) {
       return res.status(404).json({ error: 'Session not found' });
+    }
+
+    // Initialize provider-aware credentials for GCS refresh
+    if (row.provider === 'gcs') {
+      await initializeGoogleCredentialsForRequest(req);
     }
 
     const provider = getProvider(row.provider);
@@ -168,6 +327,11 @@ router.post('/:id/command', async (req, res) => {
       return res.status(404).json({ error: 'Session not found' });
     }
 
+    // Initialize provider-aware credentials for GCS command execution
+    if (row.provider === 'gcs') {
+      await initializeGoogleCredentialsForRequest(req);
+    }
+
     const provider = getProvider(row.provider);
     const result = await provider.executeCommand(row, command);
     const updates = result.updates || {};
@@ -201,6 +365,11 @@ router.delete('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Session not found' });
     }
 
+    // Initialize provider-aware credentials for GCS termination
+    if (row.provider === 'gcs') {
+      await initializeGoogleCredentialsForRequest(req);
+    }
+
     const provider = getProvider(row.provider);
 
     // STOP KEEP-ALIVE BEFORE TERMINATING
@@ -213,12 +382,16 @@ router.delete('/:id', async (req, res) => {
       await provider.terminateSession(row);
     } catch (providerError) {
       console.warn(`Provider termination failed for session ${row.id}:`, providerError.message);
+      if (row.provider === 'codesandbox') {
+        throw providerError;
+      }
     }
 
     await db.run('DELETE FROM sessions WHERE id = ?', [row.id]);
 
     const response = {
-      message: `Session ${row.id} (${row.provider}) terminated and removed from orchestrator.`
+      message: `Session ${row.id} (${row.provider}) terminated and removed from orchestrator.`,
+      providerCleanup: row.provider === 'codesandbox' ? 'deleted' : 'attempted'
     };
 
     if (stats) {
@@ -250,10 +423,18 @@ router.post('/terminate-all', async (req, res) => {
       };
 
       try {
+        if (row.provider === 'gcs') {
+          await initializeGoogleCredentialsForRequest(req);
+        }
+
         await provider.terminateSession(row);
         result.terminated = true;
       } catch (providerError) {
         result.errors.push(`terminateSession: ${providerError.message}`);
+        if (row.provider === 'codesandbox') {
+          results.push(result);
+          continue;
+        }
       }
 
       try {

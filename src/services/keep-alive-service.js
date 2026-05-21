@@ -25,11 +25,18 @@ function isTerminalStatus(status) {
  * @param {Object} provider - Provider instance
  */
 async function startKeepAlive(sessionRow, provider) {
-  const config = provider.getKeepAliveConfig();
+  const config = provider.getKeepAliveConfig(sessionRow);
 
   // Don't start if provider doesn't need keep-alive
   if (!config.enabled) {
     console.log(`[KeepAlive] Skipping keep-alive for ${provider.name} provider (disabled)`);
+    return;
+  }
+
+  if (!Number.isFinite(config.intervalMinutes) || config.intervalMinutes <= 0) {
+    console.warn(
+      `[KeepAlive] Skipping keep-alive for ${provider.name} session ${sessionRow.id}: invalid interval ${config.intervalMinutes}`
+    );
     return;
   }
 
@@ -52,8 +59,7 @@ async function startKeepAlive(sessionRow, provider) {
     lastRunAt: null
   });
 
-  const intervalMs = config.intervalMinutes * 60 * 1000;
-  const timer = setInterval(async () => {
+  async function runKeepAlive() {
     try {
       const stats = keepAliveStats.get(sessionRow.id);
 
@@ -78,18 +84,31 @@ async function startKeepAlive(sessionRow, provider) {
             if (result.updates.privateKey !== undefined) {
               updateFields.push('privateKey = ?');
               updateValues.push(result.updates.privateKey);
+              sessionRow.privateKey = result.updates.privateKey;
             }
             if (result.updates.publicKey !== undefined) {
               updateFields.push('publicKey = ?');
               updateValues.push(result.updates.publicKey);
+              sessionRow.publicKey = result.updates.publicKey;
             }
             if (result.updates.sshCommand !== undefined) {
               updateFields.push('sshCommand = ?');
               updateValues.push(result.updates.sshCommand);
+              sessionRow.sshCommand = result.updates.sshCommand;
+              sessionRow.sshcommand = result.updates.sshCommand;
             }
             if (result.updates.status !== undefined) {
               updateFields.push('status = ?');
               updateValues.push(result.updates.status);
+              sessionRow.status = result.updates.status;
+            }
+            if (result.updates.metadata !== undefined) {
+              const metadata = typeof result.updates.metadata === 'string'
+                ? result.updates.metadata
+                : JSON.stringify(result.updates.metadata);
+              updateFields.push('metadata = ?');
+              updateValues.push(metadata);
+              sessionRow.metadata = metadata;
             }
 
             if (updateFields.length > 0) {
@@ -118,9 +137,16 @@ async function startKeepAlive(sessionRow, provider) {
       }
       console.error(`[KeepAlive] Unexpected error for session ${sessionRow.id}:`, error);
     }
-  }, intervalMs);
+  }
+
+  const intervalMs = config.intervalMinutes * 60 * 1000;
+  const timer = setInterval(runKeepAlive, intervalMs);
 
   activeKeepAliveTimers.set(sessionRow.id, timer);
+
+  if (config.runOnStart) {
+    setImmediate(runKeepAlive);
+  }
 }
 
 /**
@@ -167,7 +193,7 @@ async function recoverKeepAlivesOnStartup() {
         continue;
       }
 
-      const keepAliveConfig = provider.getKeepAliveConfig();
+      const keepAliveConfig = provider.getKeepAliveConfig(sessionRow);
       if (!keepAliveConfig.enabled) {
         summary.skipped += 1;
         continue;
