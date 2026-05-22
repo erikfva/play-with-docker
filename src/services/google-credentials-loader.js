@@ -141,9 +141,9 @@ async function initGoogleCredentialsFromS3IfNeeded( googleCredentials ) {
 
   if (isS3fsEnabled()) {
     console.log('Credential mode: s3fs (filesystem path from GOOGLE_APPLICATION_CREDENTIALS)');
-    // Ensure GOOGLE_APPLICATION_CREDENTIALS is set to the mounted path
-    if (process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-      process.env.GOOGLE_APPLICATION_CREDENTIALS = process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS;
+    const credentialsRef = (googleCredentials || '').trim();
+    if (credentialsRef) {
+      process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsRef;
     }
     return;
   }
@@ -184,10 +184,6 @@ async function initGoogleCredentialsFromS3IfNeeded( googleCredentials ) {
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.writeFile(outputPath, fileBuffer, { mode: 0o600 });
   
-  if(!process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS) {
-    process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS = outputPath;
-  }
-
   process.env.GOOGLE_APPLICATION_CREDENTIALS = outputPath;
   console.log(`Loaded GOOGLE_APPLICATION_CREDENTIALS from s3://${bucket}/${key}`);
   loadedCredentialsFiles.add(credentialsRef);

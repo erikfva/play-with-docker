@@ -32,7 +32,7 @@
     ```json
     { "token": "xxxxx" }
     ```
-  - Resolve credentials from `x-codesandbox-credentials` or `CODESANDBOX_DEFAULT_CREDENTIALS`.
+  - Resolve credentials from `x-codesandbox-credentials` or request body `credentialRef`.
   - Support `s3://bucket/key`, S3 object key mode, and filesystem mode.
   - Reuse S3 client patterns from Google credential loading where practical.
 
@@ -146,7 +146,7 @@
 - [ ] LAB-005-T20: Update docs.
   - Update `README.md`.
   - Update `ai/project-overview.md`.
-  - Document credential JSON format, `CODESANDBOX_DEFAULT_CREDENTIALS`, `x-codesandbox-credentials`, Docker-only creation, one sandbox/session per token behavior, and termination semantics.
+  - Document credential JSON format, `x-codesandbox-credentials`, Docker-only creation, one sandbox/session per token behavior, and termination semantics.
   - Status note: `README.md` and `ai/project-overview.md` still need CodeSandbox operator-limit and delete-on-terminate details.
 
 - [ ] LAB-005-T21: Update HTTP request collection.

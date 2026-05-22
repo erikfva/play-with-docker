@@ -154,7 +154,7 @@ X-Server-Token: {{serverToken}}
 ###
 # CodeSandbox Provider Tests
 # Requires the LAB-005 implementation and a CodeSandbox credential JSON file
-# configured through CODESANDBOX_DEFAULT_CREDENTIALS or x-codesandbox-credentials.
+# sent through x-codesandbox-credentials or request body credentialRef.
 
 @codeSandboxTitle = lab-codesandbox-smoke-test
 @codeSandboxCredentials = codesandbox/sistemamedical.json
@@ -168,6 +168,7 @@ X-Server-Token: {{serverToken}}
 POST {{baseUrl}}/sessions
 Content-Type: application/json
 X-Server-Token: {{serverToken}}
+X-CodeSandbox-Credentials: {{codeSandboxCredentials}}
 
 {
     "provider": "codesandbox",
@@ -290,8 +291,8 @@ X-Server-Token: {{serverToken}}
     "templateId": "node"
 }
 
-### 22. CodeSandbox Create Without Server Configuration
-# Run this after starting the server without CODESANDBOX_DEFAULT_CREDENTIALS.
+### 22. CodeSandbox Create Without Credential Reference
+# Expected: 400 CODESANDBOX_CREDENTIALS_MISSING.
 # Expected: structured configuration error and no persisted session.
 POST {{baseUrl}}/sessions
 Content-Type: application/json

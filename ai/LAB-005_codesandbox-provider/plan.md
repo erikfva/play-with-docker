@@ -152,14 +152,13 @@ Credential file format:
 
 Inputs:
 - Request header: `x-codesandbox-credentials`
-- Default env var: `CODESANDBOX_DEFAULT_CREDENTIALS`
 - S3 mode setting: reuse `S3FS_ENABLED`
 - S3 bucket/env config: reuse `S3_BUCKET`, `S3_REGION`, `S3_ENDPOINT`, and AWS credential env vars
 - Filesystem/local credential directory: reuse `S3_MOUNT_DIR`, matching the Google credential loader pattern
 
 Resolution rules:
 1. If request header `x-codesandbox-credentials` is present, use that credential reference.
-2. Otherwise use `CODESANDBOX_DEFAULT_CREDENTIALS`.
+2. Otherwise reject the request as missing credentials.
 3. If the reference starts with `s3://`, parse bucket/key from the reference.
 4. If `NODE_ENV=local`, resolve credential references from files under `S3_MOUNT_DIR`; `s3://bucket/key.json` resolves to `S3_MOUNT_DIR/key.json`.
 5. If `S3FS_ENABLED=0` and not local, treat non-`s3://` references as S3 object keys under `S3_BUCKET`.
@@ -298,7 +297,7 @@ Template policy:
 - If legacy clients send `templateId`, only `docker` is accepted; any other value should return a clear 400 provider error before calling CodeSandbox.
 
 Creation flow:
-1. Resolve the CodeSandbox credential reference from `x-codesandbox-credentials` or `CODESANDBOX_DEFAULT_CREDENTIALS`.
+1. Resolve the CodeSandbox credential reference from `x-codesandbox-credentials` or request body `credentialRef`.
 2. Load and validate the credential JSON.
 3. Compute token fingerprint.
 4. Look up an existing session for the token before calling CodeSandbox.
@@ -430,7 +429,7 @@ Current issue:
   app.use('/api/v1/sessions', requireServerToken, setGoogleCredentials, sessionRoutes);
   ```
 
-- `setGoogleCredentials` returns `500` when `GOOGLE_APPLICATION_DEFAULT_CREDENTIALS` is missing.
+- `setGoogleCredentials` previously returned `500` when server-wide Google credentials were missing.
 - That means CodeSandbox-only environments cannot call provider discovery, create CodeSandbox sessions, or run CodeSandbox commands unless Google is also configured.
 
 Required change:
@@ -569,7 +568,6 @@ curl -X DELETE http://localhost:3000/api/v1/sessions/<SESSION_ID> \
 Required:
 
 ```env
-CODESANDBOX_DEFAULT_CREDENTIALS=codesandbox/account-a.json
 ```
 
 Credential file content:

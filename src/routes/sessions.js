@@ -66,23 +66,47 @@ function buildCreateResponseFromSession(row, reusedExisting = false) {
   };
 }
 
-async function initializeGoogleCredentialsForRequest(req) {
-  const googleCredentials = process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS || process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  if (!googleCredentials) {
-    const error = new Error('Google Credentials is not configured');
-    error.statusCode = 500;
+async function initializeGoogleCredentialsForRequest(req, sessionRow) {
+  const credentialRef = getGoogleCredentialRef(req, sessionRow);
+  if (!credentialRef) {
+    const error = new Error('Google credential reference is required in x-google-credentials or request body credentialRef/googleCredentialRef');
+    error.statusCode = 400;
     error.code = 'GOOGLE_CREDENTIALS_MISSING';
     throw error;
   }
 
-  process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS = googleCredentials;
-  process.env.GOOGLE_APPLICATION_CREDENTIALS = googleCredentials;
-  await initGoogleCredentialsFromS3IfNeeded(googleCredentials);
-
-  const headerGoogleCredentials = req.headers['x-google-credentials'];
-  if (headerGoogleCredentials) {
-    await initGoogleCredentialsFromS3IfNeeded(headerGoogleCredentials);
+  await initGoogleCredentialsFromS3IfNeeded(credentialRef);
+  if (sessionRow) {
+    sessionRow.credentialRef = credentialRef;
+    sessionRow.credentialref = credentialRef;
   }
+  return credentialRef;
+}
+
+function getGoogleCredentialRef(req, sessionRow) {
+  const metadata = parseMetadata(sessionRow?.metadata) || {};
+  return req.headers['x-google-credentials']
+    || req.body?.googleCredentialRef
+    || req.body?.credentialRef
+    || getRowValue(sessionRow, 'credentialRef', 'credentialref')
+    || metadata.credentialRef
+    || null;
+}
+
+function getCodeSandboxCredentialRef(req) {
+  return req.headers['x-codesandbox-credentials'] || req.body?.credentialRef || null;
+}
+
+function requireCodeSandboxCredentialRef(req) {
+  const credentialRef = getCodeSandboxCredentialRef(req);
+  if (!credentialRef) {
+    throw new ProviderError(
+      'CodeSandbox credential reference is required in x-codesandbox-credentials or request body credentialRef',
+      { code: 'CODESANDBOX_CREDENTIALS_MISSING', statusCode: 400 }
+    );
+  }
+
+  return credentialRef;
 }
 
 async function cleanupCreatedCodeSandboxSession(created) {
@@ -143,15 +167,24 @@ router.post('/', async (req, res) => {
 
   try {
     // Initialize provider-aware credentials for GCS
+    let credentialRef = null;
     if (providerName === 'gcs') {
-      await initializeGoogleCredentialsForRequest(req);
+      credentialRef = await initializeGoogleCredentialsForRequest(req);
+    } else if (providerName === 'codesandbox') {
+      credentialRef = requireCodeSandboxCredentialRef(req);
     }
 
     const provider = getProvider(providerName);
     const created = await provider.createSession({
       ...(req.body || {}),
-      credentialRef: req.headers['x-codesandbox-credentials'] || req.body?.credentialRef
+      credentialRef
     });
+    if (providerName === 'gcs' && credentialRef) {
+      created.metadata = {
+        ...(created.metadata || {}),
+        credentialRef
+      };
+    }
 
     if (created.existing && created.session) {
       const refreshedExisting = await refreshExistingSessionForCreate(created.session, provider);
@@ -172,7 +205,7 @@ router.post('/', async (req, res) => {
           created.status || 'STARTING',
           created.webHost || null,
           created.sshCommand || null,
-          created.credentialRef || null,
+          created.credentialRef || credentialRef || null,
           created.credentialFingerprint || null,
           created.metadata ? JSON.stringify(created.metadata) : null
         ]
@@ -277,7 +310,7 @@ router.get('/:id', async (req, res) => {
 
     // Initialize provider-aware credentials for GCS refresh
     if (row.provider === 'gcs') {
-      await initializeGoogleCredentialsForRequest(req);
+      await initializeGoogleCredentialsForRequest(req, row);
     }
 
     const provider = getProvider(row.provider);
@@ -329,7 +362,7 @@ router.post('/:id/command', async (req, res) => {
 
     // Initialize provider-aware credentials for GCS command execution
     if (row.provider === 'gcs') {
-      await initializeGoogleCredentialsForRequest(req);
+      await initializeGoogleCredentialsForRequest(req, row);
     }
 
     const provider = getProvider(row.provider);
@@ -367,7 +400,7 @@ router.delete('/:id', async (req, res) => {
 
     // Initialize provider-aware credentials for GCS termination
     if (row.provider === 'gcs') {
-      await initializeGoogleCredentialsForRequest(req);
+      await initializeGoogleCredentialsForRequest(req, row);
     }
 
     const provider = getProvider(row.provider);
@@ -424,7 +457,7 @@ router.post('/terminate-all', async (req, res) => {
 
       try {
         if (row.provider === 'gcs') {
-          await initializeGoogleCredentialsForRequest(req);
+          await initializeGoogleCredentialsForRequest(req, row);
         }
 
         await provider.terminateSession(row);

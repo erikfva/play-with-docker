@@ -12,7 +12,6 @@
                 "PORT": "3000",
                 "SERVER_TOKEN": "your-debug-token",
                 "DATABASE_URL_CONN": "postgres://postgres:postgres@localhost:5432/play_with_docker",
-                "GOOGLE_APPLICATION_DEFAULT_CREDENTIALS": "/path/to/your/google-credentials.json",
                 "S3FS_ENABLED": "0",
                 "S3_BUCKET": "your-test-bucket",
                 "AWS_ACCESS_KEY_ID": "your-access-key-id",

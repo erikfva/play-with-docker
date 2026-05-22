@@ -1,5 +1,6 @@
 const BaseProvider = require('./base-provider');
 const gcsService = require('../gcs-service');
+const { initGoogleCredentialsFromS3IfNeeded } = require('../google-credentials-loader');
 const sshService = require('../ssh-service');
 const { SessionNotReadyError } = require('../errors/provider-errors');
 
@@ -18,6 +19,22 @@ function isExpectedShutdownDisconnect(error) {
   );
 }
 
+function parseMetadata(metadata) {
+  if (!metadata) {
+    return {};
+  }
+
+  if (typeof metadata === 'object') {
+    return metadata;
+  }
+
+  try {
+    return JSON.parse(metadata);
+  } catch (_) {
+    return {};
+  }
+}
+
 class GcsProvider extends BaseProvider {
   constructor() {
     super('gcs');
@@ -25,7 +42,24 @@ class GcsProvider extends BaseProvider {
 
   getProviderSessionId(sessionRow) {
     const { providersessionid, envname } = sessionRow;
-    return providersessionid || envname;
+    return sessionRow.providerSessionId || providersessionid || sessionRow.envName || envname;
+  }
+
+  getCredentialRef(sessionRow) {
+    const metadata = parseMetadata(sessionRow?.metadata);
+    return sessionRow?.credentialRef
+      || sessionRow?.credentialref
+      || metadata.credentialRef
+      || null;
+  }
+
+  async initializeCredentials(sessionRow) {
+    const credentialRef = this.getCredentialRef(sessionRow);
+    if (!credentialRef) {
+      throw new Error('Google credential reference is missing for this session');
+    }
+
+    await initGoogleCredentialsFromS3IfNeeded(credentialRef);
   }
 
   getKeepAliveConfig() {
@@ -38,6 +72,7 @@ class GcsProvider extends BaseProvider {
 
   async isSessionActive(sessionRow) {
     try {
+      await this.initializeCredentials(sessionRow);
       const status = await gcsService.getCloudShellStatus(
         this.getProviderSessionId(sessionRow)
       );
@@ -50,6 +85,7 @@ class GcsProvider extends BaseProvider {
 
   async executeKeepAlive(sessionRow) {
     try {
+      await this.initializeCredentials(sessionRow);
       const status = await gcsService.getCloudShellStatus(
         this.getProviderSessionId(sessionRow)
       );
@@ -132,6 +168,8 @@ class GcsProvider extends BaseProvider {
   }
 
   async refreshSession(sessionRow) {
+    await this.initializeCredentials(sessionRow);
+    const credentialRef = this.getCredentialRef(sessionRow);
     const gcsStatus = await gcsService.getCloudShellStatus(this.getProviderSessionId(sessionRow));
     const sshCommand = gcsStatus.sshUsername && gcsStatus.sshHost
       ? `ssh ${gcsStatus.sshUsername}@${gcsStatus.sshHost} -p ${gcsStatus.sshPort || 22}`
@@ -142,6 +180,8 @@ class GcsProvider extends BaseProvider {
       webHost: gcsStatus.webHost || null,
       sshCommand,
       metadata: {
+        ...parseMetadata(sessionRow.metadata),
+        credentialRef,
         sshHost: gcsStatus.sshHost || null,
         sshPort: gcsStatus.sshPort || null,
         sshUsername: gcsStatus.sshUsername || null,
@@ -151,6 +191,7 @@ class GcsProvider extends BaseProvider {
   }
 
   async executeCommand(sessionRow, command) {
+    await this.initializeCredentials(sessionRow);
     const status = await gcsService.getCloudShellStatus(this.getProviderSessionId(sessionRow));
 
     if (status.status !== 'RUNNING') {
@@ -193,6 +234,8 @@ class GcsProvider extends BaseProvider {
     if (!providerSessionId) {
       return;
     }
+
+    await this.initializeCredentials(sessionRow);
 
     try {
       const status = await gcsService.getCloudShellStatus(providerSessionId);

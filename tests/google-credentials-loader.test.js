@@ -17,8 +17,7 @@ async function withLocalCredentialDir(fn) {
     S3FS_ENABLED: process.env.S3FS_ENABLED,
     S3_MOUNT_DIR: process.env.S3_MOUNT_DIR,
     S3_BUCKET: process.env.S3_BUCKET,
-    GOOGLE_APPLICATION_CREDENTIALS: process.env.GOOGLE_APPLICATION_CREDENTIALS,
-    GOOGLE_APPLICATION_DEFAULT_CREDENTIALS: process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS
+    GOOGLE_APPLICATION_CREDENTIALS: process.env.GOOGLE_APPLICATION_CREDENTIALS
   };
 
   process.env.NODE_ENV = 'local';
@@ -26,7 +25,6 @@ async function withLocalCredentialDir(fn) {
   process.env.S3_MOUNT_DIR = dir;
   process.env.S3_BUCKET = 'play-with-docker';
   delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  delete process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS;
 
   try {
     await fn(dir);

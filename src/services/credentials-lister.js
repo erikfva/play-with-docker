@@ -71,15 +71,13 @@ async function listAvailableCredentials(prefix) {
   if (isLocalNodeEnv() || isS3fsEnabled()) {
     const directory = (process.env.S3_MOUNT_DIR || '') + prefixPath;
     const files = await listCredentialsFs(directory);
-    const defaultKey = process.env.GOOGLE_APPLICATION_CREDENTIALS || '';
     const mode = isS3fsEnabled() ? 's3fs' : 'local';
-    return { credentials: files, mode, default: defaultKey };
+    return { credentials: files, mode, default: '' };
   }
 
-  const credentialsRef = (process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
   let bucket;
   try {
-    ({ bucket } = resolveBucketAndKey(credentialsRef || 'placeholder.json'));
+    ({ bucket } = resolveBucketAndKey('placeholder.json'));
   } catch (err) {
     if (!err.statusCode) {
       throw createError(err.message, 'S3_BUCKET_MISSING', 500);
@@ -88,11 +86,8 @@ async function listAvailableCredentials(prefix) {
   }
   const files = await listCredentialsS3(bucket, prefix);
   const mode = 's3-api';
-  const defaultKey = credentialsRef.startsWith('s3://')
-    ? credentialsRef.replace(/^s3:\/\/[^/]+\//, '')
-    : credentialsRef;
 
-  return { credentials: files, mode, default: defaultKey };
+  return { credentials: files, mode, default: '' };
 }
 
 module.exports = { listAvailableCredentials };
