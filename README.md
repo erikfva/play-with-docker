@@ -41,13 +41,13 @@ or local mount:
 ### Mode A: `s3fs` enabled (`S3FS_ENABLED=1`)
 
 - Entrypoint mounts `S3_BUCKET` to `S3_MOUNT_DIR` using `s3fs`.
-- `GOOGLE_APPLICATION_CREDENTIALS` should be a filesystem path inside the container.
+- Request credential references should point to files inside the mounted credential folders.
 
 ### Mode B: `s3fs` disabled (`S3FS_ENABLED=0`)
 
 - No FUSE mount is attempted.
-- At startup, app downloads credentials from S3 using SDK and writes a temp file in `/tmp`.
-- `GOOGLE_APPLICATION_CREDENTIALS` is interpreted as:
+- Per-request credential references are downloaded from S3 using the SDK and written to temp files in `/tmp`.
+- GCS credential references can be:
   - `s3://bucket/gcloud/key.json`, or
   - `gcloud/key.json` (uses `S3_BUCKET`)
 
@@ -57,9 +57,9 @@ Startup logs show active mode:
 
 ### Local development override (`NODE_ENV=local`)
 
-When `NODE_ENV=local`, the app reads Google credential files from the local folder configured by `S3_MOUNT_DIR` instead of downloading them from S3.
+When `NODE_ENV=local`, the app reads provider credential files from the local folder configured by `S3_MOUNT_DIR` instead of downloading them from S3.
 
-In this mode, `GOOGLE_APPLICATION_CREDENTIALS` can be:
+In this mode, request credential references can be:
 - `gcloud/key.json` under `S3_MOUNT_DIR`
 - `s3://bucket/gcloud/key.json`, which resolves to `S3_MOUNT_DIR/gcloud/key.json`
 
@@ -73,8 +73,11 @@ Core:
 - `SERVER_TOKEN`
 
 Google credentials:
-- `GOOGLE_APPLICATION_CREDENTIALS` (container path or S3 object reference depending on mode)
 - `GOOGLE_APPLICATION_CREDENTIALS_FILE` (compose-only host bind source for `s3fs` mode)
+- `GOOGLE_APPLICATION_CREDENTIALS` is deprecated for provider selection. New GCS create requests must send `x-google-credentials` or body `credentialRef`/`googleCredentialRef`.
+
+CodeSandbox credentials:
+- New CodeSandbox create requests must send `x-codesandbox-credentials` or body `credentialRef`.
 
 S3:
 - `S3FS_ENABLED` (`1` or `0`)
@@ -99,7 +102,17 @@ Create session:
 curl -X POST http://localhost:3000/api/v1/sessions \
   -H "Content-Type: application/json" \
   -H "x-server-token: $SERVER_TOKEN" \
+  -H "x-google-credentials: gcloud/key.json" \
   -d '{"provider":"gcs"}'
+```
+
+Create CodeSandbox session:
+```bash
+curl -X POST http://localhost:3000/api/v1/sessions \
+  -H "Content-Type: application/json" \
+  -H "x-server-token: $SERVER_TOKEN" \
+  -H "x-codesandbox-credentials: codesandbox/account.json" \
+  -d '{"provider":"codesandbox"}'
 ```
 
 List supported providers:

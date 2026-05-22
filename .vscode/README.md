@@ -24,7 +24,6 @@ You'll need to set these in the launch.json file or your environment:
 - `PORT`: Defaults to 3000
 - `SERVER_TOKEN`: Your API token for authentication
 - `DATABASE_URL_CONN`: PostgreSQL connection string
-- `GOOGLE_APPLICATION_DEFAULT_CREDENTIALS`: Path to Google service account JSON
 - `S3FS_ENABLED`: Set to "0" or "1" for credential loading mode
 - `S3_BUCKET`: Your S3 bucket name (if using S3 credentials)
 - `AWS_ACCESS_KEY_ID`: AWS access key ID
@@ -51,6 +50,6 @@ You can set breakpoints in:
 If you encounter issues:
 
 1. Make sure PostgreSQL is running and the database exists
-2. Verify your Google credentials are valid and have Cloud Shell API access
+2. Verify the Google credential reference sent with the request is valid and has Cloud Shell API access
 3. Check that the S3 configuration is correct if using S3-backed credentials
 4. Look at the Debug Console in VSCode for error messages

@@ -1,25 +1,31 @@
 const { google } = require('googleapis');
 const cloudshell = google.cloudshell('v1');
 
-async function getAuthClient() {
-  const auth = new google.auth.GoogleAuth({
+async function getAuthClient(credentialsPath) {
+  const authOptions = {
     scopes: ['https://www.googleapis.com/auth/cloud-platform']
-  });
+  };
+
+  if (credentialsPath) {
+    authOptions.keyFile = credentialsPath;
+  }
+
+  const auth = new google.auth.GoogleAuth(authOptions);
   return await auth.getClient();
 }
 
-async function getEnvironmentName() {
-  const auth = await getAuthClient();
+async function getEnvironmentName(auth, credentialsPath) {
+  const authClient = auth || await getAuthClient(credentialsPath);
   // If it's a service account, using 'me' should work,
   // but let's try to get the actual email if possible just in case.
-  const email = (await auth.getCredentials()).client_email;
+  const email = (await authClient.getCredentials()).client_email;
   return `users/${email || 'me'}/environments/default`;
 }
 
-async function startCloudShellSession() {
+async function startCloudShellSession(options = {}) {
   try {
-    const auth = await getAuthClient();
-    const name = await getEnvironmentName();
+    const auth = await getAuthClient(options.credentialsPath);
+    const name = await getEnvironmentName(auth, options.credentialsPath);
     const res = await cloudshell.users.environments.start({
       name,
       auth: auth
@@ -36,10 +42,10 @@ async function startCloudShellSession() {
   }
 }
 
-async function getCloudShellStatus(envName) {
+async function getCloudShellStatus(envName, options = {}) {
   try {
-    const auth = await getAuthClient();
-    const name = envName || await getEnvironmentName();
+    const auth = await getAuthClient(options.credentialsPath);
+    const name = envName || await getEnvironmentName(auth, options.credentialsPath);
     const res = await cloudshell.users.environments.get({
       name,
       auth: auth
@@ -60,10 +66,10 @@ async function getCloudShellStatus(envName) {
   }
 }
 
-async function addPublicKey(key, envName) {
+async function addPublicKey(key, envName, options = {}) {
     try {
-        const auth = await getAuthClient();
-        const name = envName || await getEnvironmentName();
+        const auth = await getAuthClient(options.credentialsPath);
+        const name = envName || await getEnvironmentName(auth, options.credentialsPath);
         const res = await cloudshell.users.environments.addPublicKey({
             environment: name,
             requestBody: {
@@ -78,10 +84,10 @@ async function addPublicKey(key, envName) {
     }
 }
 
-async function removePublicKey(keyName, envName) {
+async function removePublicKey(keyName, envName, options = {}) {
     try {
-        const auth = await getAuthClient();
-        const name = envName || await getEnvironmentName();
+        const auth = await getAuthClient(options.credentialsPath);
+        const name = envName || await getEnvironmentName(auth, options.credentialsPath);
         const res = await cloudshell.users.environments.removePublicKey({
             environment: name,
             requestBody: {

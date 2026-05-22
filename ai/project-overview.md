@@ -119,9 +119,13 @@ DATABASE_URL_CONN=postgres://postgres:postgres@localhost:5432/play_with_docker
 
 Google credential flow in current code:
 
-- The request middleware expects `GOOGLE_APPLICATION_DEFAULT_CREDENTIALS` to point to a usable credentials file.
-- For each request, that value is copied into `GOOGLE_APPLICATION_CREDENTIALS`.
-- A request can override credentials with header `x-google-credentials`.
+- GCS create requests must send an explicit credential reference in `x-google-credentials`, body `googleCredentialRef`, or body `credentialRef`.
+- The selected GCS credential reference is persisted on the session row and reused for refresh, command execution, termination, and keep-alive recovery.
+
+CodeSandbox credential flow in current code:
+
+- CodeSandbox create requests must send an explicit credential reference in `x-codesandbox-credentials` or body `credentialRef`.
+- The selected CodeSandbox credential reference is persisted on the session row and reused for refresh, command execution, termination, and keep-alive.
 
 Optional S3-backed credential mode:
 
@@ -137,9 +141,9 @@ S3_ENDPOINT=...         # optional
 
 Behavior:
 
-- When `S3FS_ENABLED=0`, startup can download the Google credentials file from object storage into `/tmp`.
+- When `S3FS_ENABLED=0`, provider operations can download request-scoped credential files from object storage into `/tmp`.
 - When `S3FS_ENABLED=1` and `S3_BUCKET` is set, the container entrypoint attempts an `s3fs` mount before starting the API.
-- In Compose, `GOOGLE_APPLICATION_CREDENTIALS` is required in the container environment; the runtime middleware still relies on `GOOGLE_APPLICATION_DEFAULT_CREDENTIALS` being populated.
+- In Compose, provider credentials should be supplied per request.
 
 ## 8. Deployment Notes
 
@@ -177,7 +181,7 @@ The system implements provider-aware keep-alive to maintain active sessions:
 ## 10. Current Risks and Gaps
 
 - `pwd` appears as a supported provider in discovery but every operation returns `501 Not Implemented` — this is intentional; the Play with Docker service was deprecated as of March 2026, so `pwd` is a demo stub and template reference only.
-- Credential handling is easy to misconfigure because startup, Compose, and request middleware use both `GOOGLE_APPLICATION_CREDENTIALS` and `GOOGLE_APPLICATION_DEFAULT_CREDENTIALS`.
+- Credential handling is request-scoped for provider operations, but clients must now reliably send the correct credential reference on create.
 - The API persists private SSH keys in PostgreSQL, so database access is security-sensitive.
 - GCS shutdown and refresh paths are best-effort; local records can diverge from remote state temporarily.
 - There is no automated test coverage in the repo for the current provider and keep-alive behavior.

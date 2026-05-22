@@ -93,13 +93,13 @@ function resolveCredentialReference(credentialRef) {
   if (!credentialRef) {
     if (isLocalNodeEnv()) {
       throw codeSandboxCredentialError(
-        `CodeSandbox credentials file is not configured. Set CODESANDBOX_DEFAULT_CREDENTIALS or send x-codesandbox-credentials/credentialRef with a file under S3_MOUNT_DIR`,
+        `CodeSandbox credentials file is not configured. Send x-codesandbox-credentials or credentialRef with a file under S3_MOUNT_DIR`,
         'CODESANDBOX_CREDENTIALS_MISSING'
       );
     }
 
     throw codeSandboxCredentialError(
-      'CODESANDBOX_DEFAULT_CREDENTIALS is not configured',
+      'CodeSandbox credential reference is required',
       'CODESANDBOX_CREDENTIALS_MISSING'
     );
   }
@@ -225,27 +225,7 @@ async function loadCredentialFile(credentialRefObj) {
 }
 
 async function loadCodeSandboxCredentials(credentialRefOrHeader) {
-  // Determine credential reference source
-  let credentialRef;
-
-  if (credentialRefOrHeader) {
-    // Use provided reference (from header or default)
-    credentialRef = credentialRefOrHeader;
-  } else if (process.env.CODESANDBOX_DEFAULT_CREDENTIALS) {
-    credentialRef = process.env.CODESANDBOX_DEFAULT_CREDENTIALS;
-  } else {
-    if (isLocalNodeEnv()) {
-      throw codeSandboxCredentialError(
-        `CodeSandbox credentials file is not configured. Set CODESANDBOX_DEFAULT_CREDENTIALS or send x-codesandbox-credentials/credentialRef with a file under S3_MOUNT_DIR`,
-        'CODESANDBOX_CREDENTIALS_MISSING'
-      );
-    }
-
-    throw codeSandboxCredentialError(
-      'CODESANDBOX_DEFAULT_CREDENTIALS is not configured',
-      'CODESANDBOX_CREDENTIALS_MISSING'
-    );
-  }
+  const credentialRef = credentialRefOrHeader;
 
   // Resolve reference to actual source
   const resolvedRef = resolveCredentialReference(credentialRef);

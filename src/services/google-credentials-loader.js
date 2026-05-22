@@ -1,4 +1,5 @@
 const fs = require('fs/promises');
+const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
@@ -17,6 +18,14 @@ function getLocalCredentialsDirectory() {
   const directory = (process.env.S3_MOUNT_DIR || '').trim();
   if (!directory) {
     throw new Error('S3_MOUNT_DIR is required when NODE_ENV=local');
+  }
+  return directory;
+}
+
+function getMountedCredentialsDirectory() {
+  const directory = (process.env.S3_MOUNT_DIR || '').trim();
+  if (!directory) {
+    throw new Error('S3_MOUNT_DIR is required when S3FS_ENABLED=1 and credential references are relative');
   }
   return directory;
 }
@@ -84,6 +93,42 @@ function resolveLocalCredentialsPath(credentialsRef) {
   return localPath;
 }
 
+function resolveS3fsCredentialsPath(credentialsRef) {
+  const ref = (credentialsRef || '').trim();
+  if (!ref) {
+    return null;
+  }
+
+  const directory = path.resolve(getMountedCredentialsDirectory());
+  if (path.isAbsolute(ref)) {
+    const absolutePath = path.resolve(ref);
+    if (!isPathInsideDirectory(directory, absolutePath)) {
+      throw new Error('GOOGLE_APPLICATION_CREDENTIALS path escapes S3_MOUNT_DIR when S3FS_ENABLED=1');
+    }
+    return absolutePath;
+  }
+
+  const key = ref.startsWith('s3://')
+    ? resolveBucketAndKey(ref).key
+    : ref.replace(/^\/+/, '');
+  const credentialsPath = path.resolve(directory, key);
+
+  if (!isPathInsideDirectory(directory, credentialsPath)) {
+    throw new Error('GOOGLE_APPLICATION_CREDENTIALS path escapes S3_MOUNT_DIR when S3FS_ENABLED=1');
+  }
+
+  return credentialsPath;
+}
+
+function getDownloadedCredentialsPath(bucket, key) {
+  const fingerprint = crypto
+    .createHash('sha256')
+    .update(`${bucket}/${key}`)
+    .digest('hex');
+
+  return path.join(os.tmpdir(), 'gcs-credentials', `${fingerprint}.json`);
+}
+
 async function streamToBuffer(stream) {
   const chunks = [];
   for await (const chunk of stream) {
@@ -141,9 +186,17 @@ async function initGoogleCredentialsFromS3IfNeeded( googleCredentials ) {
 
   if (isS3fsEnabled()) {
     console.log('Credential mode: s3fs (filesystem path from GOOGLE_APPLICATION_CREDENTIALS)');
-    // Ensure GOOGLE_APPLICATION_CREDENTIALS is set to the mounted path
-    if (process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-      process.env.GOOGLE_APPLICATION_CREDENTIALS = process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS;
+    const credentialsRef = (googleCredentials || '').trim();
+    if (credentialsRef) {
+      const credentialsPath = resolveS3fsCredentialsPath(credentialsRef);
+      try {
+        await fs.access(credentialsPath);
+      } catch (error) {
+        throw new Error(`Failed to read mounted credentials from ${credentialsPath}: ${error.message}`);
+      }
+
+      process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsPath;
+      return credentialsPath;
     }
     return;
   }
@@ -155,7 +208,8 @@ async function initGoogleCredentialsFromS3IfNeeded( googleCredentials ) {
     return;
   }
 
-  const outputPath = path.join(os.tmpdir(), credentialsRef);
+  const { bucket, key } = resolveBucketAndKey(credentialsRef);
+  const outputPath = getDownloadedCredentialsPath(bucket, key);
   //Check if credential file already exist
   if (loadedCredentialsFiles.has(credentialsRef)) {
     console.log(`Reusing existing credentials file: ${credentialsRef}`);
@@ -163,7 +217,6 @@ async function initGoogleCredentialsFromS3IfNeeded( googleCredentials ) {
     return outputPath;
   }
 
-  const { bucket, key } = resolveBucketAndKey(credentialsRef);
   const s3 = buildS3Client();
   let response;
   try {
@@ -184,10 +237,6 @@ async function initGoogleCredentialsFromS3IfNeeded( googleCredentials ) {
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.writeFile(outputPath, fileBuffer, { mode: 0o600 });
   
-  if(!process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS) {
-    process.env.GOOGLE_APPLICATION_DEFAULT_CREDENTIALS = outputPath;
-  }
-
   process.env.GOOGLE_APPLICATION_CREDENTIALS = outputPath;
   console.log(`Loaded GOOGLE_APPLICATION_CREDENTIALS from s3://${bucket}/${key}`);
   loadedCredentialsFiles.add(credentialsRef);
@@ -200,6 +249,7 @@ module.exports = {
   buildS3Client,
   resolveBucketAndKey,
   resolveLocalCredentialsPath,
+  resolveS3fsCredentialsPath,
   initGoogleCredentialsFromS3IfNeeded,
   streamToBuffer
 };

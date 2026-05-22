@@ -11,7 +11,6 @@ async function withCredentialDir(fn) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'codesandbox-creds-'));
   const previousEnv = {
     NODE_ENV: process.env.NODE_ENV,
-    CODESANDBOX_DEFAULT_CREDENTIALS: process.env.CODESANDBOX_DEFAULT_CREDENTIALS,
     S3FS_ENABLED: process.env.S3FS_ENABLED,
     S3_MOUNT_DIR: process.env.S3_MOUNT_DIR,
     S3_BUCKET: process.env.S3_BUCKET
@@ -19,7 +18,6 @@ async function withCredentialDir(fn) {
 
   process.env.S3_MOUNT_DIR = dir;
   process.env.S3FS_ENABLED = '1';
-  delete process.env.CODESANDBOX_DEFAULT_CREDENTIALS;
   delete process.env.S3_BUCKET;
 
   try {
@@ -140,7 +138,7 @@ test('reports local CodeSandbox credential configuration options when no ref is 
     await assertProviderError(
       loadCodeSandboxCredentials(),
       'CODESANDBOX_CREDENTIALS_MISSING',
-      /Set CODESANDBOX_DEFAULT_CREDENTIALS.*S3_MOUNT_DIR/
+      /Send x-codesandbox-credentials.*S3_MOUNT_DIR/
     );
   });
 });
