@@ -35,6 +35,8 @@ function parseMetadata(metadata) {
   }
 }
 
+const KEEP_ALIVE_INTERVAL_MINUTES = 10
+
 class MissingGoogleCredentialRefError extends Error {
   constructor() {
     super('Google credential reference is missing for this session');
@@ -80,7 +82,7 @@ class GcsProvider extends BaseProvider {
   getKeepAliveConfig() {
     return {
       enabled: true,
-      intervalMinutes: 15,  // Send keep-alive every 15 minutes (before 20-min timeout)
+      intervalMinutes: KEEP_ALIVE_INTERVAL_MINUTES,  // Send keep-alive every 10 minutes (before 20-min timeout)
       strategy: 'ssh-command'
     };
   }

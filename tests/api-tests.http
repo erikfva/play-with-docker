@@ -36,8 +36,8 @@ X-Server-Token: {{serverToken}}
 X-Google-Credentials: {{googleCredentials}}
 
 ###
-@sessionId = c6b2db8a-9426-482e-8207-5e2a707bb0a0
-#@sessionId = {{createSession.response.body.$.id}}
+#@sessionId = c6b2db8a-9426-482e-8207-5e2a707bb0a0
+@sessionId = {{createSession.response.body.$.id}}
 
 ### 4. Get Session Details and Status
 # Use the ID returned from the POST request above
