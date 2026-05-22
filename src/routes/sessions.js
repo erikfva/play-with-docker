@@ -5,7 +5,7 @@ const { getProvider, listProviders, normalizeProviderName } = require('../servic
 const { ProviderError } = require('../services/errors/provider-errors');
 const keepAliveService = require('../services/keep-alive-service');
 const { listAvailableCredentials } = require('../services/credentials-lister');
-const { initGoogleCredentialsFromS3IfNeeded } = require('../services/google-credentials-loader');
+const { getRowValue } = require('../utils/helpers');
 
 const router = express.Router();
 
@@ -49,10 +49,6 @@ function parseMetadata(rawMetadata) {
   }
 }
 
-function getRowValue(row, camelName, lowerName) {
-  return row?.[camelName] || row?.[lowerName];
-}
-
 function buildCreateResponseFromSession(row, reusedExisting = false) {
   const metadata = parseMetadata(row.metadata) || {};
 
@@ -66,7 +62,7 @@ function buildCreateResponseFromSession(row, reusedExisting = false) {
   };
 }
 
-async function initializeGoogleCredentialsForRequest(req, sessionRow) {
+function requireGoogleCredentialRefForRequest(req, sessionRow) {
   const credentialRef = getGoogleCredentialRef(req, sessionRow);
   if (!credentialRef) {
     const error = new Error('Google credential reference is required in x-google-credentials or request body credentialRef/googleCredentialRef');
@@ -75,7 +71,6 @@ async function initializeGoogleCredentialsForRequest(req, sessionRow) {
     throw error;
   }
 
-  await initGoogleCredentialsFromS3IfNeeded(credentialRef);
   if (sessionRow) {
     sessionRow.credentialRef = credentialRef;
     sessionRow.credentialref = credentialRef;
@@ -85,11 +80,14 @@ async function initializeGoogleCredentialsForRequest(req, sessionRow) {
 
 function getGoogleCredentialRef(req, sessionRow) {
   const metadata = parseMetadata(sessionRow?.metadata) || {};
+  const storedCredentialRef = getRowValue(sessionRow, 'credentialRef', 'credentialref') || metadata.credentialRef;
+  if (storedCredentialRef) {
+    return storedCredentialRef;
+  }
+
   return req.headers['x-google-credentials']
     || req.body?.googleCredentialRef
     || req.body?.credentialRef
-    || getRowValue(sessionRow, 'credentialRef', 'credentialref')
-    || metadata.credentialRef
     || null;
 }
 
@@ -169,7 +167,7 @@ router.post('/', async (req, res) => {
     // Initialize provider-aware credentials for GCS
     let credentialRef = null;
     if (providerName === 'gcs') {
-      credentialRef = await initializeGoogleCredentialsForRequest(req);
+      credentialRef = requireGoogleCredentialRefForRequest(req);
     } else if (providerName === 'codesandbox') {
       credentialRef = requireCodeSandboxCredentialRef(req);
     }
@@ -310,7 +308,7 @@ router.get('/:id', async (req, res) => {
 
     // Initialize provider-aware credentials for GCS refresh
     if (row.provider === 'gcs') {
-      await initializeGoogleCredentialsForRequest(req, row);
+      requireGoogleCredentialRefForRequest(req, row);
     }
 
     const provider = getProvider(row.provider);
@@ -362,7 +360,7 @@ router.post('/:id/command', async (req, res) => {
 
     // Initialize provider-aware credentials for GCS command execution
     if (row.provider === 'gcs') {
-      await initializeGoogleCredentialsForRequest(req, row);
+      requireGoogleCredentialRefForRequest(req, row);
     }
 
     const provider = getProvider(row.provider);
@@ -400,7 +398,7 @@ router.delete('/:id', async (req, res) => {
 
     // Initialize provider-aware credentials for GCS termination
     if (row.provider === 'gcs') {
-      await initializeGoogleCredentialsForRequest(req, row);
+      requireGoogleCredentialRefForRequest(req, row);
     }
 
     const provider = getProvider(row.provider);
@@ -457,7 +455,7 @@ router.post('/terminate-all', async (req, res) => {
 
       try {
         if (row.provider === 'gcs') {
-          await initializeGoogleCredentialsForRequest(req, row);
+          requireGoogleCredentialRefForRequest(req, row);
         }
 
         await provider.terminateSession(row);

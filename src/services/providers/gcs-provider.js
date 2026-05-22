@@ -35,6 +35,13 @@ function parseMetadata(metadata) {
   }
 }
 
+class MissingGoogleCredentialRefError extends Error {
+  constructor() {
+    super('Google credential reference is missing for this session');
+    this.code = 'GOOGLE_CREDENTIALS_MISSING';
+  }
+}
+
 class GcsProvider extends BaseProvider {
   constructor() {
     super('gcs');
@@ -56,10 +63,18 @@ class GcsProvider extends BaseProvider {
   async initializeCredentials(sessionRow) {
     const credentialRef = this.getCredentialRef(sessionRow);
     if (!credentialRef) {
-      throw new Error('Google credential reference is missing for this session');
+      throw new MissingGoogleCredentialRefError();
     }
 
-    await initGoogleCredentialsFromS3IfNeeded(credentialRef);
+    return await initGoogleCredentialsFromS3IfNeeded(credentialRef);
+  }
+
+  async initializeCredentialRef(credentialRef) {
+    if (!credentialRef) {
+      throw new MissingGoogleCredentialRefError();
+    }
+
+    return await initGoogleCredentialsFromS3IfNeeded(credentialRef);
   }
 
   getKeepAliveConfig() {
@@ -72,12 +87,17 @@ class GcsProvider extends BaseProvider {
 
   async isSessionActive(sessionRow) {
     try {
-      await this.initializeCredentials(sessionRow);
+      const credentialsPath = await this.initializeCredentials(sessionRow);
       const status = await gcsService.getCloudShellStatus(
-        this.getProviderSessionId(sessionRow)
+        this.getProviderSessionId(sessionRow),
+        { credentialsPath }
       );
       return status.status === 'RUNNING';
     } catch (error) {
+      if (error.code === 'GOOGLE_CREDENTIALS_MISSING') {
+        throw error;
+      }
+
       console.warn(`[GCS] Failed to check session active status: ${error.message}`);
       return false;
     }
@@ -85,15 +105,16 @@ class GcsProvider extends BaseProvider {
 
   async executeKeepAlive(sessionRow) {
     try {
-      await this.initializeCredentials(sessionRow);
+      const credentialsPath = await this.initializeCredentials(sessionRow);
       const status = await gcsService.getCloudShellStatus(
-        this.getProviderSessionId(sessionRow)
+        this.getProviderSessionId(sessionRow),
+        { credentialsPath }
       );
 
       // Check if suspended, attempt resume if needed
       if (status.status === 'SUSPENDED') {
         console.log(`[GCS] Session ${sessionRow.id} detected as SUSPENDED. Resuming...`);
-        await gcsService.startCloudShellSession();
+        await gcsService.startCloudShellSession({ credentialsPath });
         return {
           success: true,
           action: 'resumed',
@@ -120,7 +141,7 @@ class GcsProvider extends BaseProvider {
       if (!privateKey) {
         console.log(`[GCS] Generating SSH keys for keep-alive on session ${sessionRow.id}`);
         const keys = await sshService.generateKeyPair();
-        await gcsService.addPublicKey(keys.publicKey, this.getProviderSessionId(sessionRow));
+        await gcsService.addPublicKey(keys.publicKey, this.getProviderSessionId(sessionRow), { credentialsPath });
         privateKey = keys.privateKey;
         publicKey = keys.publicKey;
         updates.privateKey = privateKey;
@@ -155,8 +176,9 @@ class GcsProvider extends BaseProvider {
     }
   }
 
-  async createSession() {
-    const sessionData = await gcsService.startCloudShellSession();
+  async createSession(options = {}) {
+    const credentialsPath = await this.initializeCredentialRef(options.credentialRef);
+    const sessionData = await gcsService.startCloudShellSession({ credentialsPath });
     return {
       provider: this.name,
       providerSessionId: sessionData.envName,
@@ -168,9 +190,9 @@ class GcsProvider extends BaseProvider {
   }
 
   async refreshSession(sessionRow) {
-    await this.initializeCredentials(sessionRow);
+    const credentialsPath = await this.initializeCredentials(sessionRow);
     const credentialRef = this.getCredentialRef(sessionRow);
-    const gcsStatus = await gcsService.getCloudShellStatus(this.getProviderSessionId(sessionRow));
+    const gcsStatus = await gcsService.getCloudShellStatus(this.getProviderSessionId(sessionRow), { credentialsPath });
     const sshCommand = gcsStatus.sshUsername && gcsStatus.sshHost
       ? `ssh ${gcsStatus.sshUsername}@${gcsStatus.sshHost} -p ${gcsStatus.sshPort || 22}`
       : null;
@@ -191,8 +213,8 @@ class GcsProvider extends BaseProvider {
   }
 
   async executeCommand(sessionRow, command) {
-    await this.initializeCredentials(sessionRow);
-    const status = await gcsService.getCloudShellStatus(this.getProviderSessionId(sessionRow));
+    const credentialsPath = await this.initializeCredentials(sessionRow);
+    const status = await gcsService.getCloudShellStatus(this.getProviderSessionId(sessionRow), { credentialsPath });
 
     if (status.status !== 'RUNNING') {
       throw new SessionNotReadyError(status.status);
@@ -203,7 +225,7 @@ class GcsProvider extends BaseProvider {
 
     if (!privateKey) {
       const keys = await sshService.generateKeyPair();
-      await gcsService.addPublicKey(keys.publicKey, this.getProviderSessionId(sessionRow));
+      await gcsService.addPublicKey(keys.publicKey, this.getProviderSessionId(sessionRow), { credentialsPath });
       privateKey = keys.privateKey;
       publicKey = keys.publicKey;
     }
@@ -235,17 +257,17 @@ class GcsProvider extends BaseProvider {
       return;
     }
 
-    await this.initializeCredentials(sessionRow);
+    const credentialsPath = await this.initializeCredentials(sessionRow);
 
     try {
-      const status = await gcsService.getCloudShellStatus(providerSessionId);
+      const status = await gcsService.getCloudShellStatus(providerSessionId, { credentialsPath });
 
       if (status.status === 'RUNNING' && status.sshHost && status.sshUsername) {
         let privateKey = sessionRow.privateKey;
 
         if (!privateKey) {
           const keys = await sshService.generateKeyPair();
-          await gcsService.addPublicKey(keys.publicKey, providerSessionId);
+          await gcsService.addPublicKey(keys.publicKey, providerSessionId, { credentialsPath });
           privateKey = keys.privateKey;
         }
 
@@ -277,7 +299,7 @@ class GcsProvider extends BaseProvider {
     }
 
     try {
-      await gcsService.removePublicKey(sessionRow.publicKey, providerSessionId);
+      await gcsService.removePublicKey(sessionRow.publicKey, providerSessionId, { credentialsPath });
     } catch (error) {
       // Keep termination best-effort: DB cleanup should continue on key revoke failures.
       console.warn('GCS key revocation failed during termination:', error.message);

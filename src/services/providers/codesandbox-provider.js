@@ -3,6 +3,7 @@ const db = require('../../db/db');
 const codesandboxClient = require('./codesandbox/client');
 const { loadCodeSandboxCredentials } = require('./codesandbox/credentials-loader');
 const { mapToSession } = require('./codesandbox/session-mapper');
+const { getRowValue } = require('../../utils/helpers');
 const {
   ProviderError,
   SessionNotReadyError,
@@ -35,10 +36,6 @@ function parseMetadata(metadata) {
   } catch (_) {
     return {};
   }
-}
-
-function getRowValue(row, camelName, lowerName) {
-  return row[camelName] ?? row[lowerName];
 }
 
 function normalizeSessionRow(row) {
