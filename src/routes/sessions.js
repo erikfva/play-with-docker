@@ -5,6 +5,7 @@ const { getProvider, listProviders, normalizeProviderName } = require('../servic
 const { ProviderError } = require('../services/errors/provider-errors');
 const keepAliveService = require('../services/keep-alive-service');
 const { listAvailableCredentials } = require('../services/credentials-lister');
+const { initGoogleCredentialsFromS3IfNeeded } = require('../services/google-credentials-loader');
 const { getRowValue } = require('../utils/helpers');
 
 const router = express.Router();
@@ -398,7 +399,8 @@ router.delete('/:id', async (req, res) => {
 
     // Initialize provider-aware credentials for GCS termination
     if (row.provider === 'gcs') {
-      requireGoogleCredentialRefForRequest(req, row);
+      const credentialRef = requireGoogleCredentialRefForRequest(req, row);
+      await initGoogleCredentialsFromS3IfNeeded(credentialRef);
     }
 
     const provider = getProvider(row.provider);

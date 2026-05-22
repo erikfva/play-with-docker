@@ -13,7 +13,7 @@ function stubModule(modulePath, exports) {
   };
 }
 
-async function withSessionRouter({ row, rows, terminateSession }) {
+async function withSessionRouter({ row, rows, terminateSession, initGoogleCredentialsFromS3IfNeeded }) {
   const calls = {
     dbRun: [],
     stoppedKeepAlive: []
@@ -52,7 +52,7 @@ async function withSessionRouter({ row, rows, terminateSession }) {
     listAvailableCredentials: async () => ({ credentials: [] })
   });
   stubModule(googleLoaderPath, {
-    initGoogleCredentialsFromS3IfNeeded: async () => undefined
+    initGoogleCredentialsFromS3IfNeeded: initGoogleCredentialsFromS3IfNeeded || (async () => undefined)
   });
 
   const router = require('../src/routes/sessions');
@@ -164,6 +164,31 @@ test('GCS delete prefers the stored session credential over request credentials'
 
   assert.equal(response.status, 200);
   assert.equal(credentialRefUsed, 'gcloud/original.json');
+});
+
+test('GCS delete keeps local row when stored credentials cannot be loaded', async () => {
+  let terminateCalled = false;
+  const harness = await withSessionRouter({
+    row: {
+      id: 'session-1',
+      provider: 'gcs',
+      credentialRef: 'gcloud/missing.json'
+    },
+    initGoogleCredentialsFromS3IfNeeded: async () => {
+      throw new Error('Failed to read mounted credentials from /mnt/gcloud/missing.json');
+    },
+    terminateSession: async () => {
+      terminateCalled = true;
+    }
+  });
+
+  const response = await harness.request('DELETE', '/api/v1/sessions/session-1');
+
+  assert.equal(response.status, 500);
+  assert.match(response.body.error, /Failed to read mounted credentials/);
+  assert.equal(terminateCalled, false);
+  assert.equal(harness.calls.dbRun.length, 0);
+  assert.deepEqual(harness.calls.stoppedKeepAlive, []);
 });
 
 test('terminate-all preserves CodeSandbox local rows when provider cleanup fails', async () => {
