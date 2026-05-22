@@ -99,11 +99,15 @@ function resolveS3fsCredentialsPath(credentialsRef) {
     return null;
   }
 
+  const directory = path.resolve(getMountedCredentialsDirectory());
   if (path.isAbsolute(ref)) {
-    return path.resolve(ref);
+    const absolutePath = path.resolve(ref);
+    if (!isPathInsideDirectory(directory, absolutePath)) {
+      throw new Error('GOOGLE_APPLICATION_CREDENTIALS path escapes S3_MOUNT_DIR when S3FS_ENABLED=1');
+    }
+    return absolutePath;
   }
 
-  const directory = path.resolve(getMountedCredentialsDirectory());
   const key = ref.startsWith('s3://')
     ? resolveBucketAndKey(ref).key
     : ref.replace(/^\/+/, '');

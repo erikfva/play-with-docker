@@ -97,6 +97,7 @@ test('resolves relative Google credentials under S3_MOUNT_DIR when s3fs is enabl
     await fs.writeFile(credentialPath, JSON.stringify({ client_email: 's3fs@example.com' }));
 
     assert.equal(resolveS3fsCredentialsPath('gcloud/key.json'), credentialPath);
+    assert.equal(resolveS3fsCredentialsPath(credentialPath), credentialPath);
 
     const result = await initGoogleCredentialsFromS3IfNeeded('gcloud/key.json');
     assert.equal(result, credentialPath);
@@ -121,6 +122,11 @@ test('rejects s3fs Google credential refs that escape S3_MOUNT_DIR', async () =>
 
     assert.throws(
       () => resolveS3fsCredentialsPath('../service-account.json'),
+      /escapes S3_MOUNT_DIR/
+    );
+
+    assert.throws(
+      () => resolveS3fsCredentialsPath(path.join(os.tmpdir(), 'service-account.json')),
       /escapes S3_MOUNT_DIR/
     );
   });
