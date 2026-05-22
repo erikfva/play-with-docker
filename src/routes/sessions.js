@@ -56,7 +56,7 @@ function buildCreateResponseFromSession(row, reusedExisting = false) {
   return {
     id: row.id,
     provider: row.provider,
-    providerSessionId: getRowValue(row, 'providerSessionId', 'providersessionid'),
+    providerSessionId: getRowValue(row, 'providerSessionId'),
     status: row.status,
     dockerHost: metadata.dockerHost || null,
     reusedExisting
@@ -81,7 +81,7 @@ function requireGoogleCredentialRefForRequest(req, sessionRow) {
 
 function getGoogleCredentialRef(req, sessionRow) {
   const metadata = parseMetadata(sessionRow?.metadata) || {};
-  const storedCredentialRef = getRowValue(sessionRow, 'credentialRef', 'credentialref') || metadata.credentialRef;
+  const storedCredentialRef = getRowValue(sessionRow, 'credentialRef') || metadata.credentialRef;
   if (storedCredentialRef) {
     return storedCredentialRef;
   }
@@ -147,8 +147,8 @@ async function refreshExistingSessionForCreate(row, provider, requireRefreshSucc
     return {
       ...row,
       status: refreshed.status || row.status,
-      webHost: refreshed.webHost || getRowValue(row, 'webHost', 'webhost'),
-      sshCommand: refreshed.sshCommand || getRowValue(row, 'sshCommand', 'sshcommand'),
+      webHost: refreshed.webHost || getRowValue(row, 'webHost'),
+      sshCommand: refreshed.sshCommand || getRowValue(row, 'sshCommand'),
       metadata: refreshed.metadata || parseMetadata(row.metadata)
     };
   } catch (error) {

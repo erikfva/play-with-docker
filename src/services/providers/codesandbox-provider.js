@@ -46,13 +46,13 @@ function normalizeSessionRow(row) {
   return {
     id: row.id,
     provider: row.provider,
-    providerSessionId: getRowValue(row, 'providerSessionId', 'providersessionid'),
-    envName: getRowValue(row, 'envName', 'envname'),
+    providerSessionId: getRowValue(row, 'providerSessionId'),
+    envName: getRowValue(row, 'envName'),
     status: row.status,
-    webHost: getRowValue(row, 'webHost', 'webhost'),
-    sshCommand: getRowValue(row, 'sshCommand', 'sshcommand'),
-    credentialRef: getRowValue(row, 'credentialRef', 'credentialref'),
-    credentialFingerprint: getRowValue(row, 'credentialFingerprint', 'credentialfingerprint'),
+    webHost: getRowValue(row, 'webHost'),
+    sshCommand: getRowValue(row, 'sshCommand'),
+    credentialRef: getRowValue(row, 'credentialRef'),
+    credentialFingerprint: getRowValue(row, 'credentialFingerprint'),
     metadata: parseMetadata(row.metadata)
   };
 }
@@ -138,8 +138,8 @@ class CodeSandboxProvider extends BaseProvider {
     try {
       const metadata = parseMetadata(sessionRow.metadata);
       // Handle PostgreSQL lowercasing of unquoted identifiers
-      const credentialRef = getRowValue(sessionRow, 'credentialRef', 'credentialref') || metadata.credentialRef;
-      const providerSessionId = getRowValue(sessionRow, 'providerSessionId', 'providersessionid');
+      const credentialRef = getRowValue(sessionRow, 'credentialRef') || metadata.credentialRef;
+      const providerSessionId = getRowValue(sessionRow, 'providerSessionId');
 
       if (!providerSessionId) {
         return false;
@@ -166,8 +166,8 @@ class CodeSandboxProvider extends BaseProvider {
    */
   async executeKeepAlive(sessionRow) {
     const metadata = parseMetadata(sessionRow.metadata);
-    const credentialRef = getRowValue(sessionRow, 'credentialRef', 'credentialref') || metadata.credentialRef;
-    const providerSessionId = getRowValue(sessionRow, 'providerSessionId', 'providersessionid');
+    const credentialRef = getRowValue(sessionRow, 'credentialRef') || metadata.credentialRef;
+    const providerSessionId = getRowValue(sessionRow, 'providerSessionId');
 
     if (!providerSessionId || !credentialRef) {
       return {
@@ -580,9 +580,9 @@ class CodeSandboxProvider extends BaseProvider {
     try {
       const metadata = parseMetadata(sessionRow.metadata);
       // Handle PostgreSQL lowercasing of unquoted identifiers
-      const credentialFingerprint = getRowValue(sessionRow, 'credentialFingerprint', 'credentialfingerprint') || metadata.credentialFingerprint;
-      const credentialRef = getRowValue(sessionRow, 'credentialRef', 'credentialref') || metadata.credentialRef;
-      const providerSessionId = getRowValue(sessionRow, 'providerSessionId', 'providersessionid');
+      const credentialFingerprint = getRowValue(sessionRow, 'credentialFingerprint') || metadata.credentialFingerprint;
+      const credentialRef = getRowValue(sessionRow, 'credentialRef') || metadata.credentialRef;
+      const providerSessionId = getRowValue(sessionRow, 'providerSessionId');
 
       if (!credentialFingerprint || !credentialRef) {
         throw new Error('Session is missing credential information');
@@ -640,9 +640,9 @@ class CodeSandboxProvider extends BaseProvider {
       const metadata = parseMetadata(sessionRow.metadata);
       const dockerHost = metadata.dockerHost;
       // Handle PostgreSQL lowercasing of unquoted identifiers
-      const credentialFingerprint = getRowValue(sessionRow, 'credentialFingerprint', 'credentialfingerprint') || metadata.credentialFingerprint;
-      const credentialRef = getRowValue(sessionRow, 'credentialRef', 'credentialref') || metadata.credentialRef;
-      const providerSessionId = getRowValue(sessionRow, 'providerSessionId', 'providersessionid');
+      const credentialFingerprint = getRowValue(sessionRow, 'credentialFingerprint') || metadata.credentialFingerprint;
+      const credentialRef = getRowValue(sessionRow, 'credentialRef') || metadata.credentialRef;
+      const providerSessionId = getRowValue(sessionRow, 'providerSessionId');
 
       if (!credentialFingerprint || !credentialRef) {
         throw new Error('Session is missing credential information');
@@ -791,9 +791,9 @@ class CodeSandboxProvider extends BaseProvider {
     try {
       const metadata = parseMetadata(sessionRow.metadata);
       // Handle PostgreSQL lowercasing of unquoted identifiers
-      const credentialFingerprint = getRowValue(sessionRow, 'credentialFingerprint', 'credentialfingerprint') || metadata.credentialFingerprint;
-      const credentialRef = getRowValue(sessionRow, 'credentialRef', 'credentialref') || metadata.credentialRef;
-      const providerSessionId = getRowValue(sessionRow, 'providerSessionId', 'providersessionid');
+      const credentialFingerprint = getRowValue(sessionRow, 'credentialFingerprint') || metadata.credentialFingerprint;
+      const credentialRef = getRowValue(sessionRow, 'credentialRef') || metadata.credentialRef;
+      const providerSessionId = getRowValue(sessionRow, 'providerSessionId');
 
       if (!credentialFingerprint || !credentialRef) {
         console.warn('[CodeSandbox] Session missing credential information during termination');

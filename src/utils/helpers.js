@@ -1,4 +1,5 @@
-function getRowValue(row, camelName, lowerName) {
+function getRowValue(row, camelName) {
+  const lowerName = camelName.toLowerCase();
   return row?.[camelName] ?? row?.[lowerName];
 }
 
