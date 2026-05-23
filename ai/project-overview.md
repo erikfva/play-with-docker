@@ -81,7 +81,7 @@ Behavior details:
 - `POST /api/v1/sessions` defaults to provider `gcs` when no provider is supplied.
 - `POST /api/v1/sessions/:id/command` returns `409` when the provider session is not ready.
 - Session refresh and provider termination are best-effort in some paths; the API may still return session data or delete the local record when a provider cleanup step fails.
-- Keep-alive mechanism sends SSH commands every 15 minutes to prevent GCS session timeout (20 minutes).
+- Keep-alive mechanism sends SSH commands every 10 minutes to prevent GCS session timeout (20 minutes).
 
 ## 6. Data Model
 
@@ -169,7 +169,7 @@ Container/runtime details:
 
 The system implements provider-aware keep-alive to maintain active sessions:
 
-- **GCS Provider**: Sends SSH keep-alive commands every 15 minutes (before the 20-minute timeout)
+- **GCS Provider**: Sends SSH keep-alive commands every 10 minutes (before the 20-minute timeout)
 - Automatically generates SSH keys for sessions that don't have them yet
 - Updates database with newly generated SSH keys during keep-alive operations
 - Handles suspended sessions by attempting to resume them
