@@ -83,7 +83,8 @@ class GcsProvider extends BaseProvider {
     return {
       enabled: true,
       intervalMinutes: KEEP_ALIVE_INTERVAL_MINUTES,  // Send keep-alive every 10 minutes (before 20-min timeout)
-      strategy: 'ssh-command'
+      strategy: 'ssh-command',
+      runOnStart: true
     };
   }
 
@@ -94,14 +95,27 @@ class GcsProvider extends BaseProvider {
         this.getProviderSessionId(sessionRow),
         { credentialsPath }
       );
-      return status.status === 'RUNNING';
+      const activeStates = new Set(['RUNNING', 'PENDING', 'SUSPENDED', 'STARTING']);
+      return activeStates.has(status.status);
     } catch (error) {
       if (error.code === 'GOOGLE_CREDENTIALS_MISSING') {
         throw error;
       }
 
-      console.warn(`[GCS] Failed to check session active status: ${error.message}`);
-      return false;
+      const isNotFound =
+        error.status === 404 ||
+        error.statusCode === 404 ||
+        error.code === 404 ||
+        (error.message && error.message.toLowerCase().includes('not found')) ||
+        (error.response?.data?.error?.message && error.response.data.error.message.toLowerCase().includes('not found'));
+
+      if (isNotFound) {
+        console.warn(`[GCS] Session is definitively remote not-found: ${error.message}`);
+        return false;
+      }
+
+      console.warn(`[GCS] Failed active-check due to transient/other error, preserving session row: ${error.message}`);
+      throw error;
     }
   }
 
@@ -121,7 +135,9 @@ class GcsProvider extends BaseProvider {
           success: true,
           action: 'resumed',
           message: 'Session was suspended, resuming now',
-          updates: {}
+          updates: {
+            status: 'STARTING'
+          }
         };
       }
 
@@ -138,7 +154,9 @@ class GcsProvider extends BaseProvider {
       // If no SSH key yet, generate them now (like executeCommand does)
       let privateKey = sessionRow.privateKey;
       let publicKey = sessionRow.publicKey;
-      let updates = {};
+      let updates = {
+        status: 'RUNNING'
+      };
 
       if (!privateKey) {
         console.log(`[GCS] Generating SSH keys for keep-alive on session ${sessionRow.id}`);
