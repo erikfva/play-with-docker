@@ -25,3 +25,9 @@
 - [x] **Task 6: Verification & Test Suite**
   - [x] Create `tests/keep-alive-robustness-LAB007.test.js` to assert functionality
   - [x] Run test suite using Node.js test runner to verify success
+- [x] **Task 7: GCS Control-Plane API Keep-Alive (Hybrid Strategy)**
+  - [x] Update `executeKeepAlive` in `gcs-provider.js` to always call `gcsService.startCloudShellSession` for active/RUNNING sessions
+  - [x] Wrap the GCS start API ping in a try/catch block so transient API errors don't impact SSH keep-alive
+  - [x] Add a unit test to verify that `startCloudShellSession` is called during keep-alive when GCS status is RUNNING
+  - [x] Verify that all tests pass successfully
+

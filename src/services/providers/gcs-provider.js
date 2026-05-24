@@ -151,6 +151,14 @@ class GcsProvider extends BaseProvider {
         };
       }
 
+      // Periodically ping GCS API control plane to reset Google's 1-hour idle/inactivity suspension
+      try {
+        await gcsService.startCloudShellSession({ credentialsPath });
+        console.log(`[GCS] Sent API start ping for session ${sessionRow.id}`);
+      } catch (apiError) {
+        console.warn(`[GCS] API keep-alive ping failed for session ${sessionRow.id}:`, apiError.message);
+      }
+
       // If no SSH key yet, generate them now (like executeCommand does)
       let privateKey = getRowValue(sessionRow, 'privateKey');
       let publicKey = getRowValue(sessionRow, 'publicKey');

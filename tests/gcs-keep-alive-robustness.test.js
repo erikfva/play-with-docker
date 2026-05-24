@@ -104,6 +104,12 @@ test('GcsProvider - executeKeepAlive returns RUNNING update when keep-alive succ
     sshUsername: 'fake-user'
   });
 
+  let startSessionCalled = false;
+  gcsService.startCloudShellSession = async () => {
+    startSessionCalled = true;
+    return {};
+  };
+
   let sshCalled = false;
   sshService.executeCommand = async (connInfo, cmd, key) => {
     sshCalled = true;
@@ -115,6 +121,7 @@ test('GcsProvider - executeKeepAlive returns RUNNING update when keep-alive succ
   };
 
   const result = await provider.executeKeepAlive({ id: 'test-session', privateKey: 'fake-private-key' });
+  assert.equal(startSessionCalled, true, 'startCloudShellSession should have been called as control plane keep-alive');
   assert.equal(sshCalled, true, 'sshService.executeCommand should have been called');
   assert.equal(result.success, true);
   assert.equal(result.action, 'keep-alive-sent');

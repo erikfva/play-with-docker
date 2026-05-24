@@ -89,6 +89,16 @@ Scheduled keep-alive commands must never overlap or execute concurrently, even w
 
 ---
 
+### Requirement 6: Control-Plane API Keep-Alive (Hybrid Strategy)
+To prevent Google Cloud Shell from automatically suspending the virtual machine every 60 minutes due to control-plane inactivity, keep-alive operations must interact directly with the Google Cloud Shell API in addition to the standard SSH daemon.
+* **Impact of Failure:** Standard SSH commands bypass the GCS control plane entirely, leading the Google Cloud infrastructure to classify the environment as idle and suspend the VM after 1 hour, terminating all running docker containers and background state.
+* **Technical Details:**
+  * In `executeKeepAlive` in `gcs-provider.js`, after verifying the GCS status is `RUNNING`, perform a lightweight, idempotent start environment ping by calling `gcsService.startCloudShellSession({ credentialsPath })`.
+  * This API-level call registers as active usage at the Google Cloud control plane level, resetting the 1-hour inactivity/idle timer.
+  * Ensure this ping is executed gracefully (wrapped in a try/catch block) so that any transient API failures do not disrupt the fallback SSH-based keep-alive command.
+
+---
+
 ## 3. Verification & Compliance Matrix
 
 | Requirement | Target File / Component | Test Assertion Strategy | Verified Status |
@@ -98,6 +108,7 @@ Scheduled keep-alive commands must never overlap or execute concurrently, even w
 | **Req 3: Startup Recovery** | `keep-alive-service.js`, `server.js` | Assert `recoverKeepAlivesOnStartup` rehydrates timers generically & cleans dead rows | Passed ✅ |
 | **Req 4: Fail-Fast** | `keep-alive-service.js` | Assert timer is killed and DB row marked `FAILED` after exactly 3 consecutive fails | Passed ✅ |
 | **Req 5: Recursive Scheduler** | `keep-alive-service.js` | Assert no overlaps occur and timers are safely cleared via `clearTimeout` | Passed ✅ |
+| **Req 6: API Keep-Alive** | `gcs-provider.js` | Assert `startCloudShellSession` is called during keep-alive to reset the idle timer | Passed ✅ |
 
 ---
 
