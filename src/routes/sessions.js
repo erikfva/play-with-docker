@@ -429,6 +429,7 @@ router.delete('/:id', async (req, res) => {
 
     if (stats) {
       response.keepAliveStats = stats;
+      keepAliveService.clearKeepAliveStats(row.id);
     }
 
     return res.json(response);

@@ -1,0 +1,24 @@
+# LAB-007 Tasks: Robust Keep-Alive Service & PostgreSQL Fixes
+
+- [x] **Task 1: PostgreSQL Cross-Database Case Compatibility**
+  - [x] Import `getRowValue` in `gcs-provider.js`
+  - [x] Update key lookups in `executeKeepAlive`
+  - [x] Update key lookups in `executeCommand`
+  - [x] Update key lookups in `terminateSession`
+  - [x] Update `getCredentialRef` lookup
+- [x] **Task 2: Keep-Alive Statistics Memory Leak Prevention**
+  - [x] Add `clearKeepAliveStats(sessionId)` in `keep-alive-service.js`
+  - [x] Call `clearKeepAliveStats(row.id)` in DELETE session route in `sessions.js`
+- [x] **Task 3: Dynamic & Provider-Agnostic Recovery Check**
+  - [x] Remove hardcoded `gcs` name check in `recoverKeepAlivesOnStartup()`
+  - [x] Run generic `provider.isSessionActive(sessionRow)` check if defined as a function
+- [x] **Task 4: Failure Threshold & Deactivation**
+  - [x] Define `consecutiveFailures` tracking in `startKeepAlive()`
+  - [x] Implement consecutive failures counter increment/reset logic
+  - [x] Automatically call `stopKeepAlive` and mark session status as `FAILED` after 3 consecutive failures
+- [x] **Task 5: Recursive Timeout Scheduling (Overlapping Prevention)**
+  - [x] Refactor keep-alive scheduler in `keep-alive-service.js` from `setInterval` to recursive `setTimeout`
+  - [x] Update `stopKeepAlive` and `stopAllKeepAlives` to use `clearTimeout`
+- [x] **Task 6: Verification & Test Suite**
+  - [x] Create `tests/keep-alive-robustness-LAB007.test.js` to assert functionality
+  - [x] Run test suite using Node.js test runner to verify success

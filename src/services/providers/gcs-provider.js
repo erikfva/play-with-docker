@@ -3,6 +3,7 @@ const gcsService = require('../gcs-service');
 const { initGoogleCredentialsFromS3IfNeeded } = require('../google-credentials-loader');
 const sshService = require('../ssh-service');
 const { SessionNotReadyError } = require('../errors/provider-errors');
+const { getRowValue } = require('../../utils/helpers');
 
 function isExpectedShutdownDisconnect(error) {
   if (!error || !error.message) {
@@ -56,8 +57,7 @@ class GcsProvider extends BaseProvider {
 
   getCredentialRef(sessionRow) {
     const metadata = parseMetadata(sessionRow?.metadata);
-    return sessionRow?.credentialRef
-      || sessionRow?.credentialref
+    return getRowValue(sessionRow, 'credentialRef')
       || metadata.credentialRef
       || null;
   }
@@ -152,8 +152,8 @@ class GcsProvider extends BaseProvider {
       }
 
       // If no SSH key yet, generate them now (like executeCommand does)
-      let privateKey = sessionRow.privateKey;
-      let publicKey = sessionRow.publicKey;
+      let privateKey = getRowValue(sessionRow, 'privateKey');
+      let publicKey = getRowValue(sessionRow, 'publicKey');
       let updates = {
         status: 'RUNNING'
       };
@@ -240,8 +240,8 @@ class GcsProvider extends BaseProvider {
       throw new SessionNotReadyError(status.status);
     }
 
-    let privateKey = sessionRow.privateKey;
-    let publicKey = sessionRow.publicKey;
+    let privateKey = getRowValue(sessionRow, 'privateKey');
+    let publicKey = getRowValue(sessionRow, 'publicKey');
 
     if (!privateKey) {
       const keys = await sshService.generateKeyPair();
@@ -283,7 +283,7 @@ class GcsProvider extends BaseProvider {
       const status = await gcsService.getCloudShellStatus(providerSessionId, { credentialsPath });
 
       if (status.status === 'RUNNING' && status.sshHost && status.sshUsername) {
-        let privateKey = sessionRow.privateKey;
+        let privateKey = getRowValue(sessionRow, 'privateKey');
 
         if (!privateKey) {
           const keys = await sshService.generateKeyPair();
@@ -314,12 +314,13 @@ class GcsProvider extends BaseProvider {
       console.warn('GCS shutdown failed during termination:', error.message);
     }
 
-    if (!sessionRow.publicKey) {
+    const storedPublicKey = getRowValue(sessionRow, 'publicKey');
+    if (!storedPublicKey) {
       return;
     }
 
     try {
-      await gcsService.removePublicKey(sessionRow.publicKey, providerSessionId, { credentialsPath });
+      await gcsService.removePublicKey(storedPublicKey, providerSessionId, { credentialsPath });
     } catch (error) {
       // Keep termination best-effort: DB cleanup should continue on key revoke failures.
       console.warn('GCS key revocation failed during termination:', error.message);
