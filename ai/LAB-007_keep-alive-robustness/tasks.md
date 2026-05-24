@@ -1,0 +1,33 @@
+# LAB-007 Tasks: Robust Keep-Alive Service & PostgreSQL Fixes
+
+- [x] **Task 1: PostgreSQL Cross-Database Case Compatibility**
+  - [x] Import `getRowValue` in `gcs-provider.js`
+  - [x] Update key lookups in `executeKeepAlive` using `getRowValue`
+  - [x] Update key lookups in `executeCommand` using `getRowValue`
+  - [x] Update key lookups in `terminateSession` using `getRowValue`
+  - [x] Update `getCredentialRef` lookup to support lowercase PostgreSQL fields
+  - [x] Verify existing database SSH keypairs are correctly reused
+- [x] **Task 2: Keep-Alive Statistics Memory Leak Prevention**
+  - [x] Add `clearKeepAliveStats(sessionId)` in `keep-alive-service.js`
+  - [x] Call `clearKeepAliveStats(row.id)` in DELETE session route in `sessions.js`
+  - [x] Clear `keepAliveStats` registry completely inside `stopAllKeepAlives()` to release stats memory in bulk
+- [x] **Task 3: Dynamic & Provider-Agnostic Recovery Check**
+  - [x] Remove hardcoded `gcs` name check in `recoverKeepAlivesOnStartup()`
+  - [x] Run generic `provider.isSessionActive(sessionRow)` check if defined as a function
+  - [x] Ensure recovery idempotence by checking `activeKeepAliveTimers` to prevent scheduling duplicate timers
+- [x] **Task 4: Failure Threshold & Deactivation**
+  - [x] Define `consecutiveFailures` tracking in `startKeepAlive()`
+  - [x] Implement consecutive failures counter increment/reset logic
+  - [x] Automatically call `stopKeepAlive` and mark session status as `FAILED` after 3 consecutive failures
+- [x] **Task 5: Recursive Timeout Scheduling (Overlapping Prevention)**
+  - [x] Refactor keep-alive scheduler in `keep-alive-service.js` from `setInterval` to recursive `setTimeout`
+  - [x] Update `stopKeepAlive` and `stopAllKeepAlives` to cleanly cancel pending scheduled tasks using `clearTimeout`
+- [x] **Task 6: Verification & Test Suite**
+  - [x] Create `tests/keep-alive-robustness-LAB007.test.js` to assert functionality
+  - [x] Run test suite using Node.js test runner to verify success
+- [x] **Task 7: GCS Control-Plane API Keep-Alive (Hybrid Strategy)**
+  - [x] Update `executeKeepAlive` in `gcs-provider.js` to always call `gcsService.startCloudShellSession` for active/RUNNING sessions
+  - [x] Wrap the GCS start API ping in a try/catch block so transient API errors don't impact SSH keep-alive
+  - [x] Add a unit test to verify that `startCloudShellSession` is called during keep-alive when GCS status is RUNNING
+  - [x] Verify that all tests pass successfully
+

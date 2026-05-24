@@ -9,6 +9,7 @@ const { getProvider } = require('./provider-factory');
 const activeKeepAliveTimers = new Map();
 const keepAliveStats = new Map();
 const TERMINAL_SESSION_STATUSES = new Set(['TERMINATED', 'DELETED', 'FAILED']);
+const MAX_CONSECUTIVE_FAILURES = 3;
 
 function normalizeStatus(status) {
   if (!status) return '';
@@ -59,9 +60,13 @@ async function startKeepAlive(sessionRow, provider) {
     lastRunAt: null
   });
 
+  let consecutiveFailures = 0;
+  let activeTimeout = null;
+
   async function runKeepAlive() {
     try {
       const stats = keepAliveStats.get(sessionRow.id);
+      if (!stats) return; // stopped while running
 
       // Execute provider-specific keep-alive
       const result = await provider.executeKeepAlive(sessionRow);
@@ -70,6 +75,7 @@ async function startKeepAlive(sessionRow, provider) {
       stats.lastRunAt = new Date();
 
       if (result.success) {
+        consecutiveFailures = 0;
         stats.successes++;
         console.log(
           `[KeepAlive] ✓ ${provider.name} session ${sessionRow.id}: ${result.message}`
@@ -117,7 +123,7 @@ async function startKeepAlive(sessionRow, provider) {
                 `UPDATE sessions SET ${updateFields.join(', ')} WHERE id = ?`,
                 updateValues
               );
-              console.log(`[KeepAlive] Updated database for session ${sessionRow.id} with: ${updateFields.join(', ')}`);
+              console.log(`[KeepAlive] Updated database for session ${sessionRow.id} with updates`);
             }
           } catch (dbError) {
             console.warn(`[KeepAlive] Failed to update database for session ${sessionRow.id}:`, dbError.message);
@@ -125,9 +131,15 @@ async function startKeepAlive(sessionRow, provider) {
         }
       } else {
         stats.failures++;
+        consecutiveFailures++;
         console.warn(
           `[KeepAlive] ✗ ${provider.name} session ${sessionRow.id}: ${result.message}`
         );
+
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          await handleKeepAliveFailureThreshold(sessionRow.id, provider.name);
+          return;
+        }
       }
     } catch (error) {
       const stats = keepAliveStats.get(sessionRow.id);
@@ -135,17 +147,49 @@ async function startKeepAlive(sessionRow, provider) {
         stats.attempts++;
         stats.failures++;
       }
+      consecutiveFailures++;
       console.error(`[KeepAlive] Unexpected error for session ${sessionRow.id}:`, error);
+
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        await handleKeepAliveFailureThreshold(sessionRow.id, provider.name);
+        return;
+      }
     }
+
+    scheduleNext();
   }
 
   const intervalMs = config.intervalMinutes * 60 * 1000;
-  const timer = setInterval(runKeepAlive, intervalMs);
 
-  activeKeepAliveTimers.set(sessionRow.id, timer);
+  function scheduleNext() {
+    if (activeKeepAliveTimers.has(sessionRow.id)) {
+      activeTimeout = setTimeout(runKeepAlive, intervalMs);
+      activeKeepAliveTimers.set(sessionRow.id, activeTimeout);
+    }
+  }
+
+  // Store active placeholder first
+  activeKeepAliveTimers.set(sessionRow.id, true);
 
   if (config.runOnStart) {
     setImmediate(runKeepAlive);
+  } else {
+    scheduleNext();
+  }
+}
+
+/**
+ * Handle session keep-alive deactivation when failure limit is breached
+ */
+async function handleKeepAliveFailureThreshold(sessionId, providerName) {
+  console.error(`[KeepAlive] Session ${sessionId} reached maximum consecutive failures (${MAX_CONSECUTIVE_FAILURES}). Terminating keep-alive.`);
+  stopKeepAlive(sessionId);
+
+  try {
+    await db.run("UPDATE sessions SET status = 'FAILED' WHERE id = ?", [sessionId]);
+    console.log(`[KeepAlive] Marked session ${sessionId} as FAILED in database`);
+  } catch (dbError) {
+    console.warn(`[KeepAlive] Failed to mark session ${sessionId} as FAILED in database:`, dbError.message);
   }
 }
 
@@ -206,15 +250,15 @@ async function recoverKeepAlivesOnStartup() {
 
       summary.eligible += 1;
 
-      // For GCS recovery, verify remote session is still active before scheduling keep-alive.
-      if (provider.name === 'gcs') {
+      // Verify remote session is still active generically if supported by provider
+      if (typeof provider.isSessionActive === 'function') {
         try {
           const isActive = await provider.isSessionActive(sessionRow);
           if (!isActive) {
             await db.run('DELETE FROM sessions WHERE id = ?', [sessionRow.id]);
             summary.cleaned += 1;
             console.log(
-              `[KeepAlive][Recovery] Cleaned stale gcs session ${sessionRow.id}: remote session inactive/stopped`
+              `[KeepAlive][Recovery] Cleaned stale ${provider.name} session ${sessionRow.id}: remote session inactive/stopped`
             );
             continue;
           }
@@ -254,9 +298,11 @@ async function recoverKeepAlivesOnStartup() {
  * @param {string} sessionId - Session ID
  */
 function stopKeepAlive(sessionId) {
-  const timer = activeKeepAliveTimers.get(sessionId);
-  if (timer) {
-    clearInterval(timer);
+  const activeTimer = activeKeepAliveTimers.get(sessionId);
+  if (activeTimer) {
+    if (activeTimer !== true) {
+      clearTimeout(activeTimer);
+    }
     activeKeepAliveTimers.delete(sessionId);
 
     const stats = keepAliveStats.get(sessionId);
@@ -279,14 +325,25 @@ function getKeepAliveStats(sessionId) {
 }
 
 /**
+ * Clear keep-alive statistics from memory to prevent memory leaks
+ * @param {string} sessionId - Session ID
+ */
+function clearKeepAliveStats(sessionId) {
+  keepAliveStats.delete(sessionId);
+}
+
+/**
  * Stop all active keep-alive timers
  * (useful for cleanup/shutdown)
  */
 function stopAllKeepAlives() {
-  for (const [sessionId, timer] of activeKeepAliveTimers.entries()) {
-    clearInterval(timer);
+  for (const [sessionId, activeTimer] of activeKeepAliveTimers.entries()) {
+    if (activeTimer !== true) {
+      clearTimeout(activeTimer);
+    }
   }
   activeKeepAliveTimers.clear();
+  keepAliveStats.clear();
   console.log('[KeepAlive] All keep-alive timers stopped');
 }
 
@@ -295,5 +352,6 @@ module.exports = {
   recoverKeepAlivesOnStartup,
   stopKeepAlive,
   getKeepAliveStats,
+  clearKeepAliveStats,
   stopAllKeepAlives
 };
