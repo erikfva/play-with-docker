@@ -1,44 +1,111 @@
-# LAB-007 Specification: Robust Keep-Alive Service & PostgreSQL Fixes
+# LAB-007 Specification: Robust Session Keep-Alive Engine & PostgreSQL Compatibility
 
-## Main Specification: Robust Session Keep-Alive Engine
-The VM orchestrator requires a robust, provider-agnostic, and database-compatible keep-alive engine. The system must support case-insensitive database lookups (for PostgreSQL compatibility), safe timer and statistics deallocation to prevent memory leaks under load, idempotent startup recovery checks, recursive timeout scheduling to avoid overlapping executions, and automatic timer shutdown when remote environments fail consecutively.
+## Epic / User Story
+> **As a platform operator**, I want a robust, resource-efficient, and provider-agnostic session keep-alive engine that is fully compatible with both SQLite and PostgreSQL databases, so that remote developer environments remain active without memory leaks, overlapping executions, or endless failure loops.
 
 ---
 
-## Requirements & Subtasks
+## 1. Architectural Core Goals
 
-### Requirement 1: PostgreSQL Cross-Database Case Compatibility
-* The GCS provider must dynamically resolve session database properties using case-insensitive lookups to operate successfully on PostgreSQL.
-* **Subtasks:**
-  * Implement `getRowValue` lookups in `gcs-provider.js` for `privateKey` and `publicKey` during keep-alive executions, commands, and termination.
-  * Implement `getRowValue` for `credentialRef` in the credential initialization path.
-  * Ensure the GCS provider correctly reuses existing database SSH keypairs rather than repeatedly generating new ones on PostgreSQL.
+To ensure the highest reliability and maintainability of the Cloud Shell session orchestrator, the keep-alive engine must satisfy five architectural pillars:
 
-### Requirement 2: Keep-Alive Statistics Memory Leak Prevention
-* Keep-alive service statistics stored in the internal memory registry must be fully released when sessions are terminated individually or in bulk.
-* **Subtasks:**
-  * Expose `clearKeepAliveStats(sessionId)` in `keep-alive-service.js` to delete a session's stats from the memory Map.
-  * Call `clearKeepAliveStats(row.id)` in the DELETE session route after the statistics are fetched and compiled into the client response.
-  * Ensure `stopAllKeepAlives()` clears all entries in the `keepAliveStats` registry to avoid memory leaks during bulk terminations.
+```mermaid
+graph TD
+    A[Robust Keep-Alive Engine] --> B[PostgreSQL Compatibility]
+    A --> C[Memory Leak Prevention]
+    A --> D[Provider-Agnostic Recovery]
+    A --> E[Fail-Fast & Auto-Shutdown]
+    A --> F[Execution Safety]
 
-### Requirement 3: Dynamic & Provider-Agnostic Recovery Check
-* Startup keep-alive recovery must dynamically inspect and verify remote session status without provider-specific hardcoding.
-* **Subtasks:**
-  * Remove the hardcoded `provider.name === 'gcs'` check from the startup recovery loop.
-  * Programmatically inspect if a provider defines `isSessionActive(sessionRow)` as a function, and execute it generically for any eligible provider.
-  * Maintain strict startup recovery idempotency by checking `activeKeepAliveTimers` to prevent scheduling duplicate timers.
+    B --> B1[Case-insensitive Row Lookups]
+    C --> C1[Statistics Map Pruning]
+    D --> D1[Dynamic Active Status Checks]
+    E --> E1[3-Failure Threshold & DB Flag]
+    F --> F1[Recursive setTimeout vs setInterval]
+```
 
-### Requirement 4: Failure Threshold & Deactivation
-* Scheduled keep-alive tasks must automatically deactivate and update their database state when remote environments have permanently failed, are deleted, or credentials expire.
-* **Subtasks:**
-  * Implement a counter to track consecutive keep-alive failures per session, resetting to `0` upon any successful run.
-  * Enforce a threshold limit of `MAX_CONSECUTIVE_FAILURES = 3`.
-  * If the threshold is breached, immediately cancel the scheduled keep-alive timer.
-  * Automatically update the database session status to `FAILED` to flag the environment's death to operators.
+---
 
-### Requirement 5: Recursive Timeout Scheduling (Overlapping Prevention)
-* Scheduled keep-alive tasks must run sequentially without overlaps, even when remote network calls or SSH command runs are slow.
-* **Subtasks:**
-  * Transition from the fixed-interval `setInterval` scheduler to recursive `setTimeout` scheduling.
-  * Ensure the next execution is only queued after the current async task resolves (regardless of success or failure).
-  * Update `stopKeepAlive` and `stopAllKeepAlives` to use `clearTimeout` to cleanly cancel pending scheduled tasks.
+## 2. Requirements & Detailed Technical Specifications
+
+### Requirement 1: PostgreSQL Cross-Database Compatibility
+To ensure compatibility with database engines like PostgreSQL that return field names in lowercase (e.g. `privatekey` instead of `privateKey`), all key property retrievals must be case-insensitive.
+* **Impact of Failure:** If properties are fetched using case-sensitive keys (e.g., `sessionRow.privateKey`), PostgreSQL sessions will fail to locate existing keys and generate a new SSH keypair on **every single keep-alive tick**, bloating the remote Cloud Shell environment with dynamic authorized keys.
+* **Technical Details:**
+  * Utilize a case-insensitive helper `getRowValue(row, camelCaseProperty)` to dynamically resolve fields such as `privateKey`, `publicKey`, and `credentialRef`.
+  * Ensure this dynamic lookup is active during:
+    * `executeKeepAlive`
+    * `executeCommand`
+    * `terminateSession`
+    * Credential initialization (`getCredentialRef`)
+  * Actively reuse existing SSH keypairs stored in the database.
+
+> [!IMPORTANT]
+> Always verify that key generation is skipped if a `privateKey` exists in the database to prevent duplicate key propagation.
+
+---
+
+### Requirement 2: Memory Leak Prevention
+Under heavy load or high session volume, memory allocated for in-memory tracking statistics must be fully released as soon as the corresponding sessions are terminated.
+* **Technical Details:**
+  * Maintain statistics in a memory registry (`keepAliveStats = new Map()`).
+  * Expose a clear-up interface: `clearKeepAliveStats(sessionId)`.
+  * Invoke `clearKeepAliveStats(row.id)` immediately in the session termination flow (`DELETE /api/v1/sessions/:id`) after the statistics have been compiled and sent to the client response.
+  * Ensure bulk terminations (`POST /api/v1/sessions/terminate-all`) call `stopAllKeepAlives()`, which must completely wipe the stats map via `keepAliveStats.clear()`.
+
+---
+
+### Requirement 3: Dynamic & Provider-Agnostic Startup Recovery
+When the orchestrator API restarts (due to redeployments, scale-ups, or failures), scheduled keep-alive tasks must be rehydrated dynamically and safely.
+* **Technical Details:**
+  * Eliminate provider-specific hardcoded checks (e.g., `provider.name === 'gcs'`) from the startup recovery loop.
+  * Detect capabilities dynamically: inspect if the resolved provider exposes the function `isSessionActive(sessionRow)`.
+  * Perform generic status validation: if `isSessionActive` is present, call it to verify remote active state.
+  * If a session is definitively verified as inactive or deleted on the remote provider, delete the local row from the database to keep data clean.
+  * Maintain recovery idempotency: guard scheduling by checking `activeKeepAliveTimers` to prevent launching duplicate timers for the same session.
+
+---
+
+### Requirement 4: Fail-Fast & Auto-Shutdown (Failure Threshold)
+If a remote environment becomes unreachable, fails, or its credentials expire, the scheduled keep-alive task must automatically deactivate to prevent infinite log pollution and useless resource consumption.
+* **Technical Details:**
+  * Maintain a consecutive failure counter (`consecutiveFailures`) per session timer instance.
+  * Reset the counter to `0` immediately upon any successful keep-alive run.
+  * Enforce a maximum failure threshold: `MAX_CONSECUTIVE_FAILURES = 3`.
+  * On the third consecutive failure:
+    1. Immediately stop and deallocate the keep-alive timer from memory.
+    2. Update the session `status` in the database to `FAILED` to clearly flag the environment's state to operators.
+    3. Emit a structured, high-visibility error log.
+
+---
+
+### Requirement 5: Execution Safety via Recursive Timeout Scheduling
+Scheduled keep-alive commands must never overlap or execute concurrently, even when network congestion, database locks, or slow SSH handshakes delay individual runs.
+* **Technical Details:**
+  * Avoid `setInterval` as it schedules executions at fixed intervals regardless of when the previous execution finished, leading to race conditions.
+  * Implement **Recursive Timeout Scheduling** using `setTimeout`.
+  * Ensure that the next keep-alive tick is scheduled only *after* the current asynchronous execution completely resolves (both in success and failure branches).
+  * Safely clear any pending scheduled keep-alive ticks using `clearTimeout(timerId)` during session stop or deallocation.
+
+---
+
+## 3. Verification & Compliance Matrix
+
+| Requirement | Target File / Component | Test Assertion Strategy | Verified Status |
+| :--- | :--- | :--- | :--- |
+| **Req 1: PostgreSQL** | `gcs-provider.js`, `helpers.js` | Assert `getRowValue` handles lower/camel case correctly without regenerating SSH keypairs | Passed ✅ |
+| **Req 2: Stats Purge** | `keep-alive-service.js`, `sessions.js` | Assert `clearKeepAliveStats` removes mapping from Map; verify DELETE route behavior | Passed ✅ |
+| **Req 3: Startup Recovery** | `keep-alive-service.js`, `server.js` | Assert `recoverKeepAlivesOnStartup` rehydrates timers generically & cleans dead rows | Passed ✅ |
+| **Req 4: Fail-Fast** | `keep-alive-service.js` | Assert timer is killed and DB row marked `FAILED` after exactly 3 consecutive fails | Passed ✅ |
+| **Req 5: Recursive Scheduler** | `keep-alive-service.js` | Assert no overlaps occur and timers are safely cleared via `clearTimeout` | Passed ✅ |
+
+---
+
+## 4. Test Suite Execution
+
+All specifications are fully verified and backed by the Node.js test suite at `tests/keep-alive-robustness-LAB007.test.js` and general regression tests:
+
+```bash
+# Execute suite to verify spec compliance
+npm test
+```
