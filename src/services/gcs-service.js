@@ -16,10 +16,16 @@ async function getAuthClient(credentialsPath) {
 
 async function getEnvironmentName(auth, credentialsPath) {
   const authClient = auth || await getAuthClient(credentialsPath);
-  // If it's a service account, using 'me' should work,
-  // but let's try to get the actual email if possible just in case.
-  const email = (await authClient.getCredentials()).client_email;
-  return `users/${email || 'me'}/environments/default`;
+  let email = 'me';
+  if (typeof authClient.getCredentials === 'function') {
+    try {
+      const creds = await authClient.getCredentials();
+      email = creds.client_email || 'me';
+    } catch {
+      // fall through
+    }
+  }
+  return `users/${email}/environments/default`;
 }
 
 async function startCloudShellSession(options = {}) {
