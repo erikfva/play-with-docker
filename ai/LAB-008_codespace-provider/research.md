@@ -218,6 +218,8 @@ GitHub does not expose a direct API endpoint for command execution like CodeSand
 
 ### 4.1 Available Machine Types
 
+> **Note:** The table below is from the GitHub API at research time. The authoritative validated enum for this project is defined in the spec (`basicLinux32gb`, `standardLinux32gb`, `standardLinux`, `premiumLinux`, `largePremiumLinux`, `xLargePremiumLinux`). `largeLinux` appears in the GitHub API but is **not** in the spec enum and will not be accepted by the provider.
+
 | Machine Name | Display Name | CPUs | RAM | Storage | Operating System |
 |--------------|--------------|------|-----|---------|------------------|
 | `basicLinux32gb` | 2 cores, 8 GB RAM, 32 GB storage | 2 | 8 GB | 32 GB | linux |
@@ -331,7 +333,7 @@ src/services/providers/codespaces/
 | `providerSessionId` | `name` | Unique codespace name |
 | `envName` | `name` or `display_name` | User-friendly name |
 | `sshCommand` | `gh codespace ssh -c <name>` | CLI command |
-| `webHost` | `web_url` | Direct mapping |
+| `webHost` | `web_url` | Always `null` for Codespaces — web IDE URL stored in `metadata.webIdeUrl` instead |
 | `status` | `state` | Map states to orchestrator statuses |
 | `credentialRef` | Token filename/path | S3 key or local path |
 | `credentialFingerprint` | SHA-256(token) | For uniqueness tracking |
@@ -549,7 +551,7 @@ curl -L \
   -d '{
     "repository_id": 1296269,
     "ref": "main",
-    "machine": "standardLinux",
+    "machine": "basicLinux32gb",
     "idle_timeout_minutes": 30,
     "display_name": "Development Environment"
   }'
@@ -760,7 +762,7 @@ X-RateLimit-Reset: 1372700873
 ```bash
 # GitHub Codespaces Configuration
 CODESPACES_DEFAULT_REPOSITORY_ID=1296269
-CODESPACES_DEFAULT_MACHINE=standardLinux32gb
+CODESPACES_DEFAULT_MACHINE=basicLinux32gb
 CODESPACES_DEFAULT_GEO=UsWest
 CODESPACES_DEFAULT_IDLE_TIMEOUT_MINUTES=30
 CODESPACES_DEFAULT_RETENTION_PERIOD_MINUTES=43200

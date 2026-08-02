@@ -366,6 +366,93 @@ Response shape is identical to the existing `google-credentials` and `codesandbo
 
 ---
 
+### Get Codespaces Session
+
+**Endpoint**: `GET /api/v1/sessions/:id`
+
+**Headers**:
+```
+x-server-token: <SERVER_TOKEN>
+```
+
+**Response** (200 OK):
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "provider": "codespaces",
+  "providerSessionId": "octocat-play-with-docker-abc123",
+  "status": "RUNNING",
+  "webHost": null,
+  "createdAt": "2026-08-02T05:30:00Z",
+  "metadata": {
+    "githubState": "Available",
+    "machine": "basicLinux32gb",
+    "cpus": 2,
+    "memoryGB": 8,
+    "storageGB": 32,
+    "idleTimeoutMinutes": 30,
+    "location": "WestUs2",
+    "webIdeUrl": "https://octocat-play-with-docker-abc123.github.dev",
+    "keepAlive": {
+      "enabled": true,
+      "intervalMinutes": 20
+    }
+  }
+}
+```
+
+The `GET /:id` response is the authoritative full-detail view referenced by FR-4 (create returns only `{ id, provider, providerSessionId, status }`).
+
+---
+
+### Delete Codespaces Session
+
+**Endpoint**: `DELETE /api/v1/sessions/:id`
+
+**Headers**:
+```
+x-server-token: <SERVER_TOKEN>
+```
+
+**Behavior** (per-provider branching): for `codespaces`, the route calls `provider.terminateSession(row)` which deletes the GitHub codespace via API (GitHub returns 202; a 404 means already-deleted and is treated as success). On success the route runs `UPDATE sessions SET status = 'TERMINATED' WHERE id = row.id` and returns:
+
+**Response** (200 OK):
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "provider": "codespaces",
+  "providerSessionId": "octocat-play-with-docker-abc123",
+  "status": "TERMINATED"
+}
+```
+
+Keep-alive timers for the session are canceled on termination.
+
+---
+
+### Bulk Termination
+
+**Endpoint**: `POST /api/v1/sessions/terminate-all`
+
+**Headers**:
+```
+x-server-token: <SERVER_TOKEN>
+```
+
+**Behavior**: terminates every active Codespaces session. Credentials are loaded from each row's stored `credentialRef` (no credential header required). For `codespaces` rows, after `provider.terminateSession(row)` succeeds the route runs `UPDATE sessions SET status = 'TERMINATED' WHERE id = row.id` (not hard-delete). Other providers keep existing hard-delete behavior.
+
+**Response** (200 OK):
+```json
+{
+  "terminated": [
+    { "id": "550e8400-e29b-41d4-a716-446655440000", "provider": "codespaces", "status": "TERMINATED" }
+  ],
+  "failed": []
+}
+```
+
+---
+
 ## Configuration
 
 ### Environment Variables
