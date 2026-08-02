@@ -519,7 +519,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_codespaces_active_token
 ON sessions (credentialFingerprint)
 WHERE provider = 'codespaces'
   AND credentialFingerprint IS NOT NULL
-  AND COALESCE(status, '') NOT IN ('TERMINATED', 'DELETED', 'FAILED');
+  AND COALESCE(status, '') NOT IN ('TERMINATED', 'FAILED');
 ```
 
 ### 9.4 Dependencies
@@ -760,7 +760,7 @@ X-RateLimit-Reset: 1372700873
 ```bash
 # GitHub Codespaces Configuration
 CODESPACES_DEFAULT_REPOSITORY_ID=1296269
-CODESPACES_DEFAULT_MACHINE=standardLinux
+CODESPACES_DEFAULT_MACHINE=standardLinux32gb
 CODESPACES_DEFAULT_GEO=UsWest
 CODESPACES_DEFAULT_IDLE_TIMEOUT_MINUTES=30
 CODESPACES_DEFAULT_RETENTION_PERIOD_MINUTES=43200
