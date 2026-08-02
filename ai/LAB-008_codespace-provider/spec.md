@@ -96,7 +96,7 @@ The orchestrator currently supports Google Cloud Shell (`gcs`) and CodeSandbox (
 - System enforces one active session per credential fingerprint (token uniqueness)
 - Attempting to create a session when an active session (`RUNNING`, `STARTING`, `PENDING`, `STOPPING`) already exists for the token returns `409 CODESPACES_ALREADY_ACTIVE`
 - Attempting to create a session when a `STOPPED` session exists for the token: the stopped codespace is deleted via GitHub API first, the local DB row is removed, then a fresh session is created normally
-- Response includes session ID, SSH command, and connection details; the web IDE URL is exposed as `metadata.webIdeUrl` (the top-level `webHost` is `null` for this provider — see `webHost` Semantics)
+- Response includes `{ id, provider, providerSessionId, status }`. Full details (SSH command, web IDE URL, metadata) are available via `GET /api/v1/sessions/:id`. The top-level `webHost` is `null` for this provider — see `webHost` Semantics.
 - Session stored in PostgreSQL `sessions` table with `provider='codespaces'`
 
 ---
@@ -149,7 +149,7 @@ The orchestrator currently supports Google Cloud Shell (`gcs`) and CodeSandbox (
 - `DELETE /api/v1/sessions/:id` terminates the codespace
 - **Per-provider branching:** the termination flow branches on provider **in the route handler**, not inside `terminateSession`. For `codespaces`, after `provider.terminateSession(row)` succeeds, the route runs `UPDATE sessions SET status = 'TERMINATED' WHERE id = row.id` instead of `DELETE FROM sessions WHERE id = row.id`. For all other providers, existing hard-delete + 200 behavior is unchanged. Existing tests are unaffected.
 - System calls GitHub API DELETE endpoint for codespace removal
-- Termination is asynchronous (202 Accepted response)
+- Termination is asynchronous on GitHub's side (GitHub DELETE returns 202); the orchestrator returns 200 once GitHub confirms removal, consistent with the existing route contract
 - **Ordering:** for `codespaces`, the GitHub codespace MUST be deleted via API before the PostgreSQL row is removed; the local row is only cleared after GitHub confirms removal (a 404 on a prior deletion is treated as already-deleted and safe to clear)
 - Session status updated to `TERMINATED` in local database
 - Stopped sessions (`STOPPED`) are distinct from terminated sessions: they are preserved in the database across server restarts and remain restorable
@@ -173,7 +173,7 @@ The orchestrator currently supports Google Cloud Shell (`gcs`) and CodeSandbox (
 - Failed keep-alive attempts (3 consecutive failures) mark session as `FAILED`
 - Keep-alive timers restored on server restart for surviving database sessions
 - Keep-alive can be disabled via configuration environment variable
-- Keep-alive skips sessions in non-active states (`STOPPED`, `TERMINATED`, `FAILED`)
+- Keep-alive skips sessions in non-active states (`STOPPED`, `STOPPING`, `TERMINATED`, `FAILED`)
 - **`runOnStart` behavior:** keep-alive does NOT fire immediately on session creation or recovery (`runOnStart: false`). The first keep-alive fires after the configured interval. This avoids a redundant wake on a freshly-created `RUNNING` session and prevents all recovered sessions from firing simultaneously on restart.
 - **Startup recovery behavior for `STOPPED` sessions:** the recovery service checks `sessionRow.status` before calling `isSessionActive`. Sessions with `status = 'STOPPED'` are preserved unconditionally — the row is kept, keep-alive is skipped, and `isSessionActive` is never called for them. Only sessions in non-terminal active states (`RUNNING`, `STARTING`, `PENDING`, `STOPPING`) proceed to the `isSessionActive` check. If `isSessionActive` returns `false` for those, the session is stale and must be cleaned up (GitHub API delete first, then DB row removal per delete-ordering rules).
 - When keep-alive startup-recovery determines a session is stale and must be cleaned up, it MUST first terminate/delete the corresponding GitHub Codespace via the API (if it still exists) before deleting the PostgreSQL row, to avoid orphaned remote resources (see Data Model: Delete ordering)
@@ -187,7 +187,7 @@ The orchestrator currently supports Google Cloud Shell (`gcs`) and CodeSandbox (
 
 **Acceptance Criteria**:
 - `GET /api/v1/sessions` includes Codespaces sessions alongside other providers
-- Query parameter `?provider=codespaces` filters to only Codespaces sessions
+- Query parameter `?provider=codespaces` filters to only Codespaces sessions. **Note:** the current route only supports `?status=` filtering; `?provider=` requires adding a filter clause to the `GET /sessions` route handler.
 - Query parameter `?status=RUNNING` filters to active Codespaces sessions
 - Response includes provider-specific metadata for each session
 
@@ -202,7 +202,7 @@ The orchestrator currently supports Google Cloud Shell (`gcs`) and CodeSandbox (
 - `POST /api/v1/sessions/terminate-all` includes Codespaces sessions in termination
 - All active Codespaces sessions terminated via GitHub API
 - Per-provider branching: for `codespaces` sessions the route runs `UPDATE sessions SET status = 'TERMINATED' WHERE id = row.id` (not hard-delete) after `provider.terminateSession` succeeds; the GitHub delete runs first inside `terminateSession`. Other providers keep their existing hard-delete + 200 behavior.
-- Credentials required for proper GitHub API authentication during cleanup
+- Credentials are loaded from the stored `credentialRef` on each session row — not from request headers. No credential header is required on the `terminate-all` request.
 - Response reports successful and failed terminations
 
 ---
@@ -406,7 +406,7 @@ CODESPACES_KEEP_ALIVE_INTERVAL_MINUTES=20
 **Session Lifecycle & Persistence Rules**:
 - `RUNNING` / `STARTING` / `STOPPING` / `PENDING`: active sessions, managed by keep-alive
 - `STOPPED`: preserved in the database across server restarts; the codespace remains restorable via start
-- `FAILED` / `TERMINATED`: terminal states; removed from the active-session list
+- `FAILED` / `TERMINATED`: terminal states; excluded from keep-alive and active operations. For the `codespaces` provider, `TERMINATED` rows are **retained in the database** (not hard-deleted); for all other providers, terminal rows are hard-deleted as before.
 - Keep-alive recovery on startup must not delete `STOPPED` sessions (see FR-8: keep-alive skips non-active states)
 - **Delete ordering (no orphans):** any path that removes a Codespaces session row from PostgreSQL **must first terminate/delete the underlying GitHub Codespace via the API**, and only then delete the local row. Never delete the PG row while the remote codespace still exists (dangling, potentially still-billing resource). This applies to `DELETE /api/v1/sessions/:id`, `POST /api/v1/sessions/terminate-all`, and the keep-alive startup-recovery cleanup path. If the remote codespace is already gone (GitHub returned 404 on DELETE), proceed with the local deletion.
 
@@ -426,10 +426,10 @@ The existing `metadata` JSON field will store Codespaces-specific information:
 ```json
 {
   "githubState": "Available",
-  "machine": "standardLinux",
-  "cpus": 4,
-  "memoryGB": 16,
-  "storageGB": 64,
+  "machine": "basicLinux32gb",
+  "cpus": 2,
+  "memoryGB": 8,
+  "storageGB": 32,
   "idleTimeoutMinutes": 30,
   "retentionPeriodMinutes": 43200,
   "location": "WestUs2",
@@ -529,7 +529,7 @@ All errors follow the standard orchestrator error format:
 - Expired token detected and reported
 - Rate limit exceeded triggers backoff and retry
 - Network failures handled gracefully
-- Duplicate session creation returns existing session
+- Active duplicate session (same token, active status) returns `409 CODESPACES_ALREADY_ACTIVE`
 - Missing per-session credential returns `CODESPACES_NO_CREDENTIAL` (no silent fallback)
 - Codespace boot exceeding the boot timeout returns `CODESPACES_START_TIMEOUT`
 
@@ -628,7 +628,7 @@ These features may be considered for future iterations.
 |------|--------|------------|
 | GitHub API changes breaking compatibility | High | Pin to specific API version, monitor deprecation notices |
 | GitHub CLI installation failures | Medium | Pre-validate in CI/CD, include health checks |
-| Rate limiting impacting functionality | Medium | Implement caching, backoff strategies, request batching |
+| Rate limiting impacting functionality | Medium | Implement exponential backoff and retry strategies (v1); state cache deferred to future iteration |
 | Template repository deletion | High | Use organization-owned repo, document backup procedures |
 | Cost overruns from forgotten sessions | Low | Enforce aggressive timeouts, document billing implications |
 | Token expiration mid-session | Medium | Validate token before operations, handle 401 gracefully |
