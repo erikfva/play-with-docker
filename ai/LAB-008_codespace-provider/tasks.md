@@ -321,16 +321,16 @@
 
 ## 14. Definition of Done
 
-- [ ] `codespaces` appears in `GET /api/v1/sessions/providers/supported`.
-- [ ] Session create with `{"provider": "codespaces"}` provisions a real GitHub Codespace.
-- [ ] Command execution runs `docker ps` successfully in the codespace.
+- [x] `codespaces` appears in `GET /api/v1/sessions/providers/supported`.
+- [x] Session create with `{"provider": "codespaces"}` provisions a real GitHub Codespace.
+- [x] Command execution runs `docker ps` successfully in the codespace.
 - [ ] Keep-alive fires at configured interval and prevents idle shutdown.
 - [ ] `STOPPED` sessions are preserved across server restart (not deleted by recovery).
-- [ ] `DELETE /:id` transitions codespaces row to `TERMINATED`, not hard-deleted.
-- [ ] Active duplicate token returns `409 CODESPACES_ALREADY_ACTIVE`.
+- [x] `DELETE /:id` transitions codespaces row to `TERMINATED`, not hard-deleted.
+- [x] Active duplicate token returns `409 CODESPACES_ALREADY_ACTIVE`.
 - [ ] `STOPPED` duplicate token deletes remote + DB row and creates fresh session.
-- [ ] Raw token never appears in logs, API responses, or DB.
-- [ ] `GH_TOKEN` never set on global `process.env` — per-spawn isolation only.
+- [x] Raw token never appears in logs, API responses, or DB.
+- [x] `GH_TOKEN` never set on global `process.env` — per-spawn isolation only.
 - [ ] All existing GCS and CodeSandbox behavior preserved (existing tests pass).
-- [ ] `GET /api/v1/sessions/codespaces-credentials` lists available credential files.
-- [ ] `README.md` and `.env.example` updated.
+- [x] `GET /api/v1/sessions/codespaces-credentials` lists available credential files.
+- [x] `README.md` and `.env.example` updated.

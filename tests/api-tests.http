@@ -363,6 +363,9 @@ X-Server-Token: {{serverToken}}
     "command": "docker ps"
 }
 
+###
+# @codespacesSessionId = c7363fac-a8e0-4b43-9360-d0349aa55ad2
+
 ### 29. Terminate Codespaces Session
 DELETE {{baseUrl}}/sessions/{{codespacesSessionId}}
 X-Server-Token: {{serverToken}}
