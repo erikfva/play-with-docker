@@ -29,13 +29,37 @@ GitHub Codespaces provides cloud-hosted development environments powered by Visu
 - **Fine-grained PAT**: Requires "Codespaces" repository permissions (read/write)
 - **GitHub App**: User access tokens with Codespaces permissions
 
-**Token Format**:
+**Creating a PAT**:
+1. Go to https://github.com/settings/tokens
+2. Click **Generate new token (classic)**
+3. Check the `codespace` scope — this is the only scope required
+4. Set an expiry (90 days recommended; never use no-expiry for automation tokens)
+5. Click **Generate token** and copy the value (`ghp_...`)
+
+For fine-grained tokens (https://github.com/settings/tokens?type=beta):
+1. Select the resource owner (your account or an org)
+2. Under **Repository permissions** → **Codespaces**: set to **Read and Write**
+3. Generate and copy
+
+**Creating the credential file**:
+
+Place the token in a file under `codespaces/` in your S3 bucket or local mount. Two formats are accepted:
+
+JSON (recommended):
 ```json
 {
-  "token": "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-  "type": "personal_access_token"
+  "token": "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 }
 ```
+
+Plain text:
+```
+ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Store it as, e.g., `codespaces/alice.json`. The file name becomes the credential reference passed in `x-codespaces-credentials`.
+
+> **Important**: JSON files must have a `token` field. A JSON file without a `token` field (e.g. `{"config": "..."}`) is rejected with `CODESPACES_NO_CREDENTIAL` rather than being treated as a raw token, to prevent accidental misconfiguration.
 
 ### 2.2 Core API Endpoints
 
@@ -807,7 +831,143 @@ CODESPACES_KEEP_ALIVE_COMMAND="echo 'orchestrator-keepalive' > /tmp/keepalive"
 
 ---
 
-## 16. References
+## 16. Multi-Account Setup
+
+### 16.1 How Multiple GitHub Accounts Work
+
+A codespace is always created from a repository (the repo defines what's inside the container), but the codespace itself is owned by the account whose PAT is used to create it. The `CODESPACES_DEFAULT_REPOSITORY_ID` is just the template — it does not restrict which GitHub accounts can use the orchestrator.
+
+This means:
+- **One repo, many users**: All users create codespaces from the same template repo. Each codespace is provisioned under its owner's GitHub account.
+- **Billing is per-account**: Each user is billed directly on their own GitHub account for their codespace minutes.
+- **Isolation is automatic**: GitHub's own RBAC ensures one user cannot see or access another user's codespaces. The orchestrator enforces one active session per token via the `credentialFingerprint` unique index.
+
+### 16.2 Recommended Multi-Account Setup
+
+**Step 1 — Create a shared template repository**
+
+Create one **public** repository (e.g. `your-org/codespace-template`) with a `devcontainer.json` that installs Docker-in-Docker:
+
+```json
+{
+  "name": "Play with Docker",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "postCreateCommand": "docker --version"
+}
+```
+
+The repo must be **public** so that any GitHub account's PAT can create a codespace from it without needing explicit repository access grants.
+
+Get the numeric repository ID:
+```bash
+curl -s https://api.github.com/repos/your-org/codespace-template | grep '"id"' | head -1
+# "id": 1296269,
+```
+
+Set it in `.env`:
+```bash
+CODESPACES_DEFAULT_REPOSITORY_ID=1296269
+```
+
+**Step 2 — Each user creates their own PAT**
+
+Every GitHub account that will use the orchestrator needs its own Personal Access Token:
+
+1. Go to https://github.com/settings/tokens
+2. Click **Generate new token**
+3. Select the `codespace` scope (classic token) or grant **Codespaces: Read and Write** (fine-grained token)
+4. Copy the token (`ghp_...`)
+
+**Step 3 — Store each token as a credential file**
+
+Place each token under `codespaces/` in the S3 bucket or local mount. One file per account:
+
+```
+codespaces/
+  alice.json      → Alice's PAT
+  bob.json        → Bob's PAT
+  carol.txt       → Carol's PAT (plain text format)
+```
+
+**Step 4 — Each user passes their own credential file on every request**
+
+```bash
+# Alice creates her codespace
+curl -X POST http://localhost:3000/api/v1/sessions \
+  -H "x-server-token: $SERVER_TOKEN" \
+  -H "x-codespaces-credentials: codespaces/alice.json" \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "codespaces"}'
+
+# Bob creates his codespace independently
+curl -X POST http://localhost:3000/api/v1/sessions \
+  -H "x-server-token: $SERVER_TOKEN" \
+  -H "x-codespaces-credentials: codespaces/bob.json" \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "codespaces"}'
+```
+
+Alice and Bob each get a separate codespace under their own GitHub account. They can both be active simultaneously.
+
+### 16.3 Credential File Format
+
+A credential file contains only the GitHub PAT. Two formats are accepted:
+
+**JSON** (recommended — easier to extend with metadata):
+```json
+{
+  "token": "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+}
+```
+
+**Plain text** (simpler):
+```
+ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+> The file must contain only the token in the `token` field (JSON) or as the entire file content (plain text). Any other JSON structure (e.g. `{"config": "..."}`) is rejected with `CODESPACES_NO_CREDENTIAL` — the loader does not fall through to using the raw JSON as a token.
+
+**Naming convention**: use a recognizable name so the `/codespaces-credentials` listing is human-readable:
+```
+codespaces/alice-github.json
+codespaces/bob-github.txt
+codespaces/ci-bot.json
+```
+
+### 16.4 Listing Available Credential Files
+
+```bash
+curl http://localhost:3000/api/v1/sessions/codespaces-credentials \
+  -H "x-server-token: $SERVER_TOKEN"
+```
+
+Response:
+```json
+{
+  "credentials": [
+    { "key": "codespaces/alice-github.json", "displayName": "alice-github.json" },
+    { "key": "codespaces/bob-github.txt",    "displayName": "bob-github.txt" }
+  ],
+  "mode": "s3-api"
+}
+```
+
+### 16.5 What Happens with the Same Token Twice
+
+The orchestrator enforces one active codespace per token via a database unique index on `credentialFingerprint` (sha256 of the token):
+
+| Existing session status | Behaviour on second create |
+|------------------------|---------------------------|
+| `RUNNING` / `STARTING` / `PENDING` / `STOPPING` | Rejected — `409 CODESPACES_ALREADY_ACTIVE` |
+| `STOPPED` | Remote codespace is deleted, DB row removed, new codespace created |
+| `TERMINATED` / `FAILED` | No conflict — new codespace created normally |
+
+---
+
+## 17. References
 
 - **GitHub Codespaces REST API**: https://docs.github.com/en/rest/codespaces/codespaces
 - **GitHub CLI Manual**: https://cli.github.com/manual/gh_codespace_ssh
@@ -818,7 +978,7 @@ CODESPACES_KEEP_ALIVE_COMMAND="echo 'orchestrator-keepalive' > /tmp/keepalive"
 
 ---
 
-## 17. Conclusion
+## 18. Conclusion
 
 Adding GitHub Codespaces as a provider is feasible and aligns well with the existing orchestrator architecture. The main challenges are:
 
