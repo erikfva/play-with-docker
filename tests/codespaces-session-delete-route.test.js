@@ -33,7 +33,13 @@ async function withSessionRouter({ row, rows, getProvider, initGoogleCredentials
     run: async (sql, params) => {
       calls.dbRun.push({ sql, params });
     },
-    all: async () => rows || [],
+    all: async (sql) => {
+      const allRows = rows || [];
+      if (/status IS NULL OR status NOT IN \('TERMINATED', 'FAILED', 'DELETED'\)/.test(sql)) {
+        return allRows.filter((sessionRow) => !['TERMINATED', 'FAILED', 'DELETED'].includes(sessionRow.status));
+      }
+      return allRows;
+    },
     pool: { end: async () => undefined },
     ready: Promise.resolve()
   });
@@ -189,4 +195,31 @@ test('terminate-all with a mix of codespaces and gcs sessions: codespaces update
   assert.deepEqual(updateCalls[0].params, ['cs-1']);
   assert.equal(deleteCalls.length, 1);
   assert.deepEqual(deleteCalls[0].params, ['gcs-1']);
+});
+
+test('terminate-all skips terminal codespaces rows', async () => {
+  const terminateCalls = [];
+  const harness = await withSessionRouter({
+    row: null,
+    rows: [
+      { id: 'cs-terminated', provider: 'codespaces', status: 'TERMINATED' },
+      { id: 'cs-running', provider: 'codespaces', status: 'RUNNING' }
+    ],
+    getProvider: (providerName) => ({
+      terminateSession: async () => {
+        terminateCalls.push(providerName);
+      }
+    })
+  });
+
+  const response = await harness.request('POST', '/api/v1/sessions/terminate-all');
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.summary.total, 1);
+  assert.equal(response.body.summary.terminated, 1);
+  assert.equal(response.body.summary.deleted, 1);
+  assert.deepEqual(terminateCalls, ['codespaces']);
+  const updateCalls = harness.calls.dbRun.filter((call) => /UPDATE sessions SET status = 'TERMINATED'/.test(call.sql));
+  assert.equal(updateCalls.length, 1);
+  assert.deepEqual(updateCalls[0].params, ['cs-running']);
 });

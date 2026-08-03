@@ -363,6 +363,7 @@ class CodespacesProvider extends BaseProvider {
     }
 
     const { token } = await loadCodespacesCredentials(credentialRef);
+    let autoStarted = false;
 
     // Auto-start stopped codespaces before executing
     if (status === 'STOPPED') {
@@ -391,13 +392,26 @@ class CodespacesProvider extends BaseProvider {
           statusCode: 504
         });
       }
+
+      autoStarted = true;
+
+      try {
+        await db.run("UPDATE sessions SET status = 'RUNNING' WHERE id = ?", [getRowValue(sessionRow, 'id')]);
+      } catch (error) {
+        console.warn(
+          `[CodespacesProvider] Failed to persist RUNNING status after boot for session ${getRowValue(sessionRow, 'id')}: ${error.message}`
+        );
+      }
     }
 
     const result = await executeInCodespace(providerSessionId, command, token, {
       timeout: COMMAND_TIMEOUT_MS
     });
 
-    return { output: result.output };
+    return {
+      output: result.output,
+      updates: autoStarted ? { status: 'RUNNING' } : {}
+    };
   }
 
   /**

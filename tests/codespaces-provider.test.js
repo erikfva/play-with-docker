@@ -166,17 +166,23 @@ test('executeKeepAlive: returns success false for missing credentialRef', async 
   assert.equal(result.action, 'missing-session-data');
 });
 
-function loadProviderWithMocks({ clientOverrides = {}, loaderOverrides = {} } = {}) {
+function loadProviderWithMocks({ clientOverrides = {}, loaderOverrides = {}, dbRunSpy = null, cliExecutorOverrides = {} } = {}) {
   const dbPath = require.resolve('../src/db/db');
   const providerPath = require.resolve('../src/services/providers/codespaces-provider');
   const clientPath = require.resolve('../src/services/providers/codespaces/client');
   const loaderPath = require.resolve('../src/services/providers/codespaces/credentials-loader');
+  const executorPath = require.resolve('../src/services/providers/codespaces/cli-executor');
 
   delete require.cache[providerPath];
 
   stubModule(dbPath, {
     get: async () => null,
-    run: async () => undefined,
+    run: async (...args) => {
+      if (dbRunSpy) {
+        dbRunSpy(...args);
+      }
+      return undefined;
+    },
     all: async () => [],
     pool: { end: async () => undefined },
     ready: Promise.resolve()
@@ -199,9 +205,17 @@ function loadProviderWithMocks({ clientOverrides = {}, loaderOverrides = {} } = 
     startCodespace: async () => ({ state: 'Starting' }),
     ...clientOverrides
   });
+  stubModule(executorPath, {
+    executeInCodespace: async () => ({ output: 'ok' }),
+    BOOT_TIMEOUT_MS: 90000,
+    COMMAND_TIMEOUT_MS: 30000,
+    ...cliExecutorOverrides
+  });
 
   const CodespacesProvider = require('../src/services/providers/codespaces-provider');
-  return new CodespacesProvider();
+  const provider = new CodespacesProvider();
+  provider.__dbRunSpy = dbRunSpy;
+  return provider;
 }
 
 test('createSession: geo and retention defaults match documented values', async () => {
@@ -283,4 +297,38 @@ test('executeCommand: boot poll exits early when the codespace enters a terminal
   );
 
   assert.equal(getCodespaceCalls, 1);
+});
+
+test('executeCommand: auto-started stopped codespaces are marked RUNNING before executing the command', async () => {
+  const dbRuns = [];
+  let executeCalls = 0;
+  const provider = loadProviderWithMocks({
+    clientOverrides: {
+      startCodespace: async () => ({ state: 'Starting' }),
+      getCodespace: async () => ({ state: 'Available' })
+    },
+    cliExecutorOverrides: {
+      executeInCodespace: async () => {
+        executeCalls += 1;
+        return { output: 'command-output' };
+      }
+    },
+    dbRunSpy: (sql, params) => {
+      dbRuns.push({ sql, params });
+    }
+  });
+
+  const result = await provider.executeCommand({
+    id: 'session-1',
+    status: 'STOPPED',
+    providerSessionId: 'octocat-code-abc',
+    credentialRef: 'codespaces/token.json'
+  }, 'docker ps');
+
+  assert.equal(result.output, 'command-output');
+  assert.deepEqual(result.updates, { status: 'RUNNING' });
+  assert.equal(executeCalls, 1);
+  assert.equal(dbRuns.length, 1);
+  assert.match(dbRuns[0].sql, /UPDATE sessions SET status = 'RUNNING'/);
+  assert.deepEqual(dbRuns[0].params, ['session-1']);
 });

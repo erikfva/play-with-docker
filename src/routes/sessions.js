@@ -141,6 +141,23 @@ async function cleanupCreatedCodeSandboxSession(created) {
   }
 }
 
+async function cleanupCreatedCodespacesSession(created) {
+  if (!created?.providerSessionId) {
+    return;
+  }
+
+  try {
+    const cleanupProvider = getProvider('codespaces');
+    await cleanupProvider.terminateSession({
+      providerSessionId: created.providerSessionId,
+      credentialRef: created.credentialRef,
+      credentialFingerprint: created.credentialFingerprint
+    });
+  } catch (cleanupError) {
+    console.warn(`[Session Create] Failed to cleanup orphaned Codespaces session ${created.providerSessionId}: ${cleanupError.message}`);
+  }
+}
+
 async function refreshExistingSessionForCreate(row, provider, requireRefreshSuccess = false) {
   try {
     const refreshed = await provider.refreshSession(row);
@@ -230,15 +247,15 @@ router.post('/', async (req, res) => {
     } catch (dbError) {
       if (providerName === 'codesandbox') {
         await cleanupCreatedCodeSandboxSession(created);
+      } else if (providerName === 'codespaces') {
+        await cleanupCreatedCodespacesSession(created);
       }
 
-      // Handle unique constraint violation for CodeSandbox one sandbox/session per token
-      if (dbError.code === '23505' && providerName === 'codesandbox') {
-        // Unique index violation on credentialFingerprint
-        // Return the existing session
+      // Handle unique constraint violation for one active session per token
+      if (dbError.code === '23505' && (providerName === 'codesandbox' || providerName === 'codespaces')) {
         const existingSession = await db.get(
           'SELECT * FROM sessions WHERE credentialFingerprint = ? AND provider = ? AND (status IS NULL OR status NOT IN (?, ?, ?))',
-          [created.credentialFingerprint, 'codesandbox', 'TERMINATED', 'DELETED', 'FAILED']
+          [created.credentialFingerprint, providerName, 'TERMINATED', 'DELETED', 'FAILED']
         );
 
         if (existingSession) {
@@ -419,6 +436,11 @@ router.post('/:id/command', async (req, res) => {
       ]
     );
 
+    if (row.provider === 'codespaces' && updates.status === 'RUNNING') {
+      row.status = 'RUNNING';
+      await keepAliveService.startKeepAlive(row, provider);
+    }
+
     return res.json({ output: result.output });
   } catch (error) {
     return mapErrorToHttp(res, error, 'Failed to execute command');
@@ -484,7 +506,7 @@ router.post('/terminate-all', async (req, res) => {
     // STOP ALL KEEP-ALIVES FIRST
     keepAliveService.stopAllKeepAlives();
 
-    const rows = await db.all('SELECT * FROM sessions');
+    const rows = await db.all("SELECT * FROM sessions WHERE status IS NULL OR status NOT IN ('TERMINATED', 'FAILED', 'DELETED')");
     const results = [];
 
     for (const row of rows) {
