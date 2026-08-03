@@ -444,12 +444,19 @@ x-server-token: <SERVER_TOKEN>
 **Response** (200 OK):
 ```json
 {
-  "terminated": [
-    { "id": "550e8400-e29b-41d4-a716-446655440000", "provider": "codespaces", "status": "TERMINATED" }
-  ],
-  "failed": []
+  "summary": {
+    "total": 1,
+    "terminated": 1,
+    "deleted": 1,
+    "errors": 0
+  },
+  "results": [
+    { "id": "550e8400-e29b-41d4-a716-446655440000", "provider": "codespaces", "terminated": true, "deleted": true, "errors": [] }
+  ]
 }
 ```
+
+Response shape matches the existing `POST /terminate-all` route (`{ summary, results }`). No route-level change to the response format is required.
 
 ---
 

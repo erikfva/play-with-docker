@@ -239,6 +239,11 @@ function mapState(state) {
 Wraps `gh codespace ssh` execution. Token isolation: every `execFile` call
 passes `GH_TOKEN` via the `env` option — never mutates `process.env`.
 
+**Command passing**: `command` is passed as a single string argument after `--`.
+The remote shell receives and interprets it, so pipes, redirects, and other shell
+metacharacters work as expected (e.g. `docker ps | grep nginx`). This is intentional
+— `gh codespace ssh` forwards the argument to the remote shell.
+
 ```javascript
 const { execFile } = require('child_process');
 
@@ -309,8 +314,8 @@ getKeepAliveConfig(sessionRow) {
     metadata.idleTimeoutMinutes ?? process.env.CODESPACES_DEFAULT_IDLE_TIMEOUT_MINUTES,
     30
   );
-  // Effective interval: min(configured, idleTimeout - 10)
-  const intervalMinutes = Math.min(configuredInterval, idleTimeout - 10);
+  // Effective interval: min(configured, idleTimeout - 10), floor at 1
+  const intervalMinutes = Math.max(1, Math.min(configuredInterval, idleTimeout - 10));
 
   return {
     enabled: true,
@@ -353,12 +358,14 @@ Sequence:
 2. Load credentials → `CODESPACES_NO_CREDENTIAL` if missing.
 3. Validate token → `CODESPACES_TOKEN_INVALID` / `CODESPACES_TOKEN_INSUFFICIENT_SCOPE`.
 4. Fingerprint check:
-   - Active session found → throw `ConflictError` (`CODESPACES_ALREADY_ACTIVE`).
-   - `STOPPED` session found → delete remote via `githubClient.deleteCodespace`, then delete DB row, then continue.
+   - Active session found (`RUNNING`, `STARTING`, `PENDING`, `STOPPING`) → throw `ConflictError` (`CODESPACES_ALREADY_ACTIVE`).
+   - `STOPPED` session found → delete remote via `githubClient.deleteCodespace` (treat 404 as already-gone), **then** delete the DB row. The DB deletion must complete successfully before proceeding — it releases the unique index slot so the new session insert doesn't hit a constraint violation.
 5. Build create params from `options`, applying env var defaults.
 6. `POST /user/codespaces` → `CODESPACES_CREATION_FAILED` on error.
-7. Return `mapToSession(codespace, credentialRef, credentialFingerprint)` merged with
-   `keepAlive` config in metadata.
+7. Call `mapToSession(codespace, credentialRef, credentialFingerprint)` to get the base
+   session object, then inject the `keepAlive` config into `session.metadata` after
+   the mapper returns (mapper builds its own metadata; keepAlive is added on top):
+   `session.metadata.keepAlive = keepAliveConfig`.
 
 **Enum validation** (before any API call):
 
@@ -372,7 +379,9 @@ const VALID_GEOS = new Set(['UsEast', 'UsWest', 'EuropeWest', 'SoutheastAsia']);
 
 ### `refreshSession(sessionRow)`
 
-Calls `githubClient.getCodespace(token, name)`. Returns:
+Extracts `providerSessionId` via `getRowValue` and loads `token` from the stored
+`credentialRef` via `loadCodespacesCredentials`. Then calls
+`githubClient.getCodespace(token, providerSessionId)`. Returns:
 
 ```javascript
 {
@@ -389,12 +398,16 @@ No caching in v1 — called on every `GET /:id`.
 
 Sequence:
 1. Check `status` from `sessionRow`:
-   - `FAILED` / `TERMINATED` → reject immediately with clear error.
-   - `STOPPED` → call `githubClient.startCodespace(token, name)` then wait for
-     `Available` state via polling (up to `BOOT_TIMEOUT_MS = 90s`) → `CODESPACES_START_TIMEOUT` on failure.
-2. Load token from stored `credentialRef`.
-3. `cliExecutor.executeInCodespace(name, command, token)` with `COMMAND_TIMEOUT_MS = 30s`.
-4. Return `{ output: result.output }`.
+   - `FAILED` / `TERMINATED` → reject immediately with clear error (no credentials needed).
+2. Load credentials from stored `credentialRef` → `CODESPACES_NO_CREDENTIAL` if missing.
+   Credentials must be loaded before any GitHub API call including the auto-start below.
+3. If `STOPPED` → call `githubClient.startCodespace(token, name)` then poll `getCodespace`
+   every 3 seconds until state is `Available` (up to `BOOT_TIMEOUT_MS = 90s`) →
+   `CODESPACES_START_TIMEOUT` on failure.
+4. `cliExecutor.executeInCodespace(name, command, token)` with `COMMAND_TIMEOUT_MS = 30s`.
+5. Return `{ output: result.output }`. No `updates` key is needed — the route does
+   `result.updates || {}` so omitting it is safe. Codespaces has no SSH keys or
+   sshCommand to persist back from command execution.
 
 ### `executeKeepAlive(sessionRow)`
 
@@ -405,7 +418,19 @@ shape as other providers so the keep-alive service works without changes.
 async executeKeepAlive(sessionRow) {
   const status = normalizeStatus(sessionRow.status);
   if (['STOPPED', 'STOPPING', 'TERMINATED', 'FAILED'].includes(status)) {
-    return { success: false, action: 'skipped', message: `Session is ${status}`, updates: {} };
+    // Return success:true so the keep-alive service does NOT count this as
+    // a failure. A deliberate skip must never increment consecutiveFailures —
+    // returning success:false would mark the session FAILED after 3 intervals
+    // (keep-alive-service.js MAX_CONSECUTIVE_FAILURES).
+    return { success: true, action: 'skipped', message: `Session is ${status}, keep-alive skipped`, updates: {} };
+  }
+
+  const providerSessionId = getRowValue(sessionRow, 'providerSessionId');
+  const credentialRef = getRowValue(sessionRow, 'credentialRef')
+    || parseMetadata(sessionRow.metadata).credentialRef;
+
+  if (!providerSessionId || !credentialRef) {
+    return { success: false, action: 'missing-session-data', message: 'Missing providerSessionId or credentialRef', updates: {} };
   }
 
   const { token } = await loadCodespacesCredentials(credentialRef);
@@ -427,8 +452,8 @@ async executeKeepAlive(sessionRow) {
 
 ### `terminateSession(sessionRow)`
 
-1. Load token from stored `credentialRef`.
-2. Call `githubClient.deleteCodespace(token, name)`.
+1. Extract `providerSessionId` via `getRowValue` and load `token` from stored `credentialRef` via `loadCodespacesCredentials`.
+2. Call `githubClient.deleteCodespace(token, providerSessionId)`.
 3. If 404 → log "already gone", return normally (safe to proceed).
 4. On other errors → throw (route preserves the DB row per CodeSandbox pattern).
 
@@ -455,16 +480,26 @@ const providers = {
 ## 8. `src/services/credentials-lister.js`
 
 Both `listCredentialsS3` and `listCredentialsFs` currently filter for `.json`
-only. Add `.txt` support:
+only. Both must be updated — there are **two separate filter sites** with different
+variable shapes:
 
 ```javascript
-// before
+// listCredentialsS3 (around line 34) — filters on key string:
+// before:
 .filter((key) => key.toLowerCase().endsWith('.json'))
-
-// after
+// after:
 .filter((key) => {
   const lower = key.toLowerCase();
   return lower.endsWith('.json') || lower.endsWith('.txt');
+})
+
+// listCredentialsFs (around line 51) — filters on dirent object (entry.name):
+// before:
+.filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.json'))
+// after:
+.filter((entry) => {
+  const lower = entry.name.toLowerCase();
+  return entry.isFile() && (lower.endsWith('.json') || lower.endsWith('.txt'));
 })
 ```
 
@@ -535,6 +570,12 @@ In the `POST /` handler, add a branch:
   credentialRef = requireCodespacesCredentialRef(req);
 }
 ```
+
+**Note on `dockerHost` in create response**: the existing handler always includes
+`dockerHost: created.metadata?.dockerHost || null`. For Codespaces this is always
+`null` and is harmless. The spec documents the minimal shape `{ id, provider,
+providerSessionId, status }` but the `dockerHost: null` field will still be present
+in the response — this is acceptable and requires no route change.
 
 ### 10-B: `GET /codespaces-credentials`
 
