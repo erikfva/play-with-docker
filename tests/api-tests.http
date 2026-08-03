@@ -302,3 +302,67 @@ X-Server-Token: {{serverToken}}
     "provider": "codesandbox",
     "title": "missing-config-check"
 }
+
+###
+# GitHub Codespaces Provider Tests
+# Requires the LAB-008 implementation and a GitHub PAT with the `codespace`
+# scope, sent through x-codespaces-credentials or body credentialRef.
+
+@codespacesTitle = lab-codespaces-smoke-test
+@codespacesCredentials = codespaces/token.json
+
+### 23. List Supported Providers - Should Include codespaces
+GET {{baseUrl}}/sessions/providers/supported
+X-Server-Token: {{serverToken}}
+
+### 24. List Available Codespaces Credentials
+GET {{baseUrl}}/sessions/codespaces-credentials
+X-Server-Token: {{serverToken}}
+
+### 25. List Codespaces Sessions Only
+GET {{baseUrl}}/sessions?provider=codespaces
+X-Server-Token: {{serverToken}}
+
+### 26. Create a Codespaces Session
+# @name createCodespacesSession
+POST {{baseUrl}}/sessions
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+X-Codespaces-Credentials: {{codespacesCredentials}}
+
+{
+    "provider": "codespaces",
+    "title": "{{codespacesTitle}}"
+}
+
+###
+@codespacesSessionId = {{createCodespacesSession.response.body.$.id}}
+#@codespacesSessionId = 00000000-0000-0000-0000-000000000000
+
+### 27. Get Codespaces Session Details
+GET {{baseUrl}}/sessions/{{codespacesSessionId}}
+X-Server-Token: {{serverToken}}
+
+### 28. Execute Command in Codespaces Session
+# Commands use the credentialRef stored on the session row at create time —
+# the x-codespaces-credentials header is only honored on create.
+POST {{baseUrl}}/sessions/{{codespacesSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "pwd && echo codespaces-command-ok"
+}
+
+### 28.1. Execute Docker PS in Codespaces Session
+POST {{baseUrl}}/sessions/{{codespacesSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "docker ps"
+}
+
+### 29. Terminate Codespaces Session
+DELETE {{baseUrl}}/sessions/{{codespacesSessionId}}
+X-Server-Token: {{serverToken}}

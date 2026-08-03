@@ -31,7 +31,10 @@ async function listCredentialsS3(bucket, prefix) {
 
     const files = (response.Contents || [])
       .map((obj) => obj.Key)
-      .filter((key) => key.toLowerCase().endsWith('.json'))
+      .filter((key) => {
+        const lower = key.toLowerCase();
+        return lower.endsWith('.json') || lower.endsWith('.txt');
+      })
       .map((key) => ({
         key,
         displayName: path.basename(key),
@@ -48,7 +51,10 @@ async function listCredentialsFs(directory) {
     const entries = await fs.readdir(directory, { withFileTypes: true });
 
     const files = entries
-      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.json'))
+      .filter((entry) => {
+        const lower = entry.name.toLowerCase();
+        return entry.isFile() && (lower.endsWith('.json') || lower.endsWith('.txt'));
+      })
       .map((entry) => {
         const fullPath = path.join(directory, entry.name);
         return {
