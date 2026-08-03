@@ -309,7 +309,7 @@ X-Server-Token: {{serverToken}}
 # scope, sent through x-codespaces-credentials or body credentialRef.
 
 @codespacesTitle = lab-codespaces-smoke-test
-@codespacesCredentials = codespaces/token.json
+@codespacesCredentials = codespaces/vmmanager-1.json
 
 ### 23. List Supported Providers - Should Include codespaces
 GET {{baseUrl}}/sessions/providers/supported

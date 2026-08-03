@@ -2,6 +2,8 @@ services:
   app:
     build: .
     image: erikvargas/play-with-docker:latest
+    volumes:
+      - ./credentials:/mnt/s3:ro
     ports:
       - "${PORT:-3000}:${PORT:-3000}"
     cap_add:
