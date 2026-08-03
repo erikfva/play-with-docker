@@ -108,6 +108,22 @@ function requireCodeSandboxCredentialRef(req) {
   return credentialRef;
 }
 
+function getCodespacesCredentialRef(req) {
+  return req.headers['x-codespaces-credentials'] || req.body?.credentialRef || null;
+}
+
+function requireCodespacesCredentialRef(req) {
+  const credentialRef = getCodespacesCredentialRef(req);
+  if (!credentialRef) {
+    throw new ProviderError(
+      'Codespaces credential reference is required in x-codespaces-credentials or request body credentialRef',
+      { code: 'CODESPACES_NO_CREDENTIAL', statusCode: 401 }
+    );
+  }
+
+  return credentialRef;
+}
+
 async function cleanupCreatedCodeSandboxSession(created) {
   if (!created?.providerSessionId) {
     return;
@@ -122,6 +138,23 @@ async function cleanupCreatedCodeSandboxSession(created) {
     });
   } catch (cleanupError) {
     console.warn(`[Session Create] Failed to cleanup orphaned CodeSandbox sandbox/session ${created.providerSessionId}: ${cleanupError.message}`);
+  }
+}
+
+async function cleanupCreatedCodespacesSession(created) {
+  if (!created?.providerSessionId) {
+    return;
+  }
+
+  try {
+    const cleanupProvider = getProvider('codespaces');
+    await cleanupProvider.terminateSession({
+      providerSessionId: created.providerSessionId,
+      credentialRef: created.credentialRef,
+      credentialFingerprint: created.credentialFingerprint
+    });
+  } catch (cleanupError) {
+    console.warn(`[Session Create] Failed to cleanup orphaned Codespaces session ${created.providerSessionId}: ${cleanupError.message}`);
   }
 }
 
@@ -171,6 +204,8 @@ router.post('/', async (req, res) => {
       credentialRef = requireGoogleCredentialRefForRequest(req);
     } else if (providerName === 'codesandbox') {
       credentialRef = requireCodeSandboxCredentialRef(req);
+    } else if (providerName === 'codespaces') {
+      credentialRef = requireCodespacesCredentialRef(req);
     }
 
     const provider = getProvider(providerName);
@@ -212,15 +247,15 @@ router.post('/', async (req, res) => {
     } catch (dbError) {
       if (providerName === 'codesandbox') {
         await cleanupCreatedCodeSandboxSession(created);
+      } else if (providerName === 'codespaces') {
+        await cleanupCreatedCodespacesSession(created);
       }
 
-      // Handle unique constraint violation for CodeSandbox one sandbox/session per token
-      if (dbError.code === '23505' && providerName === 'codesandbox') {
-        // Unique index violation on credentialFingerprint
-        // Return the existing session
+      // Handle unique constraint violation for one active session per token
+      if (dbError.code === '23505' && (providerName === 'codesandbox' || providerName === 'codespaces')) {
         const existingSession = await db.get(
           'SELECT * FROM sessions WHERE credentialFingerprint = ? AND provider = ? AND (status IS NULL OR status NOT IN (?, ?, ?))',
-          [created.credentialFingerprint, 'codesandbox', 'TERMINATED', 'DELETED', 'FAILED']
+          [created.credentialFingerprint, providerName, 'TERMINATED', 'DELETED', 'FAILED']
         );
 
         if (existingSession) {
@@ -282,10 +317,27 @@ router.get('/codesandbox-credentials', async (req, res) => {
   }
 });
 
+router.get('/codespaces-credentials', async (req, res) => {
+  try {
+    const prefix = 'codespaces';
+    const result = await listAvailableCredentials(prefix);
+    return res.json(result);
+  } catch (error) {
+    return mapErrorToHttp(res, error, 'Failed to list credentials');
+  }
+});
+
 router.get('/', async (req, res) => {
-  const { status } = req.query;
-  const sql = status ? 'SELECT * FROM sessions WHERE status = ?' : 'SELECT * FROM sessions';
-  const params = status ? [status] : [];
+  const { status, provider } = req.query;
+  const conditions = [];
+  const params = [];
+
+  if (status) { conditions.push('status = ?'); params.push(status); }
+  if (provider) { conditions.push('provider = ?'); params.push(provider); }
+
+  const sql = conditions.length
+    ? `SELECT * FROM sessions WHERE ${conditions.join(' AND ')}`
+    : 'SELECT * FROM sessions';
 
   try {
     const rows = await db.all(sql, params);
@@ -384,6 +436,11 @@ router.post('/:id/command', async (req, res) => {
       ]
     );
 
+    if (row.provider === 'codespaces' && updates.status === 'RUNNING') {
+      row.status = 'RUNNING';
+      await keepAliveService.startKeepAlive(row, provider);
+    }
+
     return res.json({ output: result.output });
   } catch (error) {
     return mapErrorToHttp(res, error, 'Failed to execute command');
@@ -415,15 +472,21 @@ router.delete('/:id', async (req, res) => {
       await provider.terminateSession(row);
     } catch (providerError) {
       console.warn(`Provider termination failed for session ${row.id}:`, providerError.message);
-      if (row.provider === 'codesandbox') {
+      if (row.provider === 'codesandbox' || row.provider === 'codespaces') {
         throw providerError;
       }
     }
 
-    await db.run('DELETE FROM sessions WHERE id = ?', [row.id]);
+    if (row.provider === 'codespaces') {
+      await db.run("UPDATE sessions SET status = 'TERMINATED' WHERE id = ?", [row.id]);
+    } else {
+      await db.run('DELETE FROM sessions WHERE id = ?', [row.id]);
+    }
 
     const response = {
-      message: `Session ${row.id} (${row.provider}) terminated and removed from orchestrator.`,
+      message: row.provider === 'codespaces'
+        ? `Session ${row.id} (${row.provider}) terminated.`
+        : `Session ${row.id} (${row.provider}) terminated and removed from orchestrator.`,
       providerCleanup: row.provider === 'codesandbox' ? 'deleted' : 'attempted'
     };
 
@@ -443,7 +506,7 @@ router.post('/terminate-all', async (req, res) => {
     // STOP ALL KEEP-ALIVES FIRST
     keepAliveService.stopAllKeepAlives();
 
-    const rows = await db.all('SELECT * FROM sessions');
+    const rows = await db.all("SELECT * FROM sessions WHERE status IS NULL OR status NOT IN ('TERMINATED', 'FAILED', 'DELETED')");
     const results = [];
 
     for (const row of rows) {
@@ -465,14 +528,18 @@ router.post('/terminate-all', async (req, res) => {
         result.terminated = true;
       } catch (providerError) {
         result.errors.push(`terminateSession: ${providerError.message}`);
-        if (row.provider === 'codesandbox') {
+        if (row.provider === 'codesandbox' || row.provider === 'codespaces') {
           results.push(result);
           continue;
         }
       }
 
       try {
-        await db.run('DELETE FROM sessions WHERE id = ?', [row.id]);
+        if (row.provider === 'codespaces') {
+          await db.run("UPDATE sessions SET status = 'TERMINATED' WHERE id = ?", [row.id]);
+        } else {
+          await db.run('DELETE FROM sessions WHERE id = ?', [row.id]);
+        }
         result.deleted = true;
       } catch (dbError) {
         result.errors.push(`dbDelete: ${dbError.message}`);

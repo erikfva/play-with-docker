@@ -144,6 +144,10 @@ test('lists Google credentials from S3_MOUNT_DIR when NODE_ENV is local', async 
       {
         key: path.join(dir, 'a.json'),
         displayName: 'a.json'
+      },
+      {
+        key: path.join(dir, 'b.txt'),
+        displayName: 'b.txt'
       }
     ]);
   });

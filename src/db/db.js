@@ -156,6 +156,39 @@ db.ready = (async () => {
       AND COALESCE(status, '') NOT IN ('TERMINATED', 'DELETED', 'FAILED')
   `);
 
+  const duplicateCodespacesSessions = await all(`
+    SELECT
+      credentialFingerprint,
+      COUNT(*) AS activeCount,
+      ARRAY_AGG(id ORDER BY createdAt DESC, id DESC) AS sessionIds
+    FROM sessions
+    WHERE provider = 'codespaces'
+      AND credentialFingerprint IS NOT NULL
+      AND COALESCE(status, '') NOT IN ('TERMINATED', 'FAILED')
+    GROUP BY credentialFingerprint
+    HAVING COUNT(*) > 1
+  `);
+
+  if (duplicateCodespacesSessions.length > 0) {
+    const duplicateSummary = duplicateCodespacesSessions
+      .map((row) => `${row.credentialfingerprint || row.credentialFingerprint}: ${(row.sessionids || row.sessionIds || []).join(', ')}`)
+      .join('; ');
+
+    throw new Error(
+      `Cannot create Codespaces token uniqueness index while duplicate non-terminal sessions exist. ` +
+      `Terminate or mark older duplicate sessions as TERMINATED or FAILED first. Duplicates: ${duplicateSummary}`
+    );
+  }
+
+  // Add unique index for active Codespaces sessions (one codespace per token)
+  await run(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_codespaces_active_token
+    ON sessions (credentialFingerprint)
+    WHERE provider = 'codespaces'
+      AND credentialFingerprint IS NOT NULL
+      AND COALESCE(status, '') NOT IN ('TERMINATED', 'FAILED')
+  `);
+
     console.log('[DB] ✓ Schema initialized successfully');
   } catch (err) {
     console.error('[DB] ✗ Schema initialization failed:', err.message);

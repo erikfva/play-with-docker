@@ -248,6 +248,13 @@ async function recoverKeepAlivesOnStartup() {
         continue;
       }
 
+      // STOPPED rows are always preserved — skip isSessionActive entirely so the
+      // session is never deleted by recovery and no keep-alive timer is started.
+      if (normalizeStatus(sessionRow.status) === 'STOPPED') {
+        summary.skipped += 1;
+        continue;
+      }
+
       summary.eligible += 1;
 
       // Verify remote session is still active generically if supported by provider

@@ -37,6 +37,7 @@ Provider credentials are stored under provider-specific folders in the S3 bucket
 or local mount:
 - Google Cloud Shell (`gcs`): `gcloud/`
 - CodeSandbox (`codesandbox`): `codesandbox/`
+- GitHub Codespaces (`codespaces`): `codespaces/`
 
 ### Mode A: `s3fs` enabled (`S3FS_ENABLED=1`)
 
@@ -79,6 +80,23 @@ Google credentials:
 CodeSandbox credentials:
 - New CodeSandbox create requests must send `x-codesandbox-credentials` or body `credentialRef`.
 
+Codespaces credentials:
+- New Codespaces create requests must send `x-codespaces-credentials` or body `credentialRef`.
+- The credential file must contain a GitHub Personal Access Token with the `codespace` scope.
+- Accepted formats (any of the following, stored under `codespaces/`):
+  - JSON with a `token` field, e.g. `{"token":"ghp_..."}`
+  - Plain text containing only the token, e.g. `ghp_...`
+- GitHub REST API versioning uses header `X-GitHub-Api-Version: 2026-03-10`.
+
+Codespaces provider options:
+- `CODESPACES_DEFAULT_REPOSITORY_ID` (required for create)
+- `CODESPACES_DEFAULT_MACHINE` (default `basicLinux32gb`)
+- `CODESPACES_DEFAULT_GEO` (default `UsEast`)
+- `CODESPACES_DEFAULT_IDLE_TIMEOUT_MINUTES` (default `30`)
+- `CODESPACES_DEFAULT_RETENTION_PERIOD_MINUTES` (default `1440`)
+- `CODESPACES_KEEP_ALIVE_ENABLED` (default `true`)
+- `CODESPACES_KEEP_ALIVE_INTERVAL_MINUTES` (default `20`)
+
 S3:
 - `S3FS_ENABLED` (`1` or `0`)
 - `S3_BUCKET`
@@ -113,6 +131,35 @@ curl -X POST http://localhost:3000/api/v1/sessions \
   -H "x-server-token: $SERVER_TOKEN" \
   -H "x-codesandbox-credentials: codesandbox/account.json" \
   -d '{"provider":"codesandbox"}'
+```
+
+Create GitHub Codespaces session:
+```bash
+curl -X POST http://localhost:3000/api/v1/sessions \
+  -H "Content-Type: application/json" \
+  -H "x-server-token: $SERVER_TOKEN" \
+  -H "x-codespaces-credentials: codespaces/token.json" \
+  -d '{"provider":"codespaces"}'
+```
+
+The GitHub PAT must have the `codespace` scope. Create one at
+https://github.com/settings/tokens (fine-grained tokens need
+`Codespaces: read/write`). The token is never stored or logged; only a
+`sha256` fingerprint is persisted in the DB.
+
+List available Codespaces credentials:
+```bash
+curl http://localhost:3000/api/v1/sessions/codespaces-credentials \
+  -H "x-server-token: $SERVER_TOKEN"
+```
+
+Run command in a Codespaces session:
+```bash
+curl -X POST http://localhost:3000/api/v1/sessions/<SESSION_ID>/command \
+  -H "Content-Type: application/json" \
+  -H "x-server-token: $SERVER_TOKEN" \
+  -H "x-codespaces-credentials: codespaces/token.json" \
+  -d '{"command":"docker ps"}'
 ```
 
 List supported providers:
