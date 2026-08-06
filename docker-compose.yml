@@ -4,7 +4,8 @@ services:
     image: erikvargas/play-with-docker:latest
     volumes:
       - ./credentials:/mnt/s3:ro
-      - ./src:/app/src
+      - ./:/app
+      - /app/node_modules
     ports:
       - "${PORT:-3000}:3000"
     cap_add:
@@ -15,4 +16,5 @@ services:
       - apparmor:unconfined
     env_file:
       - .env
+    command: ["npm", "run", "dev"]
     restart: unless-stopped
