@@ -4,6 +4,8 @@ LABEL org.opencontainers.image.source="https://github.com/erikfva/vm-manager"
 
 WORKDIR /app
 
+ARG NODE_ENV=production
+
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     python3 \
@@ -27,7 +29,11 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json ./
-RUN npm install --only=production \
+RUN if [ "$NODE_ENV" = "local" ]; then \
+      npm install; \
+    else \
+      npm install --only=production; \
+    fi \
   && npm cache clean --force
 
 COPY src ./src
@@ -38,7 +44,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
   && touch /etc/fuse.conf \
   && ( grep -qxF "user_allow_other" /etc/fuse.conf || echo "user_allow_other" >> /etc/fuse.conf )
 
-ENV NODE_ENV=production
+ENV NODE_ENV=$NODE_ENV
 EXPOSE 3000
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
