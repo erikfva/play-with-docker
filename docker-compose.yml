@@ -4,6 +4,7 @@ services:
     image: erikvargas/play-with-docker:latest
     volumes:
       - ./credentials:/mnt/s3:ro
+      - ./src:/app/src
     ports:
       - "${PORT:-3000}:3000"
     cap_add:

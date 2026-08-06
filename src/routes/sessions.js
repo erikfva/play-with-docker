@@ -477,16 +477,10 @@ router.delete('/:id', async (req, res) => {
       }
     }
 
-    if (row.provider === 'codespaces') {
-      await db.run("UPDATE sessions SET status = 'TERMINATED' WHERE id = ?", [row.id]);
-    } else {
-      await db.run('DELETE FROM sessions WHERE id = ?', [row.id]);
-    }
+    await db.run('DELETE FROM sessions WHERE id = ?', [row.id]);
 
     const response = {
-      message: row.provider === 'codespaces'
-        ? `Session ${row.id} (${row.provider}) terminated.`
-        : `Session ${row.id} (${row.provider}) terminated and removed from orchestrator.`,
+      message: `Session ${row.id} (${row.provider}) terminated and removed from orchestrator.`,
       providerCleanup: row.provider === 'codesandbox' ? 'deleted' : 'attempted'
     };
 
