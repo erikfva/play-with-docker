@@ -788,61 +788,62 @@ class CodeSandboxProvider extends BaseProvider {
    * Terminate session
    */
   async terminateSession(sessionRow) {
+    const metadata = parseMetadata(sessionRow.metadata);
+    // Handle PostgreSQL lowercasing of unquoted identifiers
+    const credentialFingerprint = getRowValue(sessionRow, 'credentialFingerprint') || metadata.credentialFingerprint;
+    const credentialRef = getRowValue(sessionRow, 'credentialRef') || metadata.credentialRef;
+    const providerSessionId = getRowValue(sessionRow, 'providerSessionId');
+
+    if (!credentialFingerprint || !credentialRef) {
+      // Without valid credentials we cannot terminate the provider session.
+      // Throw so the caller keeps the local DB record instead of silently
+      // deleting a session that is still live provider-side.
+      throw new ProviderError('CodeSandbox session is missing credential information; cannot terminate safely', {
+        code: 'CODESANDBOX_SESSION_MISSING_CREDENTIALS',
+        statusCode: 502
+      });
+    }
+
+    // Load token from credential reference
+    // Let credential-loading errors propagate to the caller — if we cannot
+    // authenticate, we must not silently treat the session as deleted.
+    const credentialData = await loadCodeSandboxCredentials(credentialRef);
+    const client = codesandboxClient.getClient(credentialData.token);
+
+    if (!providerSessionId) {
+      // Cannot delete a sandbox we cannot identify. Throw so the local DB
+      // record is preserved rather than silently removed.
+      throw new ProviderError('CodeSandbox session is missing providerSessionId; cannot terminate', {
+        code: 'CODESANDBOX_SESSION_MISSING_ID',
+        statusCode: 502
+      });
+    }
+
     try {
-      const metadata = parseMetadata(sessionRow.metadata);
-      // Handle PostgreSQL lowercasing of unquoted identifiers
-      const credentialFingerprint = getRowValue(sessionRow, 'credentialFingerprint') || metadata.credentialFingerprint;
-      const credentialRef = getRowValue(sessionRow, 'credentialRef') || metadata.credentialRef;
-      const providerSessionId = getRowValue(sessionRow, 'providerSessionId');
-
-      if (!credentialFingerprint || !credentialRef) {
-        console.warn('[CodeSandbox] Session missing credential information during termination');
-        return;
+      await client.sandboxes.shutdown(providerSessionId);
+      console.log(`[CodeSandbox] Shutdown session ${providerSessionId}`);
+    } catch (shutdownError) {
+      if (isNotFoundError(shutdownError)) {
+        console.log(`[CodeSandbox] Session ${providerSessionId} already absent before shutdown`);
+      } else {
+        console.warn(`[CodeSandbox] Failed to shutdown session ${providerSessionId} before delete: ${shutdownError.message}`);
       }
+    }
 
-      // Load token from credential reference
-      const credentialData = await loadCodeSandboxCredentials(credentialRef);
-      const client = codesandboxClient.getClient(credentialData.token);
-
-      if (!providerSessionId) {
-        console.warn('[CodeSandbox] No providerSessionId for termination');
-        return;
-      }
-
-      try {
-        await client.sandboxes.shutdown(providerSessionId);
-        console.log(`[CodeSandbox] Shutdown session ${providerSessionId}`);
-      } catch (shutdownError) {
-        if (isNotFoundError(shutdownError)) {
-          console.log(`[CodeSandbox] Session ${providerSessionId} already absent before shutdown`);
-        } else {
-          console.warn(`[CodeSandbox] Failed to shutdown session ${providerSessionId} before delete: ${shutdownError.message}`);
-        }
-      }
-
-      try {
-        await client.sandboxes.delete(providerSessionId);
-      } catch (deleteError) {
-        if (isNotFoundError(deleteError)) {
-          console.log('[CodeSandbox] Session already deleted during termination');
-          return;
-        }
-
-        throw new ProviderError('CodeSandbox delete failed', {
-          code: 'CODESANDBOX_DELETE_FAILED',
-          statusCode: 502
-        });
-      }
-      console.log(`[CodeSandbox] Deleted session ${providerSessionId}`);
-    } catch (error) {
-      if (isNotFoundError(error)) {
+    try {
+      await client.sandboxes.delete(providerSessionId);
+    } catch (deleteError) {
+      if (isNotFoundError(deleteError)) {
         console.log('[CodeSandbox] Session already deleted during termination');
         return;
       }
 
-      console.error('[CodeSandbox] Terminate session failed:', error.message);
-      throw this.translateError(error, 'delete');
+      throw new ProviderError('CodeSandbox delete failed', {
+        code: 'CODESANDBOX_DELETE_FAILED',
+        statusCode: 502
+      });
     }
+    console.log(`[CodeSandbox] Deleted session ${providerSessionId}`);
   }
 
   /**

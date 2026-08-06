@@ -631,3 +631,83 @@ test('treats a missing CodeSandbox sandbox during termination as already cleaned
     });
   });
 });
+
+test('throws when session is missing credential information during termination so the local row is preserved', async () => {
+  await withCredentialDir(async (dir) => {
+    const dbPath = require.resolve('../src/db/db');
+    const clientPath = require.resolve('../src/services/providers/codesandbox/client');
+    const providerPath = require.resolve('../src/services/providers/codesandbox-provider');
+
+    delete require.cache[providerPath];
+    stubModule(dbPath, {
+      get: async () => null,
+      run: async () => undefined,
+      all: async () => [],
+      pool: { end: async () => undefined },
+      ready: Promise.resolve()
+    });
+    stubModule(clientPath, {
+      getClient: () => ({
+        sandboxes: {
+          shutdown: async () => undefined,
+          delete: async () => undefined
+        }
+      }),
+      clearCache: () => undefined
+    });
+
+    const CodeSandboxProvider = require('../src/services/providers/codesandbox-provider');
+    const provider = new CodeSandboxProvider();
+
+    await assert.rejects(
+      () => provider.terminateSession({
+        providerSessionId: 'sandbox-id',
+        // credentialRef present but credentialFingerprint missing
+        credentialRef: 'account.json'
+      }),
+      (error) => error instanceof ProviderError
+        && error.code === 'CODESANDBOX_SESSION_MISSING_CREDENTIALS'
+    );
+  });
+});
+
+test('throws when session is missing providerSessionId during termination so the local row is preserved', async () => {
+  await withCredentialDir(async (dir) => {
+    const dbPath = require.resolve('../src/db/db');
+    const clientPath = require.resolve('../src/services/providers/codesandbox/client');
+    const providerPath = require.resolve('../src/services/providers/codesandbox-provider');
+
+    delete require.cache[providerPath];
+    stubModule(dbPath, {
+      get: async () => null,
+      run: async () => undefined,
+      all: async () => [],
+      pool: { end: async () => undefined },
+      ready: Promise.resolve()
+    });
+    stubModule(clientPath, {
+      getClient: () => ({
+        sandboxes: {
+          shutdown: async () => undefined,
+          delete: async () => undefined
+        }
+      }),
+      clearCache: () => undefined
+    });
+
+    await fs.writeFile(path.join(dir, 'account.json'), JSON.stringify({ token: 'test-token' }));
+
+    const CodeSandboxProvider = require('../src/services/providers/codesandbox-provider');
+    const provider = new CodeSandboxProvider();
+
+    await assert.rejects(
+      () => provider.terminateSession({
+        // providerSessionId missing
+        credentialRef: 'account.json',
+        credentialFingerprint: 'sha256:test'
+      }),
+      (error) => error instanceof ProviderError
+        && error.code === 'CODESANDBOX_SESSION_MISSING_ID'
+    );
+  });
+});
