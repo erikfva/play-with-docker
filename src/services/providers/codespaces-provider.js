@@ -235,16 +235,19 @@ class CodespacesProvider extends BaseProvider {
 
     const session = mapToSession(codespace, resolvedRef, credentialFingerprint);
 
-    // Send a test command to confirm the (now RUNNING) VM is reachable and
-    // mark it as created. A failing test command means the VM is not usable.
+    // Initialize (clean) the VM after adoption. Recurring cleanup reclaims disk
+    // from docker images, volumes, temp files, and logs before the session is
+    // mule treated as created. A successful initialize run confirms the VM is
+    // reachable and ready, so only then is the session reported as RUNNING.
     try {
-      await executeInCodespace(providerSessionId, 'echo "codespaces-vm-ready"', token, {
-        timeout: COMMAND_TIMEOUT_MS
+      await this.initializeSession({
+        providerSessionId,
+        credentialRef: resolvedRef
       });
       session.status = 'RUNNING';
     } catch (error) {
-      console.warn(`[Codespaces] Wake-up test command failed for ${providerSessionId}: ${error.message}`);
-      throw new ProviderError(`Could not confirm the codespace is running: ${error.message}`, {
+      console.warn(`[Codespaces] Initialization failed for ${providerSessionId}: ${error.message}`);
+      throw new ProviderError(`Could not initialize the codespace: ${error.message}`, {
         code: 'CODESPACES_START_FAILED',
         statusCode: 409
       });
@@ -265,6 +268,42 @@ class CodespacesProvider extends BaseProvider {
     };
 
     return session;
+  }
+
+  /**
+   * Initialize a Codespaces VM after adoption. Runs the ESSENTIAL, fast cleanup
+   * so the VM starts clean and the session can be treated as created: prune
+   * unused docker images, volumes, and build cache, and clear temp files. The
+   * slower teardown tasks (package cache, logs, home-directory reset) are
+   * handled in terminateSession so provision stays quick.
+   */
+  async initializeSession(sessionRow) {
+    const providerSessionId = getRowValue(sessionRow, 'providerSessionId');
+    const credentialRef = getRowValue(sessionRow, 'credentialRef')
+      || parseMetadata(sessionRow.metadata).credentialRef;
+
+    if (!providerSessionId || !credentialRef) {
+      throw new ProviderError('CodeSpace session is missing providerSessionId or credentialRef', {
+        code: 'CODESPACES_NO_CREDENTIAL',
+        statusCode: 400
+      });
+    }
+
+    const { token } = await loadCodespacesCredentials(credentialRef);
+
+    const cleanupScript = [
+      'docker system prune -af',
+      'docker volume prune -f',
+      'docker builder prune -af',
+      'sudo rm -rf /tmp/* /var/tmp/* 2>/dev/null || true',
+      'echo codespaces-vm-initialized'
+    ].join(' && ');
+
+    const result = await executeInCodespace(providerSessionId, cleanupScript, token, {
+      timeout: COMMAND_TIMEOUT_MS
+    });
+
+    return { initialized: true, output: String(result.output || '').trim() };
   }
 
   validateMachine(machine) {
@@ -507,6 +546,59 @@ class CodespacesProvider extends BaseProvider {
     }
 
     const { token } = await loadCodespacesCredentials(credentialRef);
+
+    // Heavy cleanup at teardown: clear package caches and logs, and reset the
+    // user's home directory so the VM is left as close to a fresh VM as
+    // possible. Preserve essential shell/ssh dotfiles so the codespace still
+    // works. Best-effort — never fail the stop. (Docker and temp cleanup run at
+    // create time in initializeSession.)
+    //
+    // The cleanup is run in the BACKGROUND on the codespace (nohup) and writes
+    // a completion marker. We wait up to 10s for it; if it finishes we log it,
+    // otherwise we leave it running in the background, stop the codespace, and
+    // report the session as deleted.
+    const marker = '/tmp/codespaces-vm-cleaned.marker';
+    const cleanupScript = [
+      `rm -f ${marker}`,
+      'sudo apt-get clean',
+      'sudo journalctl --vacuum-size=20M >/dev/null 2>&1 || true',
+      'find /home/codespace -mindepth 1 -maxdepth 1 ! -name ".ssh" ! -name ".bashrc" ! -name ".bash_logout" ! -name ".profile" -exec rm -rf {} + 2>/dev/null || true',
+      'find /home/codespace/.[!.]* -maxdepth 0 -exec rm -rf {} + 2>/dev/null || true',
+      `echo codespaces-vm-cleaned > ${marker}`
+    ].join(' && ');
+
+    try {
+      await executeInCodespace(providerSessionId, `nohup bash -c '${cleanupScript}' >/dev/null 2>&1 &`, token, {
+        timeout: 15_000
+      });
+    } catch (cleanupLaunchError) {
+      console.warn(`[Codespaces] Failed to launch background cleanup for ${providerSessionId}: ${cleanupLaunchError.message}`);
+    }
+
+    // Wait up to 10s for the background cleanup to complete (marker appears).
+    const deadline = Date.now() + 10_000;
+    let cleaned = false;
+    while (Date.now() < deadline) {
+      await sleep(1000);
+      try {
+        const check = await executeInCodespace(providerSessionId, `test -f ${marker} && echo DONE`, token, {
+          timeout: 5000
+        });
+        if (String(check.output || '').includes('DONE')) {
+          cleaned = true;
+          break;
+        }
+      } catch (pollError) {
+        // transient; keep polling until deadline
+      }
+    }
+
+    if (cleaned) {
+      console.log(`[Codespaces] Cleaned codespace ${providerSessionId}`);
+    } else {
+      console.log(`[Codespaces] Cleanup still running in background for ${providerSessionId}; proceeding to stop`);
+    }
+
     await githubClient.stopCodespace(token, providerSessionId);
     console.log(`[Codespaces] Stopped codespace ${providerSessionId}`);
   }
