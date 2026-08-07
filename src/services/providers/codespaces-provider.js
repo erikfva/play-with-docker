@@ -547,60 +547,30 @@ class CodespacesProvider extends BaseProvider {
 
     const { token } = await loadCodespacesCredentials(credentialRef);
 
-    // Heavy cleanup at teardown: clear package caches and logs, and reset the
-    // user's home directory so the VM is left as close to a fresh VM as
-    // possible. Preserve essential shell/ssh dotfiles so the codespace still
-    // works. Best-effort — never fail the stop. (Docker and temp cleanup run at
-    // create time in initializeSession.)
-    //
-    // The cleanup is run in the BACKGROUND on the codespace (nohup) and writes
-    // a completion marker. We wait up to 10s for it; if it finishes we log it,
-    // otherwise we leave it running in the background, stop the codespace, and
-    // report the session as deleted.
-    const marker = '/tmp/codespaces-vm-cleaned.marker';
-    const cleanupScript = [
-      `rm -f ${marker}`,
-      'sudo apt-get clean',
-      'sudo journalctl --vacuum-size=20M >/dev/null 2>&1 || true',
-      'find /home/codespace -mindepth 1 -maxdepth 1 ! -name ".ssh" ! -name ".bashrc" ! -name ".bash_logout" ! -name ".profile" -exec rm -rf {} + 2>/dev/null || true',
-      'find /home/codespace/.[!.]* -maxdepth 0 -exec rm -rf {} + 2>/dev/null || true',
-      `echo codespaces-vm-cleaned > ${marker}`
-    ].join(' && ');
+    // Stop the VM FIRST so delete returns quickly and the VM ends STOPPED
+    // immediately (which also kills ttyd/cloudflared). Heavy cleanup runs in
+    // the BACKGROUND on the VM; the stop may interrupt it, which is acceptable
+    // for teardown since stopping the VM halts all its processes anyway.
+    await githubClient.stopCodespace(token, providerSessionId);
+    console.log(`[Codespaces] Stopped codespace ${providerSessionId}`);
 
+    // Fire-and-forget cleanup: clear package caches/logs and reset the home
+    // dir so the VM is left as close to a fresh VM as possible before GitHub
+    // fully halts it. Best-effort — failures here must not fail the delete.
     try {
+      const cleanupScript = [
+        'sudo apt-get clean 2>/dev/null || true',
+        'sudo journalctl --vacuum-size=20M >/dev/null 2>&1 || true',
+        'find /home/codespace -mindepth 1 -maxdepth 1 ! -name ".ssh" ! -name ".bashrc" ! -name ".bash_logout" ! -name ".profile" -exec rm -rf {} + 2>/dev/null || true',
+        'find /home/codespace/.[!.]* -maxdepth 0 -exec rm -rf {} + 2>/dev/null || true'
+      ].join(' && ');
       await executeInCodespace(providerSessionId, `nohup bash -c '${cleanupScript}' >/dev/null 2>&1 &`, token, {
         timeout: 15_000
       });
+      console.log(`[Codespaces] Launched background cleanup for ${providerSessionId}`);
     } catch (cleanupLaunchError) {
       console.warn(`[Codespaces] Failed to launch background cleanup for ${providerSessionId}: ${cleanupLaunchError.message}`);
     }
-
-    // Wait up to 10s for the background cleanup to complete (marker appears).
-    const deadline = Date.now() + 10_000;
-    let cleaned = false;
-    while (Date.now() < deadline) {
-      await sleep(1000);
-      try {
-        const check = await executeInCodespace(providerSessionId, `test -f ${marker} && echo DONE`, token, {
-          timeout: 5000
-        });
-        if (String(check.output || '').includes('DONE')) {
-          cleaned = true;
-          break;
-        }
-      } catch (pollError) {
-        // transient; keep polling until deadline
-      }
-    }
-
-    if (cleaned) {
-      console.log(`[Codespaces] Cleaned codespace ${providerSessionId}`);
-    } else {
-      console.log(`[Codespaces] Cleanup still running in background for ${providerSessionId}; proceeding to stop`);
-    }
-
-    await githubClient.stopCodespace(token, providerSessionId);
-    console.log(`[Codespaces] Stopped codespace ${providerSessionId}`);
   }
 
   /**
