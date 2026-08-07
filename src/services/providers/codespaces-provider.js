@@ -168,14 +168,6 @@ class CodespacesProvider extends BaseProvider {
     this.validateMachine(options.machine);
     this.validateGeo(options.geo);
 
-    const repositoryId = process.env.CODESPACES_DEFAULT_REPOSITORY_ID;
-    if (!repositoryId) {
-      throw new ProviderError('CODESPACES_DEFAULT_REPOSITORY_ID is not configured', {
-        code: 'CODESPACES_REPOSITORY_NOT_CONFIGURED',
-        statusCode: 500
-      });
-    }
-
     const credentialData = await loadCodespacesCredentials(options.credentialRef);
     const { token, credentialRef: resolvedRef, credentialFingerprint } = credentialData;
 
@@ -186,55 +178,77 @@ class CodespacesProvider extends BaseProvider {
       throw this.translateError(error, 'create');
     }
 
-    // Enforce one active session per token
-    const existingSession = await this.findSessionForToken(credentialFingerprint);
-    if (existingSession) {
-      const status = normalizeStatus(existingSession.status);
-      if (status === 'STOPPED') {
-        // Delete remote (404-safe), then release the unique index slot by removing
-        // the local row. Both must succeed before creating a fresh session.
-        await githubClient.deleteCodespace(token, getRowValue(existingSession, 'providerSessionId'));
-        await db.run('DELETE FROM sessions WHERE id = ?', [existingSession.id]);
-      } else if (NON_TERMINAL_STATUSES.has(status)) {
-        throw new ProviderError('An active Codespaces session already exists for this token', {
-          code: 'CODESPACES_ALREADY_ACTIVE',
-          statusCode: 409
-        });
-      }
-    }
-
-    const machine = options.machine || process.env.CODESPACES_DEFAULT_MACHINE || 'basicLinux32gb';
-    const geo = options.geo || process.env.CODESPACES_DEFAULT_GEO || 'UsEast';
-    const idleTimeoutMinutes = parsePositiveInteger(
-      options.idleTimeoutMinutes,
-      parsePositiveInteger(process.env.CODESPACES_DEFAULT_IDLE_TIMEOUT_MINUTES, 30)
-    );
-    const retentionPeriodMinutes = parsePositiveInteger(
-      options.retentionPeriodMinutes,
-      parsePositiveInteger(process.env.CODESPACES_DEFAULT_RETENTION_PERIOD_MINUTES, 1440)
-    );
-
-    const params = {
-      repository_id: Number.parseInt(repositoryId, 10),
-      ref: 'main',
-      machine,
-      geo,
-      idle_timeout_minutes: idleTimeoutMinutes,
-      retention_period_minutes: retentionPeriodMinutes
-    };
-
-    if (options.displayName) {
-      params.display_name = options.displayName;
-    }
-
+    // Reuse an existing codespace for this credential instead of creating a new
+    // one: adopt the first codespace returned for the account. Nothing is created.
     let codespace;
     try {
-      codespace = await githubClient.createCodespace(token, params);
+      const codespaces = await githubClient.listCodespaces(token);
+      codespace = codespaces[0];
     } catch (error) {
       throw this.translateError(error, 'create');
     }
 
+    if (!codespace) {
+      throw new ProviderError(
+        'No existing Codespaces VM found for this credential. Create one in the GitHub web UI first.',
+        { code: 'CODESPACES_ALREADY_ACTIVE', statusCode: 409 }
+      );
+    }
+
+    const providerSessionId = codespace.name;
+
+    // If the adopted codespace is STOPPED, wake it up by starting it and
+    // waiting for it to become Available; then send a test command to confirm
+    // it is truly up before reporting the session as created (RUNNING).
+    const adoptedState = normalizeStatus(codespace.state || '');
+    if (adoptedState === 'STOPPED') {
+      await githubClient.startCodespace(token, providerSessionId);
+
+      const deadline = Date.now() + BOOT_TIMEOUT_MS;
+      let state = null;
+      while (Date.now() < deadline) {
+        await sleep(POLL_INTERVAL_MS);
+        // Bypass the read cache: we need live readiness state.
+        const current = await githubClient.getCodespace(token, providerSessionId, { nocache: true });
+        state = current.state;
+        if (state === 'Available') {
+          break;
+        }
+        if (state === 'Failed' || state === 'Deleted') {
+          throw new ProviderError(`Codespace entered terminal state ${state} during boot`, {
+            code: 'CODESPACES_START_FAILED',
+            statusCode: 409
+          });
+        }
+      }
+
+      if (state !== 'Available') {
+        throw new ProviderError('Codespace did not become available within the boot timeout', {
+          code: 'CODESPACES_START_TIMEOUT',
+          statusCode: 504
+        });
+      }
+
+      // Update the adopted object so the mapped session reflects RUNNING.
+      codespace = { ...codespace, state: 'Available' };
+    }
+
     const session = mapToSession(codespace, resolvedRef, credentialFingerprint);
+
+    // Send a test command to confirm the (now RUNNING) VM is reachable and
+    // mark it as created. A failing test command means the VM is not usable.
+    try {
+      await executeInCodespace(providerSessionId, 'echo "codespaces-vm-ready"', token, {
+        timeout: COMMAND_TIMEOUT_MS
+      });
+      session.status = 'RUNNING';
+    } catch (error) {
+      console.warn(`[Codespaces] Wake-up test command failed for ${providerSessionId}: ${error.message}`);
+      throw new ProviderError(`Could not confirm the codespace is running: ${error.message}`, {
+        code: 'CODESPACES_START_FAILED',
+        statusCode: 409
+      });
+    }
 
     // Inject keep-alive config into metadata (mapper builds its own metadata)
     const syntheticMetadata = { ...(session.metadata || {}) };
@@ -373,7 +387,9 @@ class CodespacesProvider extends BaseProvider {
       let state = null;
       while (Date.now() < deadline) {
         await sleep(POLL_INTERVAL_MS);
-        const current = await githubClient.getCodespace(token, providerSessionId);
+        // Bypass the read cache here: the boot loop must observe live state to
+        // detect when the codespace actually becomes available.
+        const current = await githubClient.getCodespace(token, providerSessionId, { nocache: true });
         state = current.state;
         if (state === 'Available') {
           break;
@@ -491,8 +507,8 @@ class CodespacesProvider extends BaseProvider {
     }
 
     const { token } = await loadCodespacesCredentials(credentialRef);
-    await githubClient.deleteCodespace(token, providerSessionId);
-    console.log(`[Codespaces] Deleted codespace ${providerSessionId}`);
+    await githubClient.stopCodespace(token, providerSessionId);
+    console.log(`[Codespaces] Stopped codespace ${providerSessionId}`);
   }
 
   /**

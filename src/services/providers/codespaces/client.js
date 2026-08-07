@@ -1,4 +1,10 @@
 const { ProviderError } = require('../../errors/provider-errors');
+const {
+  DEFAULT_TTL_MS,
+  getCachedCodespace,
+  putCachedCodespace,
+  invalidateCodespace
+} = require('./read-cache');
 
 const BASE_URL = 'https://api.github.com';
 const API_VERSION = '2026-03-10';
@@ -132,11 +138,41 @@ async function createCodespace(token, params) {
     });
   }
 
+  // The new codespace has no cached entry yet, but clear any residual entry
+  // for the returned name in case of reuse.
+  if (result.body?.name) {
+    invalidateCodespace(token, result.body.name);
+  }
+
   return result.body;
 }
 
-async function getCodespace(token, name) {
-  return githubGet(`/user/codespaces/${encodeURIComponent(name)}`, token);
+/**
+ * Fetch a codespace, optionally serving a cached value.
+ *
+ * Reads are the dominant GitHub API cost for a session (idle polling and
+ * keep-alive both call this). Successful reads are cached in-process for
+ * `DEFAULT_TTL_MS`; callers that need fresh state for control-flow decisions
+ * (boot polling, immediately after a write) pass `{ nocache: true }`.
+ *
+ * Errors and rate-limit responses are never cached, so a stalled token still
+ * surfaces the real error on every call.
+ *
+ * @param {string} token
+ * @param {string} name - codespace name
+ * @param {{ nocache?: boolean, ttlMs?: number }} [options]
+ */
+async function getCodespace(token, name, options = {}) {
+  if (!options.nocache) {
+    const cached = getCachedCodespace(token, name);
+    if (cached) {
+      return cached;
+    }
+  }
+
+  const codespace = await githubGet(`/user/codespaces/${encodeURIComponent(name)}`, token);
+  putCachedCodespace(token, name, codespace, options.ttlMs || DEFAULT_TTL_MS);
+  return codespace;
 }
 
 async function deleteCodespace(token, name) {
@@ -147,11 +183,14 @@ async function deleteCodespace(token, name) {
       return;
     }
     throw error;
+  } finally {
+    invalidateCodespace(token, name);
   }
 }
 
 async function startCodespace(token, name) {
   const result = await githubRequest('POST', `/user/codespaces/${encodeURIComponent(name)}/start`, token);
+  invalidateCodespace(token, name);
   return result.body;
 }
 
@@ -159,12 +198,37 @@ async function validateToken(token) {
   return githubGet('/user', token);
 }
 
+/**
+ * List codespaces for the authenticated account.
+ * @param {string} token
+ * @returns {Promise<Array>} array of codespace objects
+ */
+async function listCodespaces(token) {
+  const body = await githubGet('/user/codespaces', token);
+  return Array.isArray(body?.codespaces) ? body.codespaces : [];
+}
+
+/**
+ * Stop a codespace without deleting it.
+ * @param {string} token
+ * @param {string} name
+ * @returns {Promise<object>} stopped codespace object
+ */
+async function stopCodespace(token, name) {
+  const result = await githubRequest('POST', `/user/codespaces/${encodeURIComponent(name)}/stop`, token);
+  invalidateCodespace(token, name);
+  return result.body;
+}
+
 module.exports = {
   BASE_URL,
   API_VERSION,
   createCodespace,
+  listCodespaces,
   getCodespace,
   deleteCodespace,
   startCodespace,
-  validateToken
+  stopCodespace,
+  validateToken,
+  invalidateCodespace
 };

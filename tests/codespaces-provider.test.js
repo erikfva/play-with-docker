@@ -200,9 +200,11 @@ function loadProviderWithMocks({ clientOverrides = {}, loaderOverrides = {}, dbR
   stubModule(clientPath, {
     validateToken: async () => ({ login: 'octocat' }),
     createCodespace: async () => ({ name: 'octocat-test-1', state: 'Created' }),
+    listCodespaces: async () => [{ name: 'octocat-test-1', state: 'Available', machine_name: 'basicLinux32gb' }],
     deleteCodespace: async () => undefined,
     getCodespace: async () => ({ state: 'Created' }),
     startCodespace: async () => ({ state: 'Starting' }),
+    stopCodespace: async () => ({ state: 'Shutdown' }),
     ...clientOverrides
   });
   stubModule(executorPath, {
@@ -218,56 +220,47 @@ function loadProviderWithMocks({ clientOverrides = {}, loaderOverrides = {}, dbR
   return provider;
 }
 
-test('createSession: geo and retention defaults match documented values', async () => {
-  const createdParams = [];
+test('createSession: reuses the first existing codespace for the credential', async () => {
+  let listed = 0;
   const provider = loadProviderWithMocks({
     clientOverrides: {
-      createCodespace: async (token, params) => {
-        createdParams.push(params);
-        return { name: 'octocat-test-1', state: 'Created' };
+      createCodespace: async () => {
+        throw new Error('createCodespace should not be called when adopting an existing codespace');
+      },
+      listCodespaces: async (token) => {
+        listed += 1;
+        return [
+          { name: 'first-codespace', state: 'Available', machine_name: 'basicLinux32gb' },
+          { name: 'second-codespace', state: 'Available', machine_name: 'basicLinux32gb' }
+        ];
       }
     }
   });
 
-  process.env.CODESPACES_DEFAULT_REPOSITORY_ID = '123';
-  try {
-    await provider.createSession({ credentialRef: 'codespaces/token.json' });
-  } finally {
-    delete process.env.CODESPACES_DEFAULT_REPOSITORY_ID;
-  }
+  const session = await provider.createSession({ credentialRef: 'codespaces/token.json' });
 
-  assert.equal(createdParams.length, 1);
-  assert.equal(createdParams[0].geo, 'UsEast');
-  assert.equal(createdParams[0].machine, 'basicLinux32gb');
-  assert.equal(createdParams[0].idle_timeout_minutes, 30);
-  assert.equal(createdParams[0].retention_period_minutes, 1440);
+  assert.equal(listed, 1);
+  assert.equal(session.providerSessionId, 'first-codespace');
+  assert.equal(session.status, 'RUNNING');
+  assert.equal(session.provider, 'codespaces');
 });
 
-test('createSession: per-request geo and retention options override defaults', async () => {
-  const createdParams = [];
+test('createSession: errors when no existing codespace is available', async () => {
   const provider = loadProviderWithMocks({
     clientOverrides: {
-      createCodespace: async (token, params) => {
-        createdParams.push(params);
-        return { name: 'octocat-test-1', state: 'Created' };
-      }
+      listCodespaces: async () => []
     }
   });
 
-  process.env.CODESPACES_DEFAULT_REPOSITORY_ID = '123';
-  try {
-    await provider.createSession({
-      credentialRef: 'codespaces/token.json',
-      geo: 'EuropeWest',
-      retentionPeriodMinutes: 2880
-    });
-  } finally {
-    delete process.env.CODESPACES_DEFAULT_REPOSITORY_ID;
-  }
-
-  assert.equal(createdParams.length, 1);
-  assert.equal(createdParams[0].geo, 'EuropeWest');
-  assert.equal(createdParams[0].retention_period_minutes, 2880);
+  await assert.rejects(
+    () => provider.createSession({ credentialRef: 'codespaces/token.json' }),
+    (error) => {
+      assert.ok(error instanceof Error);
+      assert.strictEqual(error.code, 'CODESPACES_ALREADY_ACTIVE');
+      assert.match(error.message, /No existing Codespaces VM/);
+      return true;
+    }
+  );
 });
 
 test('executeCommand: boot poll exits early when the codespace enters a terminal state', async () => {
