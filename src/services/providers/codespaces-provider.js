@@ -81,6 +81,14 @@ function isNotFoundError(error) {
   return message.includes('not found') || message.includes('does not exist') || message.includes('404');
 }
 
+function isSuspendedError(error) {
+  return error?.code === 'CODESPACES_ACCOUNT_SUSPENDED' || error?.statusCode === 403;
+}
+
+function isDeadAccountError(error) {
+  return isSuspendedError(error) || isNotFoundError(error);
+}
+
 function normalizeStatus(status) {
   if (!status) return '';
   return String(status).trim().toUpperCase();
@@ -154,7 +162,11 @@ class CodespacesProvider extends BaseProvider {
       const codespace = await githubClient.getCodespace(token, providerSessionId);
       return codespace.state !== 'Deleted';
     } catch (error) {
-      if (isNotFoundError(error)) {
+      // Suspended account or not-found both mean the session is effectively dead.
+      // Returning false lets recovery delete the local row instead of leaving it
+      // stuck. Transient/unknown errors still throw so recovery skips the row.
+      if (isDeadAccountError(error)) {
+        console.warn(`[Codespaces] isSessionActive: treating session ${providerSessionId} as inactive (${error.message})`);
         return false;
       }
       throw error;
@@ -202,14 +214,23 @@ class CodespacesProvider extends BaseProvider {
     // it is truly up before reporting the session as created (RUNNING).
     const adoptedState = normalizeStatus(codespace.state || '');
     if (adoptedState === 'STOPPED') {
-      await githubClient.startCodespace(token, providerSessionId);
+      try {
+        await githubClient.startCodespace(token, providerSessionId);
+      } catch (startError) {
+        throw this.translateError(startError, 'create');
+      }
 
       const deadline = Date.now() + BOOT_TIMEOUT_MS;
       let state = null;
       while (Date.now() < deadline) {
         await sleep(POLL_INTERVAL_MS);
         // Bypass the read cache: we need live readiness state.
-        const current = await githubClient.getCodespace(token, providerSessionId, { nocache: true });
+        let current;
+        try {
+          current = await githubClient.getCodespace(token, providerSessionId, { nocache: true });
+        } catch (pollError) {
+          throw this.translateError(pollError, 'create');
+        }
         state = current.state;
         if (state === 'Available') {
           break;
@@ -373,7 +394,30 @@ class CodespacesProvider extends BaseProvider {
     }
 
     const { token } = await loadCodespacesCredentials(credentialRef);
-    const codespace = await githubClient.getCodespace(token, providerSessionId);
+
+    let codespace;
+    try {
+      codespace = await githubClient.getCodespace(token, providerSessionId);
+    } catch (error) {
+      // A suspended account or deleted codespace can never recover.
+      // Return a terminal status so the route persists it and stops polling.
+      if (isSuspendedError(error)) {
+        console.warn(`[Codespaces] refreshSession: account suspended for ${providerSessionId} — marking TERMINATED`);
+        return {
+          status: 'TERMINATED',
+          webHost: null,
+          metadata: {
+            ...parseMetadata(sessionRow.metadata),
+            suspendedAt: new Date().toISOString(),
+            suspendReason: error.message
+          }
+        };
+      }
+      if (isNotFoundError(error)) {
+        return { status: 'TERMINATED', webHost: null, metadata: parseMetadata(sessionRow.metadata) };
+      }
+      throw error;
+    }
 
     const existingMetadata = parseMetadata(sessionRow.metadata);
 
@@ -422,8 +466,57 @@ class CodespacesProvider extends BaseProvider {
     const { token } = await loadCodespacesCredentials(credentialRef);
     let autoStarted = false;
 
+    // If the codespace is STOPPING/ShuttingDown, wait for it to reach STOPPED
+    // before attempting to start it. Sending a start or ssh command while it
+    // is shutting down causes a 30s command timeout with no useful error.
+    if (status === 'STOPPING') {
+      const shutdownDeadline = Date.now() + BOOT_TIMEOUT_MS;
+      let currentState = null;
+      while (Date.now() < shutdownDeadline) {
+        await sleep(POLL_INTERVAL_MS);
+        let current;
+        try {
+          current = await githubClient.getCodespace(token, providerSessionId, { nocache: true });
+        } catch (pollError) {
+          if (isSuspendedError(pollError)) {
+            throw new ProviderError(`GitHub account is suspended: ${pollError.message}`, {
+              code: 'CODESPACES_ACCOUNT_SUSPENDED',
+              statusCode: 403
+            });
+          }
+          throw pollError;
+        }
+        currentState = current.state;
+        if (currentState === 'Shutdown' || currentState === 'Available') {
+          break;
+        }
+        if (currentState === 'Failed' || currentState === 'Deleted') {
+          throw new ProviderError(`Codespace entered terminal state ${currentState} while waiting for shutdown`, {
+            code: 'CODESPACES_START_FAILED',
+            statusCode: 409
+          });
+        }
+      }
+
+      if (currentState !== 'Shutdown' && currentState !== 'Available') {
+        throw new ProviderError('Codespace did not finish stopping within the timeout. Try again shortly.', {
+          code: 'CODESPACES_START_TIMEOUT',
+          statusCode: 504
+        });
+      }
+
+      // Update local status to reflect what GitHub reports
+      const mappedStatus = currentState === 'Available' ? 'RUNNING' : 'STOPPED';
+      try {
+        await db.run(`UPDATE sessions SET status = '${mappedStatus}' WHERE id = ?`, [getRowValue(sessionRow, 'id')]);
+      } catch (_) { /* non-fatal */ }
+
+      // Re-assign status so the STOPPED auto-start block below triggers
+      sessionRow = { ...sessionRow, status: mappedStatus };
+    }
+
     // Auto-start stopped codespaces before executing
-    if (status === 'STOPPED') {
+    if (normalizeStatus(sessionRow.status) === 'STOPPED') {
       await githubClient.startCodespace(token, providerSessionId);
 
       const deadline = Date.now() + BOOT_TIMEOUT_MS;
@@ -432,7 +525,18 @@ class CodespacesProvider extends BaseProvider {
         await sleep(POLL_INTERVAL_MS);
         // Bypass the read cache here: the boot loop must observe live state to
         // detect when the codespace actually becomes available.
-        const current = await githubClient.getCodespace(token, providerSessionId, { nocache: true });
+        let current;
+        try {
+          current = await githubClient.getCodespace(token, providerSessionId, { nocache: true });
+        } catch (pollError) {
+          if (isSuspendedError(pollError)) {
+            throw new ProviderError(`GitHub account is suspended: ${pollError.message}`, {
+              code: 'CODESPACES_ACCOUNT_SUSPENDED',
+              statusCode: 403
+            });
+          }
+          throw pollError;
+        }
         state = current.state;
         if (state === 'Available') {
           break;
@@ -519,6 +623,25 @@ class CodespacesProvider extends BaseProvider {
         updates: { status: 'RUNNING' }
       };
     } catch (error) {
+      // A suspended account will never recover — mark the session TERMINATED
+      // immediately rather than burning through 3 consecutive failure attempts
+      // and landing on FAILED (which is misleading for a suspended account).
+      if (isSuspendedError(error)) {
+        console.warn(`[Codespaces] Keep-alive: account suspended for session ${sessionRow.id} — marking TERMINATED`);
+        try {
+          await db.run("UPDATE sessions SET status = 'TERMINATED' WHERE id = ?", [sessionRow.id]);
+        } catch (dbErr) {
+          console.warn(`[Codespaces] Keep-alive: failed to mark session ${sessionRow.id} TERMINATED: ${dbErr.message}`);
+        }
+        // Stop the keep-alive timer by returning a terminal skip signal.
+        return {
+          success: true,
+          action: 'skipped',
+          message: `Account suspended — session marked TERMINATED`,
+          updates: { status: 'TERMINATED' }
+        };
+      }
+
       console.warn(`[Codespaces] Keep-alive failed for session ${sessionRow.id}: ${error.message}`);
       return {
         success: false,
@@ -555,8 +678,27 @@ class CodespacesProvider extends BaseProvider {
     // immediately (which also kills ttyd/cloudflared). Heavy cleanup runs in
     // the BACKGROUND on the VM; the stop may interrupt it, which is acceptable
     // for teardown since stopping the VM halts all its processes anyway.
-    await githubClient.stopCodespace(token, providerSessionId);
-    console.log(`[Codespaces] Stopped codespace ${providerSessionId}`);
+    //
+    // If the account is suspended or the codespace is already gone (403/404),
+    // treat it as already stopped — log a warning and continue so the route
+    // can still mark the local row TERMINATED.
+    try {
+      await githubClient.stopCodespace(token, providerSessionId);
+      console.log(`[Codespaces] Stopped codespace ${providerSessionId}`);
+    } catch (stopError) {
+      const code = stopError?.code;
+      const status = stopError?.statusCode;
+      if (
+        code === 'CODESPACES_ACCOUNT_SUSPENDED' ||
+        code === 'CODESPACES_NOT_FOUND' ||
+        status === 403 ||
+        status === 404
+      ) {
+        console.warn(`[Codespaces] Cannot stop ${providerSessionId} (${stopError.message}) — treating as already stopped`);
+        return; // let the route mark it TERMINATED locally
+      }
+      throw stopError;
+    }
 
     // Fire-and-forget cleanup: clear package caches/logs and reset the home
     // dir so the VM is left as close to a fresh VM as possible before GitHub
@@ -598,6 +740,13 @@ class CodespacesProvider extends BaseProvider {
 
       if (msg.includes('token') && (msg.includes('invalid') || msg.includes('expired'))) {
         return new InvalidCredentialsError('Codespaces token is invalid');
+      }
+
+      if (msg.includes('suspend')) {
+        return new ProviderError(error.message, {
+          code: 'CODESPACES_ACCOUNT_SUSPENDED',
+          statusCode: 403
+        });
       }
 
       if (msg.includes('not found') || msg.includes('does not exist')) {

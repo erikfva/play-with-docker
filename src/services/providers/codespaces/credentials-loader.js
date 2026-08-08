@@ -9,9 +9,27 @@ const {
 } = require('../../../services/google-credentials-loader');
 const { ProviderError } = require('../../errors/provider-errors');
 
-// TODO: add TTL eviction — the cache never expires, so a rotated PAT stays
-// cached until the process restarts. Same limitation as the codesandbox loader.
-const loadedCredentials = new Map();
+// Credential cache with TTL eviction.
+// A suspended or rotated token must not persist indefinitely in memory — it
+// would silently reuse the dead token on every subsequent call until the
+// process restarted. Entries expire after CREDENTIAL_CACHE_TTL_MS and are
+// re-read from the source on the next request.
+const CREDENTIAL_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const loadedCredentials = new Map(); // key → { result, cachedAt }
+
+function getCachedCredential(cacheKey) {
+  const entry = loadedCredentials.get(cacheKey);
+  if (!entry) return null;
+  if (Date.now() - entry.cachedAt >= CREDENTIAL_CACHE_TTL_MS) {
+    loadedCredentials.delete(cacheKey);
+    return null;
+  }
+  return entry.result;
+}
+
+function setCachedCredential(cacheKey, result) {
+  loadedCredentials.set(cacheKey, { result, cachedAt: Date.now() });
+}
 
 function codespacesCredentialError(message, code, statusCode = 400) {
   return new ProviderError(message, { code, statusCode });
@@ -172,9 +190,10 @@ function parseTokenFromBuffer(fileBuffer) {
 
 async function loadCredentialFile(credentialRefObj) {
   const cacheKey = getCredentialCacheKey(credentialRefObj);
-  if (loadedCredentials.has(cacheKey)) {
+  const cached = getCachedCredential(cacheKey);
+  if (cached) {
     console.log(`[Codespaces] Reusing existing credentials: ${credentialRefObj.originalRef}`);
-    return loadedCredentials.get(cacheKey);
+    return cached;
   }
 
   let fileBuffer;
@@ -242,7 +261,7 @@ async function loadCredentialFile(credentialRefObj) {
     credentialFingerprint: `sha256:${fingerprint}`
   };
 
-  loadedCredentials.set(cacheKey, result);
+  setCachedCredential(cacheKey, result);
 
   return result;
 }

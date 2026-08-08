@@ -12,6 +12,34 @@ const RATE_LIMIT_ERROR_CODE = 'CODESPACES_RATE_LIMIT_EXCEEDED';
 const RETRY_DELAYS_MS = [1000, 2000, 4000];
 const MAX_RETRIES = RETRY_DELAYS_MS.length;
 
+function shouldRetry(status) {
+  // Retry on 429 (rate limit) and transient 5xx (GitHub infrastructure blips).
+  // Do not retry 4xx auth/not-found — they will not resolve on retry.
+  return status === 429 || (status >= 500 && status < 600);
+}
+
+/**
+ * Compute the delay to wait before the next retry attempt.
+ * Respects the Retry-After header when GitHub provides it (seconds or HTTP date).
+ * Falls back to exponential backoff from RETRY_DELAYS_MS.
+ */
+function retryDelayMs(res, attempt) {
+  const retryAfter = res?.headers?.get('retry-after');
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      return Math.min(seconds * 1000, 60_000); // cap at 60s
+    }
+    // HTTP-date format
+    const date = Date.parse(retryAfter);
+    if (!Number.isNaN(date)) {
+      const wait = date - Date.now();
+      if (wait > 0) return Math.min(wait, 60_000);
+    }
+  }
+  return RETRY_DELAYS_MS[Math.min(attempt - 1, RETRY_DELAYS_MS.length - 1)];
+}
+
 function githubHeaders(token) {
   return {
     Authorization: `Bearer ${token}`,
@@ -55,10 +83,29 @@ function buildError(res, body) {
       });
     }
 
-    return new ProviderError('GitHub token lacks the required codespace scope', {
-      code: 'CODESPACES_TOKEN_INSUFFICIENT_SCOPE',
-      statusCode: 403
-    });
+    // Surface the real GitHub message (e.g. "Sorry. Your account was suspended")
+    // rather than always blaming scope. Fall back to the scope message only when
+    // GitHub gives no body message of its own.
+    const githubMessage = body && typeof body === 'object' && body.message
+      ? body.message
+      : typeof body === 'string' && body.trim()
+        ? body.trim()
+        : null;
+
+    if (githubMessage && /suspend/i.test(githubMessage)) {
+      return new ProviderError(`GitHub account is suspended: ${githubMessage}`, {
+        code: 'CODESPACES_ACCOUNT_SUSPENDED',
+        statusCode: 403
+      });
+    }
+
+    return new ProviderError(
+      githubMessage || 'GitHub token lacks the required codespace scope',
+      {
+        code: 'CODESPACES_TOKEN_INSUFFICIENT_SCOPE',
+        statusCode: 403
+      }
+    );
   }
 
   if (statusCode === 404) {
@@ -90,8 +137,8 @@ async function githubGet(path, token, attempt = 1) {
     headers: githubHeaders(token)
   });
 
-  if (res.status === 429 && attempt <= MAX_RETRIES) {
-    const delay = RETRY_DELAYS_MS[attempt - 1];
+  if (shouldRetry(res.status) && attempt <= MAX_RETRIES) {
+    const delay = retryDelayMs(res, attempt);
     await new Promise((resolve) => setTimeout(resolve, delay));
     return githubGet(path, token, attempt + 1);
   }
@@ -105,7 +152,7 @@ async function githubGet(path, token, attempt = 1) {
   return body;
 }
 
-async function githubRequest(method, path, token, body) {
+async function githubRequest(method, path, token, body, attempt = 1) {
   const options = {
     method,
     headers: githubHeaders(token)
@@ -117,6 +164,18 @@ async function githubRequest(method, path, token, body) {
   }
 
   const res = await fetch(`${BASE_URL}${path}`, options);
+
+  // Retry transient 5xx and 429 for mutating requests too.
+  // Safe because Codespaces start/stop are idempotent: starting an already
+  // running codespace or stopping an already stopped one is a no-op on GitHub's
+  // side. DELETE is also safe to retry — a 404 on the second attempt is caught
+  // downstream as CODESPACES_NOT_FOUND and ignored.
+  if (shouldRetry(res.status) && attempt <= MAX_RETRIES) {
+    const delay = retryDelayMs(res, attempt);
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    return githubRequest(method, path, token, body, attempt + 1);
+  }
+
   const bodyText = await parseResponseBody(res);
 
   if (!res.ok) {

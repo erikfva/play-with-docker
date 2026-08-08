@@ -20,11 +20,16 @@ function mapErrorToHttp(res, error, fallbackMessage) {
   }
 
   console.error(error);
-  const statusCode = Number.isInteger(error.statusCode)
+
+  function isValidHttpStatus(v) {
+    return Number.isInteger(v) && v >= 100 && v < 600;
+  }
+
+  const statusCode = isValidHttpStatus(error.statusCode)
     ? error.statusCode
-    : Number.isInteger(error.status)
+    : isValidHttpStatus(error.status)
       ? error.status
-      : Number.isInteger(error.code)
+      : isValidHttpStatus(error.code)
         ? error.code
         : 500;
 

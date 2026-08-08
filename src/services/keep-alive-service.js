@@ -262,11 +262,21 @@ async function recoverKeepAlivesOnStartup() {
         try {
           const isActive = await provider.isSessionActive(sessionRow);
           if (!isActive) {
-            await db.run('DELETE FROM sessions WHERE id = ?', [sessionRow.id]);
-            summary.cleaned += 1;
-            console.log(
-              `[KeepAlive][Recovery] Cleaned stale ${provider.name} session ${sessionRow.id}: remote session inactive/stopped`
-            );
+            // Codespaces rows are retained as TERMINATED (never hard-deleted by recovery)
+            // so operators can see what happened to the session.
+            if (sessionRow.provider === 'codespaces') {
+              await db.run("UPDATE sessions SET status = 'TERMINATED' WHERE id = ?", [sessionRow.id]);
+              summary.cleaned += 1;
+              console.log(
+                `[KeepAlive][Recovery] Marked stale codespaces session ${sessionRow.id} as TERMINATED: remote session inactive/suspended`
+              );
+            } else {
+              await db.run('DELETE FROM sessions WHERE id = ?', [sessionRow.id]);
+              summary.cleaned += 1;
+              console.log(
+                `[KeepAlive][Recovery] Cleaned stale ${provider.name} session ${sessionRow.id}: remote session inactive/stopped`
+              );
+            }
             continue;
           }
         } catch (error) {
