@@ -235,23 +235,20 @@ class CodespacesProvider extends BaseProvider {
 
     const session = mapToSession(codespace, resolvedRef, credentialFingerprint);
 
-    // Initialize (clean) the VM after adoption. Recurring cleanup reclaims disk
-    // from docker images, volumes, temp files, and logs before the session is
-    // mule treated as created. A successful initialize run confirms the VM is
-    // reachable and ready, so only then is the session reported as RUNNING.
-    try {
-      await this.initializeSession({
-        providerSessionId,
-        credentialRef: resolvedRef
-      });
-      session.status = 'RUNNING';
-    } catch (error) {
-      console.warn(`[Codespaces] Initialization failed for ${providerSessionId}: ${error.message}`);
-      throw new ProviderError(`Could not initialize the codespace: ${error.message}`, {
-        code: 'CODESPACES_START_FAILED',
-        statusCode: 409
-      });
-    }
+    // Mark the session RUNNING immediately — the codespace is confirmed
+    // Available at this point. Background cleanup (docker prune, temp-file
+    // removal) is fire-and-forgotten so provision returns quickly instead of
+    // blocking on a multi-minute docker prune with a 30s command timeout.
+    session.status = 'RUNNING';
+
+    // Fire-and-forget: initialize (clean) the VM after adoption.
+    // docker system prune and docker builder prune can take several minutes on
+    // a codespace with cached images — far beyond the 30s COMMAND_TIMEOUT_MS.
+    // Running this in the background means the session is returned immediately
+    // while cleanup proceeds asynchronously.
+    this.initializeSession({ providerSessionId, credentialRef: resolvedRef }).catch((error) => {
+      console.warn(`[Codespaces] Background initialization failed for ${providerSessionId}: ${error.message}`);
+    });
 
     // Inject keep-alive config into metadata (mapper builds its own metadata)
     const syntheticMetadata = { ...(session.metadata || {}) };
@@ -276,8 +273,15 @@ class CodespacesProvider extends BaseProvider {
    * unused docker images, volumes, and build cache, and clear temp files. The
    * slower teardown tasks (package cache, logs, home-directory reset) are
    * handled in terminateSession so provision stays quick.
+   *
+   * This method is called fire-and-forget from createSession. It uses a 5-minute
+   * timeout because `docker system prune -af` and `docker builder prune -af` can
+   * take several minutes on a codespace with cached images — well beyond the
+   * 30-second COMMAND_TIMEOUT_MS used for regular commands.
    */
   async initializeSession(sessionRow) {
+    const INIT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for docker prune operations
+
     const providerSessionId = getRowValue(sessionRow, 'providerSessionId');
     const credentialRef = getRowValue(sessionRow, 'credentialRef')
       || parseMetadata(sessionRow.metadata).credentialRef;
@@ -300,7 +304,7 @@ class CodespacesProvider extends BaseProvider {
     ].join(' && ');
 
     const result = await executeInCodespace(providerSessionId, cleanupScript, token, {
-      timeout: COMMAND_TIMEOUT_MS
+      timeout: INIT_TIMEOUT_MS
     });
 
     return { initialized: true, output: String(result.output || '').trim() };
