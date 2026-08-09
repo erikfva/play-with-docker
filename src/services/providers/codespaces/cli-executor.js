@@ -4,6 +4,16 @@ const { ProviderError } = require('../../errors/provider-errors');
 const BOOT_TIMEOUT_MS = 90_000;
 const COMMAND_TIMEOUT_MS = 30_000;
 
+// Codespaces `gh codespace ssh` can intermittently hang or fail with an empty
+// error even though the codespace is Available. Retry a bounded number of times
+// so transient SSH failures do not fail setup commands outright.
+const MAX_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 3000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Classify raw stderr/stdout text from `gh codespace ssh` into a structured
  * ProviderError when the text indicates a known failure mode. Returns null if
@@ -87,7 +97,46 @@ async function executeInCodespace(codespaceName, command, token, options = {}) {
   }
 
   const timeout = options.timeout ?? COMMAND_TIMEOUT_MS;
+  const maxAttempts = options.retries != null ? options.retries + 1 : MAX_ATTEMPTS;
+  const retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS;
 
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await runSingleAttempt(codespaceName, command, token, timeout);
+    } catch (error) {
+      lastError = error;
+
+      // Fatal/classified errors never retry (suspended account, not-found, bad token)
+      if (!isRetryableError(error) || attempt === maxAttempts) {
+        throw error;
+      }
+
+      console.warn(
+        `[Codespaces] gh ssh attempt ${attempt}/${maxAttempts} failed for ${codespaceName} ` +
+          `(${error.code || error.message}); retrying in ${retryDelayMs}ms`
+      );
+      await sleep(retryDelayMs);
+    }
+  }
+
+  throw lastError;
+}
+
+function isRetryableError(error) {
+  // A classified fatal error (suspended account, bad token, not-found,
+  // rate-limit) must NOT be retried — retrying would mask the real cause.
+  if (error instanceof ProviderError && error.code !== 'CODESPACES_COMMAND_TIMEOUT') {
+    return false;
+  }
+
+  // Timeouts, and unknown/generic failures (empty stderr, exec failed) are
+  // classic transient SSH failures and are safe to retry.
+  return true;
+}
+
+function runSingleAttempt(codespaceName, command, token, timeout) {
   return new Promise((resolve, reject) => {
     execFile(
       'gh',
