@@ -155,6 +155,66 @@ Plan impact:
 - Do not describe CodeSandbox as unlimited free VPS infrastructure.
 - Document that CodeSandbox usage depends on the operator's CodeSandbox account, plan, credits, and concurrency limits.
 
+### 3.9 Background Daemon Lifecycle (Empirical Findings, 2026-08-13)
+
+Empirical testing on real CodeSandbox Docker sandboxes during a ttyd + Cloudflare Tunnel template integration revealed how `commands.run` treats background daemons. These findings complement §3.4.
+
+#### 3.9.1 How `commands.run` executes a command
+
+Inspecting the SDK (`@codesandbox/sdk` 2.4.2, `SandboxClient/commands.js`):
+
+- Every command is wrapped as `source $HOME/.private/.env 2>/dev/null || true && bash -c '<command>'` (optionally preceded by `cd <cwd>` and `env KEY='value'` exports).
+- A shell is created via `shells.create(workspacePath, dimensions, commandWithEnv, opts.asGlobalSession ? "COMMAND" : "TERMINAL", true)`. The default shell type is `"TERMINAL"`.
+- `run()` is `runBackground()` + `waitUntilComplete()`; `runBackground()` returns the shell without waiting.
+
+The backend's `withDockerHostEnv()` (codesandbox-provider.js) prepends `export DOCKER_HOST='...'; ` to the user command, so the full string executed inside the inner `bash -c` is `export DOCKER_HOST='tcp://<host>:2375'; <command>`.
+
+#### 3.9.2 Background processes are tied to the command's terminal session
+
+Observed results (same VM image, command run via `commands.run`):
+
+| Command | Result |
+| --- | --- |
+| `nohup sleep 60 & disown` | killed (process group kill) |
+| `setsid sleep 60 & disown` | survived (setsid escapes the process-group kill) |
+| `setsid nohup ttyd -p 7681 ... & disown` (returns instantly) | killed within ~7s |
+| `setsid ttyd -p 7681 ... & disown` (returns instantly) | killed within ~7s |
+| `setsid ttyd -p 7682 ... & disown; sleep 3` | survived across commands |
+| `setsid socat TCP-LISTEN:2375,... </dev/null >log 2>&1 &` (docker socket proxy, bootstrap) | survives the whole session |
+
+Interpretation:
+- Cleanup kills by process group; `setsid` (new session/group) escapes it.
+- However, if the command's shell exits immediately after spawning the daemon, the daemon is still torn down with the TERMINAL shell session. Keeping the command alive ~1-3s after the spawn lets the daemon survive the teardown window.
+- The docker socket proxy is the canonical survivor: its bootstrap script spawns socat with `setsid ... &`, then continues with `sleep 1` + a port check before returning.
+
+#### 3.9.3 Working daemon-start pattern
+
+Verified working pattern for spawning a persistent background daemon from a command:
+
+```
+setsid <daemon> </dev/null >"$WORKSPACE_DIR/daemon.log" 2>&1 & disown; sleep 3
+```
+
+Notes:
+- Use `setsid`, not `nohup`. `setsid nohup ttyd ...` was observed to be killed while `setsid ttyd ...` (with a trailing sleep) survived.
+- The trailing `sleep 3` keeps the command alive after the spawn, matching the socat bootstrap behavior.
+- `< /dev/null` plus output redirection detaches the daemon from the terminal session.
+
+#### 3.9.4 `pgrep -f` false-match gotcha
+
+Because the SDK wraps the entire command in `bash -c '<command>'`, the wrapper shell's own cmdline contains the full user command text. A pattern like `pgrep -f "sleep 60"` matches the wrapper shell itself (cmdline `bash -c export ...; pgrep -f "sleep 60" ...`). Use `pgrep -x` or an anchored pattern such as `pgrep -f "^ttyd -p $TTYD_PORT"`.
+
+#### 3.9.5 SDK levers for persistent daemons
+
+Two SDK options are relevant for future backend-side work:
+- `commands.runBackground(command, opts)` creates the shell without waiting and returns a `Command` object exposing `onOutput`, `kill()`, and `restart()`.
+- `asGlobalSession: true` runs the command in the global session (shell type `"COMMAND"`) instead of the current terminal session, making environment variables available to all users of the sandbox. Untested for daemon persistence.
+
+Plan impact:
+- Templates that need long-running background daemons (ttyd, cloudflared, etc.) should start them with `setsid <cmd> </dev/null >log 2>&1 & disown; sleep 3`.
+- The provider's `executeCommand` needs no change for this pattern; the daemon lifecycle is controlled entirely by the command string.
+- If future work requires the provider to manage persistent processes directly, evaluate `runBackground` and `asGlobalSession`.
+
 ## 4. Verified API Requirements for This Project
 
 The current project can validate CodeSandbox through the existing session API shape:
