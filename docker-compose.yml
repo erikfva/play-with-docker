@@ -9,7 +9,7 @@ services:
       - ./credentials:/mnt/s3:ro
       - ./src:/app/src
     ports:
-      - "${PORT:-3000}:3000"
+      - "${PORT:-3000}:${PORT:-3000}"
     cap_add:
       - SYS_ADMIN
     devices:
