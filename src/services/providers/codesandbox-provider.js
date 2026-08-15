@@ -894,7 +894,10 @@ class CodeSandboxProvider extends BaseProvider {
     if (operation === 'create') {
       return new ProviderError('CodeSandbox create failed', {
         code: 'CODESANDBOX_CREATE_FAILED',
-        statusCode: 502
+        statusCode: 502,
+        details: {
+          output: typeof error.message === 'string' ? error.message : undefined
+        }
       });
     }
 
