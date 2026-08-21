@@ -22,6 +22,14 @@ The API should let clients:
 - See provider-specific availability details when the upstream platform exposes them, such as remaining included hours, credit usage, storage usage, spending-limit state, concurrent VM capacity, or last validation time.
 - Understand when a provider cannot expose remaining time or credit information through a public API.
 
+The core of the contract is a flat, normalized quota report per credential:
+
+- `provider`: provider identifier (`gcs`, `codesandbox`, `codespaces`).
+- `credential`: credential name (file name or alias).
+- `quotaUnit`: the unit the quota is measured in (hours, core-hours, credits, currency, counts, GB-month, etc.).
+- `quotaPeriod`: the period the quota resets over (day, week, month, billing cycle, or none for instantaneous limits).
+- `usage`: how much has been consumed so far in that unit/period.
+
 ## 4. Background
 
 The project currently lists credential files for Google Cloud Shell, CodeSandbox, and GitHub Codespaces. These list endpoints primarily show which credential files exist; they do not validate whether each credential can still provision or manage a remote VM session.
@@ -44,7 +52,9 @@ Current behavior:
 Required behavior:
 - Users can query credential status per provider.
 - Each credential returns a clear status and provider-specific evidence.
-- The API should not fabricate remaining hours or credits when upstream APIs do not expose them.
+- Quota consumption is reported in a normalized shape: quota unit, quota period, and usage, so clients can render any provider without provider-specific parsing.
+- A single credential can report multiple quota dimensions when the provider meters more than one resource (for example, Codespaces compute core-hours plus storage GB-month).
+- The API should not fabricate remaining hours or credits when upstream APIs do not expose them; `usage` is `null` with an explanatory limitation instead.
 - Existing session creation and credential listing behavior must remain backward compatible.
 
 ## 6. Scope
@@ -78,9 +88,9 @@ Out of scope:
    - `QUOTA_EXHAUSTED`
    - `LIMITED`
    - `UNKNOWN`
-5. The response must include `provider`, `credentialRef`, `credentialFingerprint` when available, `status`, `checkedAt`, and `details`.
+5. The response must include `provider`, `credential` (file name or alias), `credentialFingerprint` when available, `status`, `checkedAt`, and `quotas[]`.
 6. The response must include `expiresAt` only when the provider exposes or the token format safely encodes an expiration time.
-7. The response must include `availability` fields for measurable capacity, such as remaining hours, used minutes, credits, storage, concurrent VM capacity, or account/billing state.
+7. The response must include quota entries (`quotas[]` with `quotaUnit`, `quotaPeriod`, `usage`) for measurable capacity, such as remaining hours, used minutes, credits, storage, concurrent VM capacity, or account/billing state.
 8. Availability fields that cannot be measured must be returned as `null` with a `reason` in `details.limitations`.
 9. Status checks must not create new provider VM sessions.
 10. Status checks must not execute arbitrary user commands in existing remote VMs.
@@ -92,6 +102,11 @@ Out of scope:
 13. Status checks must be cacheable by provider and credential fingerprint.
 14. The cache TTL must be configurable and default to a short duration, such as 5 minutes.
 15. The implementation must preserve existing credential list endpoints and session lifecycle behavior.
+16. Each credential entry must report quota information as one or more quota entries, each containing at minimum: `quotaUnit`, `quotaPeriod`, and `usage`.
+17. `usage` must be a number when the upstream source exposes consumption, or `null` with an entry in `details.limitations` when it cannot be determined.
+18. Providers metering multiple resources must return one quota entry per resource (for example, Codespaces compute plus storage).
+19. Instantaneous or non-renewing limits (for example, concurrent VM capacity) must use `quotaPeriod: null` rather than a fake period.
+20. Units must use normalized names: `hours`, `core-hours`, `credits`, `currency`, `GB-month`, `count` — not provider-specific strings.
 
 ## 8. Proposed API Surface
 
@@ -114,27 +129,35 @@ Example response:
   "provider": "codespaces",
   "credentials": [
     {
-      "credentialRef": "codespaces/account-a.txt",
+      "provider": "codespaces",
+      "credential": "codespaces/account-a.txt",
       "credentialFingerprint": "sha256:...",
       "status": "AVAILABLE",
       "checkedAt": "2026-08-16T00:00:00.000Z",
       "expiresAt": null,
-      "availability": {
-        "remainingHours": null,
-        "remainingCredits": null,
-        "usedIncludedMinutes": 42,
-        "includedMinutes": 7200,
-        "storageUsedGbMonth": 0.4,
-        "concurrentSessionsLimit": null,
-        "activeSessions": 1
-      },
+      "quotas": [
+        {
+          "quotaUnit": "core-hours",
+          "quotaPeriod": "month",
+          "usage": 13.6,
+          "limit": 120,
+          "remaining": 106.4
+        },
+        {
+          "quotaUnit": "GB-month",
+          "quotaPeriod": "month",
+          "usage": 0.4,
+          "limit": 15,
+          "remaining": 14.6
+        }
+      ],
       "details": {
         "accountType": "personal",
         "billingState": "within_included_usage",
         "limitations": [
           {
-            "field": "remainingHours",
-            "reason": "GitHub billing APIs may expose used minutes but do not guarantee a normalized remaining-hours field for every token/account type."
+            "field": "quotas[0].usage",
+            "reason": "Usage comes from the public-preview billing usage summary endpoint and requires billing permissions; it is null when inaccessible."
           }
         ]
       }
@@ -142,6 +165,9 @@ Example response:
   ]
 }
 ```
+
+> [!NOTE]
+> Codespaces included compute is metered in **core-hours**, not wall-clock hours. A 4-core machine consumes the 120 core-hour allowance in roughly 30 hours of runtime.
 
 ### 8.2 Check One Credential
 
@@ -157,38 +183,56 @@ GET /api/v1/sessions/{provider}/credentials/status?credentialRef=codespaces/acco
 
 ## 9. Normalized Response Model
 
+Each credential entry is shaped around five core fields — `provider`, `credential`, `quotaUnit`, `quotaPeriod`, `usage` — grouped in a `quotas[]` array because one credential can meter several resources:
+
 ```json
 {
   "provider": "gcs",
-  "credentialRef": "google/account-a.json",
+  "credential": "google/account-a.json",
   "credentialFingerprint": "sha256:...",
   "status": "UNKNOWN",
   "checkedAt": "2026-08-16T00:00:00.000Z",
   "expiresAt": null,
-  "availability": {
-    "canCreateSession": null,
-    "remainingHours": null,
-    "remainingCredits": null,
-    "usedMinutes": null,
-    "includedMinutes": null,
-    "storageUsedGbMonth": null,
-    "concurrentSessionsLimit": null,
-    "concurrentVmsRemaining": null,
-    "sandboxesHourlyRemaining": null,
-    "sandboxesHourlyResetAt": null,
-    "activeSessions": null
-  },
+  "quotas": [
+    {
+      "quotaUnit": "hours",
+      "quotaPeriod": "week",
+      "usage": null,
+      "limit": 50,
+      "remaining": null
+    }
+  ],
   "details": {
     "validated": true,
     "limitations": [
       {
-        "field": "remainingHours",
-        "reason": "Cloud Shell documents quota in the UI but the Cloud Shell REST API does not document a remaining-hours response field."
+        "field": "quotas[0].usage",
+        "reason": "Cloud Shell documents the weekly quota in the UI, but the Cloud Shell REST API does not expose used or remaining hours."
       }
     ]
   }
 }
 ```
+
+Field rules:
+- `credential`: file name or alias of the credential (the value previously called `credentialRef`; `credentialFingerprint` remains for uniqueness).
+- `usage`: consumed amount so far, in `quotaUnit` over `quotaPeriod`. Number or `null`.
+- `limit` / `remaining`: optional. Included only when a documented limit exists (`limit`) or when usage plus a known limit allows derivation (`remaining = limit − usage`).
+- `quotaPeriod`: `day` | `week` | `month` | `billing-cycle` | `hourly-window` | `null` for instantaneous limits.
+- `quotaUnit`: normalized names only: `hours`, `core-hours`, `credits`, `currency`, `GB-month`, `count`.
+
+### Per-provider quota mapping
+
+| Provider | quotaUnit | quotaPeriod | usage source | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| `gcs` | `hours` | `week` | `null` (UI-only; not exposed by REST API) | `limit: 50` is the documented weekly default |
+| `codesandbox` | `credits` | `billing-cycle` | `null` (SDK exposes no balance) | Runtime burn rate by VM tier goes in `details.referencePricing` |
+| `codesandbox` | `count` | `hourly-window` | derived as `limit − rate_limits.sandboxes_hourly.remaining` | Live from `getMetaInfo()`; `resetAt` in entry details |
+| `codesandbox` | `count` | `null` (instantaneous) | derived as `limit − rate_limits.concurrent_vms.remaining` | Live concurrent-VM headroom |
+| `codespaces` | `core-hours` | `month` | billing usage summary endpoint (`product = Codespaces`), public preview | `null` without billing permissions; core-hours, not clock hours |
+| `codespaces` | `GB-month` | `month` | billing usage summary endpoint, public preview | Same permission caveats |
+
+Local orchestrator state stays outside `quotas[]`: active session counts and the one-session-per-token constraint surface as `status: LIMITED` with `details.localActiveSessions`.
 
 ## 10. Provider-Specific Acceptance Criteria
 
@@ -196,8 +240,8 @@ GET /api/v1/sessions/{provider}/credentials/status?credentialRef=codespaces/acco
 
 - Given a valid Google credential file, when the user checks credential status, then the API validates that the credential can call Google APIs required by the GCS provider.
 - The response must include `status: AVAILABLE` when credentials are valid and Cloud Shell APIs respond successfully.
-- The response must include `remainingHours: null` with a limitation reason unless a documented API source for remaining Cloud Shell quota is implemented.
-- The response must include documented static limits in `details.referenceLimits`, including the default 50-hour weekly Cloud Shell quota and 5 GB persistent disk limit.
+- The response must include a `quotas[]` entry with `quotaUnit: "hours"`, `quotaPeriod: "week"`, `usage: null`, and `limit: 50`, with a limitation reason for the null usage unless a documented API source for remaining Cloud Shell quota is implemented.
+- The response must include documented static limits in `details.referenceLimits`, including the 5 GB persistent disk limit.
 - Invalid, revoked, or malformed credentials must return `INVALID` or `EXPIRED` when the provider error clearly identifies that state.
 
 ### 10.2 CodeSandbox
@@ -205,10 +249,10 @@ GET /api/v1/sessions/{provider}/credentials/status?credentialRef=codespaces/acco
 - Given a valid CodeSandbox token, when the user checks credential status, then the API validates the token through the SDK `API.getMetaInfo()` (`GET /meta/info`) or a documented safe API call.
 - The response must include `status: INVALID` when `getMetaInfo()` returns `401`/`403`, because that means the token is expired, revoked, or lacks required scopes.
 - The response must include `status: AVAILABLE` when the token is valid and live rate-limit headroom is free (`concurrent_vms.remaining > 0` and `sandboxes_hourly.remaining > 0`).
-- The response must include `status: QUOTA_EXHAUSTED` when `getMetaInfo()` succeeds but `concurrent_vms.remaining == 0` or `sandboxes_hourly.remaining == 0`, and must include the hourly `reset` time in `availability.sandboxesHourlyResetAt` when present.
-- The response must include live rate-limit headroom from `getMetaInfo().rate_limits` in `availability`: `concurrentSessionsLimit` (from `concurrent_vms.limit`), `concurrentVmsRemaining`, `sandboxesHourlyRemaining`, and `sandboxesHourlyResetAt`.
+- The response must include `status: QUOTA_EXHAUSTED` when `getMetaInfo()` succeeds but `concurrent_vms.remaining == 0` or `sandboxes_hourly.remaining == 0`, and must include the hourly `reset` time in the affected quota entry's details (`resetAt`) when present.
+- The response must include live rate-limit headroom from `getMetaInfo().rate_limits` as quota entries: an `hourly-window` `count` entry derived from `sandboxes_hourly` (with the hourly `reset` time in entry details) and an instantaneous `count` entry derived from `concurrent_vms`.
 - The response must include documented credit rates by VM tier in `details.referencePricing`.
-- The response must not claim exact remaining credits; the SDK exposes no credit-balance field, so `remainingCredits` must be `null` with a limitation reason. A token can pass all live quota checks and still fail at VM creation if paid credits are exhausted, so the API must not imply a credit-balance guarantee.
+- The response must not claim exact remaining credits; the SDK exposes no credit-balance field, so the `credits` / `billing-cycle` quota entry must have `usage: null` with a limitation reason. A token can pass all live quota checks and still fail at VM creation if paid credits are exhausted, so the API must not imply a credit-balance guarantee.
 - If the selected token already has an active orchestrator session, the response should include local `activeSessions` and mark status as `LIMITED` when the existing one-session-per-token constraint prevents creating another session.
 
 ### 10.3 GitHub Codespaces
@@ -218,7 +262,8 @@ GET /api/v1/sessions/{provider}/credentials/status?credentialRef=codespaces/acco
 - If no codespace can be adopted, the response should return `UNAVAILABLE` or `LIMITED` with a detail explaining that a codespace must exist before session creation.
 - The response should include local active session count for the credential fingerprint.
 - When GitHub billing APIs are accessible with the token and account type, the response should include available billing/usage fields such as included minutes, paid minutes, or storage usage.
-- When billing APIs are inaccessible or do not expose remaining usage for the token, the response must include `remainingHours: null` with a limitation reason.
+- When billing APIs are inaccessible or do not expose remaining usage for the token, the response must include the compute quota entry with `usage: null` and a limitation reason.
+- When billing data is accessible, compute must be reported as a `core-hours` / `month` quota entry (never wall-clock hours) and storage as `GB-month` / `month`.
 - Token permission failures must map to `INVALID` or `UNAVAILABLE` depending on whether authentication or authorization failed.
 
 ## 11. Non-Functional Requirements
@@ -237,3 +282,4 @@ GET /api/v1/sessions/{provider}/credentials/status?credentialRef=codespaces/acco
 3. Should cached status survive process restarts, or is in-memory caching enough?
 4. Should Codespaces billing checks support organization/enterprise owners, or only personal accounts initially?
 5. Should static provider reference limits be included in every response, or only in provider metadata/discovery?
+6. The `credential` field accepts a file name or alias. Should the orchestrator introduce an alias registry (mapping friendly names to credential refs), or should aliases be deferred and `credential` always carry the file name/ref for now?

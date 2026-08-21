@@ -32,6 +32,7 @@ For each current provider in the orchestrator (`gcs`, `codesandbox`, and `codesp
 - About billing for GitHub Codespaces: https://docs.github.com/en/codespaces/billing/reference/about-billing-for-github-codespaces
 - GitHub REST API - Codespaces: https://docs.github.com/en/rest/codespaces/codespaces
 - GitHub REST API - Billing: https://docs.github.com/en/rest/billing/billing
+- Billing usage summary endpoint (public preview): `GET /users/{username}/settings/billing/usage/summary` with header `X-GitHub-Api-Version: 2026-03-10`; filter entries where `product = Codespaces`.
 
 ## 4. Executive Summary
 
@@ -39,7 +40,7 @@ The providers do not expose equal availability data.
 
 - Google Cloud Shell has a documented free weekly usage quota, but the Cloud Shell API documentation does not expose a remaining-hours field. The API can validate whether credentials work and whether an environment can be accessed, but remaining weekly quota appears UI-only in the documented Cloud Shell quota page.
 - CodeSandbox documents VM credit rates and a free-plan concurrent VM limit for SDK usage, but the SDK docs reviewed do not document a balance, remaining-credit, token-expiration, or quota-status API. Credential checks can validate token usability through SDK operations, but exact remaining credits should be reported as unknown unless CodeSandbox adds or documents an account/billing endpoint.
-- GitHub Codespaces documents included monthly compute/storage for personal accounts. GitHub APIs can validate tokens and list codespaces, which is especially important because this project adopts existing codespaces instead of creating them. Billing usage may be available through GitHub billing APIs for some account types and tokens, but support and fields vary by owner type and permissions. The implementation should treat billing data as optional.
+- GitHub Codespaces documents included monthly compute/storage for personal accounts (compute is measured in core-hours, not clock hours). GitHub APIs can validate tokens and list codespaces, which is especially important because this project adopts existing codespaces instead of creating them. A public-preview billing usage summary endpoint (`/users/{username}/settings/billing/usage/summary`) can expose actual usage filtered by `product = Codespaces`, but support and fields vary by owner type and permissions. The implementation should treat billing data as optional.
 
 Recommended product behavior: expose a normalized status model with exact provider evidence when available, static reference limits from documentation, local orchestrator constraints, and explicit `unknown` limitations when an upstream API does not expose remaining usage.
 
@@ -284,13 +285,24 @@ For an expired, revoked, or unauthorized token:
 
 GitHub Codespaces billing documentation describes included monthly usage for personal accounts:
 
-- GitHub Free personal accounts: 15 GB-month storage and 120 hours compute time per month.
-- GitHub Pro personal accounts: 20 GB-month storage and 180 hours compute time per month.
+- GitHub Free personal accounts: 15 GB-month storage and 120 core-hours of compute per month.
+- GitHub Pro personal accounts: 20 GB-month storage and 180 core-hours of compute per month.
 - Organizations and enterprises: no free quota by default.
+
+> [!IMPORTANT]
+> "120 hours" isn't always 120 clock hours. Included compute is measured in **core-hours**, not wall-clock hours.
+>
+> Codespaces uses core-hours. For example:
+>
+> - 2-core machine running 10 hours → 20 core-hours
+> - 4-core machine running 10 hours → 40 core-hours
+> - 8-core machine running 10 hours → 80 core-hours
+>
+> So if you're using a 4-core Codespace, your 120-core-hour allowance is roughly 30 hours of actual runtime. Any implementation surfacing `includedMonthlyComputeHours` must treat the value as core-hours and must not present it as wall-clock runtime without dividing by the machine's core count.
 
 Billing model:
 
-- Compute is billed by hour and varies by machine type/core count.
+- Compute is billed by core-hour and varies by machine type/core count.
 - Storage is measured in GB-hours and billed as GB-month.
 - If no valid payment method exists, usage stops after included quota is consumed.
 - If payment is configured, budgets can cap spending.
@@ -316,12 +328,27 @@ Billing API support is less uniform:
 
 - GitHub has REST billing endpoints, but exact Codespaces billing endpoint availability, response fields, and required permissions depend on current GitHub API version, account owner type, and token permissions.
 - User-level or owner-level billing data may require account owner privileges and may not be accessible from a normal codespaces-scoped PAT.
-- The billing docs describe included usage, but the reviewed billing API page did not reliably surface Codespaces-specific response fields through WebFetch.
+
+### Billing usage from the command line / REST API
+
+GitHub provides a billing usage REST API that can be queried and filtered for Codespaces entries. GitHub documents this endpoint as currently being in **public preview**, so fields and availability may change:
+
+```bash
+gh api \
+  -H "X-GitHub-Api-Version: 2026-03-10" \
+  /users/YOUR_USERNAME/settings/billing/usage/summary
+```
+
+Then look for entries where:
+
+- `product = Codespaces`
+
+This gives programmatic access to actual usage (including Codespaces compute and storage line items) instead of relying only on static included-quota references. For the orchestrator's credential status check, the same call can be made with the loaded PAT through the existing fetch-based `codespaces/client.js` (equivalent to the `gh api` invocation above), keeping it read-only and best-effort.
 
 Because of this, the implementation should treat billing usage as optional:
 
-- Attempt GitHub billing usage calls only when the token has appropriate permissions and the owner context is known.
-- Return live usage fields only when the API response includes them.
+- Attempt billing usage calls (for example, the public-preview `/users/{username}/settings/billing/usage/summary` endpoint) only when the token has appropriate permissions and the owner context is known.
+- Return live usage fields only when the API response includes them, and interpret compute values as core-hours.
 - Otherwise, return static included-usage reference limits plus limitation reasons.
 
 ### Recommended status response
@@ -344,6 +371,10 @@ For a valid token with at least one adoptable codespace:
     "validated": true,
     "adoptFlow": "This project adopts an existing codespace and does not create a new one.",
     "limitations": [
+      {
+        "field": "includedMonthlyComputeHours",
+        "reason": "Included compute is measured in core-hours, not clock hours; actual runtime depends on the codespace machine's core count (e.g., a 4-core machine gets roughly 30 clock hours out of a 120 core-hour allowance)."
+      },
       {
         "field": "remainingHours",
         "reason": "Codespaces billing usage requires billing API permissions and may not be available for every token or account type."
@@ -392,6 +423,7 @@ Only return the `QUOTA_EXHAUSTED` state when the GitHub API response clearly sup
 - The status API should include local database state because the unique active token index can limit new sessions even when GitHub itself still has capacity.
 - Billing checks should be best-effort and must gracefully degrade to `UNKNOWN` fields.
 - Permission errors from billing endpoints should not make the whole credential invalid if the token can still list/adopt codespaces.
+- When surfacing remaining compute, keep raw core-hours authoritative; if a wall-clock runtime estimate is derived (core-hours ÷ machine core count), label it clearly as an estimate based on the adopted codespace's machine size.
 
 ## 6. Cross-Provider Status Model
 
@@ -445,7 +477,7 @@ Recommended status enum:
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | GCS | Yes, through Google auth and Cloud Shell API calls | Partial, environment state is available | Not documented in Cloud Shell REST API | 50 hours/week, 5 GB persistent disk | Medium for credential validity, low for remaining quota |
 | CodeSandbox | Yes, through `getMetaInfo()` auth check (401/403 means expired/revoked) | Yes, `getMetaInfo()` exposes live `concurrent_vms`, `sandboxes_hourly`, and `requests_hourly` remaining/limit/reset; `listRunningVms()` exposes live concurrent VM count vs limit | Credit balance not exposed; rate-limit headroom is live and answers "can I create now?" | 10 concurrent VMs on Build free, VM credit rates by tier | High for token validity + live rate-limit headroom, low for credit balance |
-| Codespaces | Yes, through GitHub REST API | Yes, list/get codespaces exposes existing resources and states | Optional/best-effort through billing APIs when accessible | Personal Free: 120 compute hours + 15 GB-month; Pro: 180 compute hours + 20 GB-month | High for token/resource state, medium/low for billing depending on permissions |
+| Codespaces | Yes, through GitHub REST API | Yes, list/get codespaces exposes existing resources and states | Optional/best-effort via billing usage summary endpoint (`/users/{username}/settings/billing/usage/summary`, public preview) when accessible; compute is measured in core-hours, not clock hours | Personal Free: 120 core-hours + 15 GB-month; Pro: 180 core-hours + 20 GB-month (core-hours, not wall-clock runtime) | High for token/resource state, medium/low for billing depending on permissions |
 
 ## 8. Recommended Implementation Strategy
 
