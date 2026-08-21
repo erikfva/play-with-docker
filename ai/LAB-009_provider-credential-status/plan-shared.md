@@ -174,10 +174,14 @@ async function countActiveSessions(db, provider, fingerprint) {
   //   gcs:         TERMINATED, DELETED, FAILED  (no uniqueness index, informational only)
   const terminalStatuses = ['TERMINATED', 'DELETED', 'FAILED'];
   const placeholders = terminalStatuses.map((_, i) => `$${i + 3}`).join(', ');
+  // NOTE: the column must stay UNQUOTED. It was created via unquoted DDL
+  // ("ADD COLUMN credentialFingerprint TEXT"), so Postgres stored it lowercase
+  // ('credentialfingerprint'). Quoting it as "credentialFingerprint" would
+  // raise: column "credentialFingerprint" does not exist.
   const sql = `
     SELECT COUNT(*)::int AS count FROM sessions
     WHERE provider = $1
-      AND "credentialFingerprint" = $2
+      AND credentialFingerprint = $2
       AND COALESCE(status, '') NOT IN (${placeholders})
   `;
   const row = await db.get(sql, [provider, fingerprint, ...terminalStatuses]);
@@ -213,6 +217,9 @@ local-constraint candidate and assemble the final envelope.
 
 ```javascript
 const { getProvider } = require('./provider-factory');
+const { initGoogleCredentialsFromS3IfNeeded } = require('./google-credentials-loader');
+const { loadCodeSandboxCredentials } = require('./providers/codesandbox/credentials-loader');
+const { loadCodespacesCredentials } = require('./providers/codespaces/credentials-loader');
 // ...
 
 // Matches the actual S3/filesystem prefix used by each provider's credential
@@ -227,6 +234,38 @@ const PROVIDER_PREFIXES = {
 
 // Providers that enforce one-session-per-token (drives LIMITED candidate).
 const ENFORCES_TOKEN_UNIQUENESS = new Set(['codesandbox', 'codespaces']);
+
+// Per-provider loaders, adapted from the existing session-creation path
+// (same functions, so behavior and error codes stay identical).
+//   gcs         → { credentialsPath, credentialRef }
+//                 (google-credentials-loader.js — returns the resolved path)
+//   codesandbox → { token, credentialRef, credentialFingerprint }  (sha256-prefixed)
+//   codespaces  → { token, credentialRef, credentialFingerprint }  (verified shape)
+const LOADERS = {
+  gcs: async (ref) => ({
+    credentialsPath: await initGoogleCredentialsFromS3IfNeeded(ref),
+    credentialRef: ref
+  }),
+  codesandbox: (ref) => loadCodeSandboxCredentials(ref),
+  codespaces:  (ref) => loadCodespacesCredentials(ref)
+};
+
+async function loadForStatus(providerName, credentialRef) {
+  if (!credentialRef) {
+    throw new ProviderError(
+      'credentialRef query parameter is required',
+      { code: 'CREDENTIAL_REF_REQUIRED', statusCode: 400 }
+    );
+  }
+  const loader = LOADERS[providerName];
+  if (!loader) {
+    throw new ProviderError(
+      `Provider '${providerName}' does not support credential status checks`,
+      { code: 'CREDENTIAL_STATUS_UNSUPPORTED', statusCode: 404 }
+    );
+  }
+  return loader(credentialRef);
+}
 
 /**
  * Check the status of one credential ref for a given provider.
@@ -262,8 +301,12 @@ async function getCredentialStatus(providerName, { credentialRef } = {}) {
     );
   }
 
-  const key = cacheKey(providerName, raw.credentialFingerprint);
-  const cached = getCachedStatus(key);
+  // Cache only when a fingerprint exists — otherwise the key would collide
+  // across unrelated credentials (`${provider}:undefined`).
+  const key = raw.credentialFingerprint
+    ? cacheKey(providerName, raw.credentialFingerprint)
+    : null;
+  const cached = key ? getCachedStatus(key) : null;
   if (cached) return cached;
 
   let result;
@@ -274,11 +317,12 @@ async function getCredentialStatus(providerName, { credentialRef } = {}) {
     return buildUnknownEntry(raw, error);
   }
 
-  const entry = finalizeEntry(providerName, raw, result);
+  const entry = await finalizeEntry(providerName, raw, result);  // ← must await: does async DB call
 
   // Cache everything except UNKNOWN (covers both checker-returned UNKNOWN
-  // and any status that didn't match a known value).
-  if (entry.status !== 'UNKNOWN') {
+  // and any status that didn't match a known value). Skip entirely when no
+  // fingerprint (key === null).
+  if (key && entry.status !== 'UNKNOWN') {
     putCachedStatus(key, entry);
   }
   return entry;
@@ -392,8 +436,10 @@ to declare this method.
 
 ## 5. Routes (`src/routes/sessions.js`)
 
-The new route must be registered **before** `router.get('/:id', ...)` to avoid
-Express treating the provider name (e.g. `gcs`) as a session ID.
+Register the route **before** `router.get('/:id', ...)`. Not strictly required
+today — three-segment paths cannot match the single-segment `/:id` — but it
+keeps the router safe against future single-segment additions and reads better
+grouped with the other credential routes.
 
 ```javascript
 // Register before GET /:id
@@ -452,8 +498,11 @@ CREDENTIAL_STATUS_CACHE_TTL_MS=300000   # optional, default 5 min (300000 ms)
   overriding `AVAILABLE`, and `QUOTA_EXHAUSTED` beating `LIMITED`.
 - `buildUnknownEntry`: error message is redacted; `errorCode` is preserved.
 - Redaction: no token/key material in entries or logs (fingerprint only).
-- Route ordering: `/:provider/credentials/status` registered before `/:id`;
-  verify `gcs`, `codesandbox`, `codespaces` don't route to the session handler.
+- Credential without fingerprint: check runs uncached (no
+  `${provider}:undefined` cache-key collisions).
+- Route ordering (defensive): `/:provider/credentials/status` registered before
+  `/:id`; verify `gcs`, `codesandbox`, `codespaces` reach the status handler,
+  never the session handler.
 - Route: unknown provider → 404; `pwd` → 404; missing `credentialRef` lists all.
 - `PROVIDER_PREFIXES.gcs === 'gcloud'` matches what `credentials-lister.js`
   uses (regression: must not be `'google'`).

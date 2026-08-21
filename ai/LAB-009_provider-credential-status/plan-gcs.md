@@ -126,11 +126,13 @@ async getCredentialStatus(loaded) {
     });
   } catch (error) {
     const mapped = mapGoogleError(error);
+    // Preserve mapped.details (e.g. providerState: 'no-environment-yet' from the
+    // 404 path) — do not let the object-spread get silently overwritten.
     return {
       ...mapped,
       quotas,
       limitations: [...limitations, ...(mapped.limitations || [])],
-      validated: false
+      details: mapped.details || {}
     };
   }
 
@@ -208,7 +210,7 @@ function mapGoogleError(error) {
   }
 
   // Malformed JSON / parse failure — credential file is broken
-  if (msg.includes('unexpected token') || msg.includes('json') && msg.includes('parse')) {
+  if (msg.includes('unexpected token') || (msg.includes('json') && msg.includes('parse'))) {
     return {
       status: 'INVALID',
       limitations: [{ field: 'status', reason: 'Credential file could not be parsed as valid JSON.' }]

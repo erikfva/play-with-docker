@@ -17,12 +17,14 @@ Codespaces status has three layers, checked in order of reliability:
 3. **Billing usage** — public-preview endpoint, best-effort; any failure
    degrades to `null` + limitation and never invalidates the credential.
 
-Included compute is reported in the documented quota unit. GitHub's free-quota
-documentation uses **wall-clock hours** as the unit (120 hrs / 180 hrs), but
-the same compute block is consumed at a per-machine-core multiplier rate when
-billing overages: a 4-core machine uses the included hours at 4× the rate.
-This is distinct from "core-hours" as a compound unit. See §3 for how to
-present this accurately.
+Included compute is reported as **core-hours**, matching GitHub's official
+documentation, which uses that exact term on multiple pages (plans page,
+billing reference table, and the Codespaces troubleshooting guide — sources
+in §1). Consumption accrues at the machine-type multiplier rate (×2 for a
+2-core machine, ×4 for 4-core, …), so a 4-core codespace depletes the
+120 core-hour allowance in roughly 30 clock hours. The billing page's
+shorthand "120 hrs" refers to the same core-hour allowance. See §4 for how
+this is presented.
 
 ## File Map
 
@@ -87,14 +89,24 @@ guard still catches it.
 
 | Plan | Included compute | Included storage |
 |---|---|---|
-| GitHub Free | 120 hrs/month | 15 GB-month |
-| GitHub Pro  | 180 hrs/month | 20 GB-month |
+| GitHub Free | 120 core-hours/month | 15 GB-month |
+| GitHub Pro | 180 core-hours/month | 20 GB-month |
 
-Billing docs use **wall-clock hours** for the included quota. However, billing
-overages are charged proportional to CPU cores — a 4-core machine depletes the
-120-hour allowance at 4× the rate of a 2-core machine (equivalent to consuming
-4 hours of allowance per wall-clock hour). Report the plan's included hours as
-the quota `limit`; document the core-multiplier effect in the limitation text.
+Confirmed as **core hours** across official documentation:
+- `docs.github.com/en/get-started/learning-about-github/githubs-plans` —
+  "120 GitHub Codespaces core hours per month" / "180 …core hours…".
+- `docs.github.com/en/billing/reference/product-usage-included` —
+  "Core hours (per month): 120 / 180".
+- `docs.github.com/en/codespaces/troubleshooting/troubleshooting-included-usage` —
+  "Codespaces compute is counted in core hours, which is the sum of the time a
+  codespace is active, multiplied by the multiplier for the codespace's machine
+  type." Same page: storage is counted in GB-hours for billing but expressed
+  against the GB-month quota.
+
+Report the plan's included core-hours as the quota `limit` with
+`quotaUnit: 'core-hours'`; document the machine-multiplier effect in the
+limitation text, and never present remaining core-hours as clock runtime
+without dividing by core count.
 
 ---
 
@@ -160,13 +172,18 @@ function safeErrorCode(error) {
 }
 
 /**
- * Returns true for 403 errors thrown by client.js's buildError.
- * These map to CODESPACES_TOKEN_INSUFFICIENT_SCOPE or CODESPACES_ACCOUNT_SUSPENDED.
- * Distinguished from billing 403s (which are silently swallowed in step 3).
+ * Returns true ONLY for terminal auth failures thrown by client.js's buildError:
+ * invalid token (401), insufficient scope (403), suspended account (403).
+ *
+ * Deliberately EXCLUDES CODESPACES_RATE_LIMIT_EXCEEDED (buildError maps
+ * rate-limited 403s and 429s to this code with statusCode 429) and
+ * CODESPACES_API_ERROR — those are transient and must re-throw so the
+ * dispatcher surfaces UNKNOWN without caching. They must never report a
+ * healthy token as INVALID.
  */
-function isForbiddenError(error) {
+function isTerminalAuthError(error) {
   return (
-    error?.statusCode === 403 ||
+    error?.code === 'CODESPACES_TOKEN_INVALID' ||
     error?.code === 'CODESPACES_TOKEN_INSUFFICIENT_SCOPE' ||
     error?.code === 'CODESPACES_ACCOUNT_SUSPENDED'
   );
@@ -207,29 +224,30 @@ async getCredentialStatus(loaded) {
     // For org-owned tokens or managed accounts it may be absent.
     plan = user.plan?.name ?? null;
   } catch (error) {
-    // Re-throw network/transient errors so the dispatcher wraps as UNKNOWN.
-    if (!error.code || error.code === 'CODESPACES_API_ERROR') throw error;
-
-    // Known auth failures → return INVALID directly (terminal state)
-    const status = isForbiddenError(error) ? 'INVALID' : 'INVALID';
-    // Both 401 (CODESPACES_TOKEN_INVALID) and 403 (scope/suspended) are INVALID
-    // because neither can produce a usable session.
-    return {
-      status,
-      validated: false,
-      quotas: [],
-      expiresAt: null,
-      limitations: [limitation('status', safeReason(error))]
-    };
+    // Whitelist ONLY terminal auth failures as INVALID (both 401 and 403 auth
+    // codes mean no usable session can ever be produced). Everything else —
+    // most importantly CODESPACES_RATE_LIMIT_EXCEEDED from buildError's
+    // rate-limit mapping — must re-throw so the dispatcher wraps it as
+    // UNKNOWN without caching. Rate limiting is transient, not an auth state.
+    if (isTerminalAuthError(error)) {
+      return {
+        status: 'INVALID',
+        validated: false,
+        quotas: [],
+        expiresAt: null,
+        limitations: [limitation('status', safeReason(error))]
+      };
+    }
+    throw error;
   }
 
   // Reference limits based on plan. org/enterprise accounts → no free quota;
   // unknown plan → fall back to free defaults and flag it.
   let refLimits;
   if (plan === 'pro') {
-    refLimits = { computeHoursPerMonth: 180, storageGbMonth: 20 };
+    refLimits = { computeCoreHoursPerMonth: 180, storageGbMonth: 20 };
   } else {
-    refLimits = { computeHoursPerMonth: 120, storageGbMonth: 15 };
+    refLimits = { computeCoreHoursPerMonth: 120, storageGbMonth: 15 };
     if (plan !== 'free') {
       limitations.push(limitation(
         'details.referenceLimits',
@@ -259,15 +277,16 @@ async getCredentialStatus(loaded) {
 
   // ── Quota entries ─────────────────────────────────────────────────────────
 
-  // Compute: wall-clock hours (documentation unit), consumed at core-multiplier rate
+  // Compute: core-hours (official documentation unit), consumed at the
+  // machine-type multiplier rate
   const computeUsage   = usage?.computeHours ?? null;
-  const computeLimit   = refLimits.computeHoursPerMonth;
+  const computeLimit   = refLimits.computeCoreHoursPerMonth;
   const computeRemain  = computeUsage != null
     ? Math.max(0, computeLimit - computeUsage)
     : null;
 
   quotas.push(quotaEntry({
-    quotaUnit:  'hours',
+    quotaUnit:  'core-hours',
     quotaPeriod: 'month',
     usage:     numOrNull(computeUsage),
     limit:     computeLimit,
@@ -275,9 +294,10 @@ async getCredentialStatus(loaded) {
   }));
   limitations.push(limitation(
     'quotas[0]',
-    'Included compute is documented in wall-clock hours, but billing overages ' +
-    'accrue at a per-core multiplier (e.g. a 4-core machine depletes the monthly ' +
-    'allowance 4× faster than a 2-core machine).'
+    'Included compute is metered in core-hours, not clock hours: consumption ' +
+    "accrues at the codespace machine's core-count multiplier (a 4-core machine " +
+    'depletes the allowance twice as fast as a 2-core machine). Remaining ' +
+    'core-hours overstate possible clock runtime unless divided by core count.'
   ));
 
   // Storage: GB-month
@@ -344,8 +364,9 @@ every field defensively and return `null` for anything that doesn't match.
  *
  * Key facts (confirmed from official API docs):
  *   - Usage volume is in `grossQuantity` (NOT usageQuantity, NOT quantity).
- *   - `unitType` is the unit string; for Codespaces compute it likely includes
- *     'hour'; for storage it likely includes 'gb'. Neither is contractually
+ *   - `unitType` is the unit string; for Codespaces compute it may contain
+ *     'hour' or 'core' (core-hours); for storage it may be 'gb-months' or
+ *     'gb-hours' (both contain 'gb'). None of these are contractually
  *     guaranteed for Codespaces line items — filter defensively.
  *   - Filter rows by `product` matching 'codespaces' (case-insensitive).
  */
@@ -373,7 +394,7 @@ function extractCodespacesUsage(body) {
 
     if (qty == null) continue;
 
-    if (unit.includes('hour')) {
+    if (unit.includes('hour') || unit.includes('core')) {
       computeHours = round1((computeHours ?? 0) + qty);
     } else if (unit.includes('gb') || unit.includes('storage')) {
       storageGbMonths = round1((storageGbMonths ?? 0) + qty);
@@ -399,6 +420,7 @@ If `usageItems` is absent or no Codespaces rows exist, returns
 | `GET /user` 403 (`CODESPACES_TOKEN_INSUFFICIENT_SCOPE`) | `INVALID` | Token lacks `codespace` scope |
 | `GET /user` 403 (`CODESPACES_ACCOUNT_SUSPENDED`) | `INVALID` | Account suspended |
 | `GET /user` network / 5xx | `UNKNOWN` (re-throw) | Transient; not cached |
+| `GET /user` rate-limited (`CODESPACES_RATE_LIMIT_EXCEEDED`, 429) | `UNKNOWN` (re-throw) | Transient; must **never** map to `INVALID` |
 | 0 adoptable codespaces | `UNAVAILABLE` | Adopt-flow explanation in details |
 | Billing 403/404/error | `AVAILABLE` (degraded) | Limitation added; credential not invalidated |
 | Local non-terminal row (incl. `STOPPED`) | `LIMITED` candidate | Via shared precedence |
@@ -422,7 +444,7 @@ crossing zero is not exhaustion evidence and must not produce `QUOTA_EXHAUSTED`.
 | `client.validateToken` | Step 1 | Unchanged; `user.plan?.name` read from response |
 | `client.listCodespaces` | Step 2 | Unchanged |
 | `githubGet(path, token)` | `getBillingUsageSummary` | Called with two args only — no third arg |
-| `buildError` / error codes in `client.js` | `isForbiddenError` | Inspects `error.code` and `error.statusCode` |
+| `buildError` / error codes in `client.js` | `isTerminalAuthError` | Inspects `error.code`; excludes transient rate-limit/API errors |
 | `loadCodespacesCredentials` | Dispatcher load step | Unchanged |
 | Shared `quotaEntry` / `limitation` helpers | All quota entries | Per `plan-shared.md` |
 | Shared envelope / cache / routes / precedence | Everything | Per `plan-shared.md` |
@@ -440,10 +462,12 @@ crossing zero is not exhaustion evidence and must not produce `QUOTA_EXHAUSTED`.
   `githubGet(path, token, attempt = 1)`. A third argument would corrupt the
   retry counter. The `X-GitHub-Api-Version` header is already set globally in
   `githubHeaders()` — no per-call override is needed.
-- **Wall-clock hours, not core-hours**: the free-quota documentation uses hours
-  as the unit; the per-core multiplier affects billing rate, not the quota
-  unit itself. Report `quotaUnit: 'hours'` with a limitation explaining the
-  multiplier effect.
+- **Core-hours, verified against official docs**: the plans page, billing
+  reference table, and troubleshooting guide all use "core hours"; consumption
+  is active-time × machine-type multiplier (×2 … ×32). `quotaUnit` stays
+  `'core-hours'` per spec FR-20 normalized names. Remaining core-hours are
+  never presented as clock runtime without dividing by core count. The billing
+  page's "120 hrs" shorthand refers to the same core-hour allowance.
 - **Storage `remaining` derived when possible**: both `storageUsage` and
   `storageLimit` are known quantities when billing data is accessible, so
   `remaining = max(0, limit − usage)` is computed (same as compute).
@@ -456,12 +480,15 @@ crossing zero is not exhaustion evidence and must not produce `QUOTA_EXHAUSTED`.
 
 ## Test Checklist
 
-- Valid token + ≥1 codespace → `AVAILABLE`, two quota entries.
+- Valid token + ≥1 codespace → `AVAILABLE`, two quota entries; first entry has
+  `quotaUnit: 'core-hours'`, second `quotaUnit: 'GB-month'`.
 - Valid token + 0 codespaces → `UNAVAILABLE` with adopt-flow reason.
 - `GET /user` 401 → `INVALID` (not re-thrown, not UNKNOWN).
 - `GET /user` 403 scope error → `INVALID`.
 - `GET /user` 403 account suspended → `INVALID`.
 - `GET /user` network/5xx → re-thrown → dispatcher returns `UNKNOWN`, not cached.
+- `GET /user` rate-limited (`CODESPACES_RATE_LIMIT_EXCEEDED`) → re-thrown →
+  `UNKNOWN`, **not** `INVALID` (regression guard for the 429-mapping bug).
 - Billing 403/404 → status driven by steps 1–2 only; both quota entries have
   `usage: null`; one limitation added.
 - Billing returns garbage body → `extractCodespacesUsage` returns all-null;
@@ -471,10 +498,11 @@ crossing zero is not exhaustion evidence and must not produce `QUOTA_EXHAUSTED`.
 - `usageQuantity` fallback: fixture with `{ usageQuantity: 10, unitType: 'hours' }`
   and no `grossQuantity` → `computeHours === 10`.
 - Multiple Codespaces rows sum correctly; non-Codespaces rows ignored.
-- `plan === 'pro'` → `computeHoursPerMonth: 180`, `storageGbMonth: 20`.
+- `plan === 'pro'` → `computeCoreHoursPerMonth: 180`, `storageGbMonth: 20`.
 - `plan === null` → free defaults + plan-unknown limitation.
 - Local `STOPPED` row → `LIMITED` candidate applied via shared precedence.
 - `remaining` derived correctly for both compute and storage when usage is known.
+- `unitType: 'core-hours'` rows are counted as compute (matches `'core'` filter).
 - Mock `fetch` at the `client.js` boundary (existing test pattern); include a
   preview-shape drift fixture to verify graceful degradation when field names
   change.
