@@ -312,8 +312,19 @@ function mapGoogleError(error) {
 - **`expiresAt: null`**: service-account JSON keys carry no embedded expiry
   timestamp. OAuth tokens are refreshed transparently by `google-auth-library`.
 - **GCS never produces `LIMITED`**: there is no token-uniqueness index on the
-  `sessions` table for GCS. Session count is reported in
-  `details.localActiveSessions` for information only.
+  `sessions` table for GCS. Existing GCS session rows do not persist a
+  canonical credential identity, so `details.localActiveSessions` is reported
+  as `null` with a limitation explaining that the count is unavailable.
+- **`process.env.GOOGLE_APPLICATION_CREDENTIALS` is mutated by the loader**:
+  `initGoogleCredentialsFromS3IfNeeded()` (inherited from the session-creation
+  path) re-points this env var to the resolved credential on each call. In list
+  mode, iterating every `gcloud/*` credential leaves the env var pointing at the
+  *last* checked credential. Any code that reads the env var directly after a
+  list call will see the wrong credential. This is pre-existing behaviour
+  amplified by the new list endpoint. Accepted for v1; the GCS checker avoids
+  reading `GOOGLE_APPLICATION_CREDENTIALS` directly (it uses the path returned
+  by the loader and passes it to `google-auth-library` explicitly). Do not
+  introduce code in the GCS checker that reads this env var.
 
 ---
 

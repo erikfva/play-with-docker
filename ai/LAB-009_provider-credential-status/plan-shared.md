@@ -67,6 +67,8 @@ const DEFAULT_TTL_MS = parsePositiveInteger(
 );
 
 const cache = new Map(); // key -> { value, expiresAt }
+// Prevent a burst of identical cache misses from multiplying upstream calls.
+const inFlight = new Map(); // key -> Promise<checkerResult>
 
 function cacheKey(provider, credentialFingerprint) {
   return `${provider}:${credentialFingerprint}`;
@@ -86,20 +88,42 @@ function putCachedStatus(key, value, ttlMs = DEFAULT_TTL_MS) {
   cache.set(key, { value, expiresAt: Date.now() + ttlMs });
 }
 
-function clearCache() { cache.clear(); }  // for tests
+/**
+ * Return a cached checker result or share one in-progress upstream check.
+ * UNKNOWN results and rejected checks are deliberately not cached.
+ */
+async function getOrCheckStatus(key, checker) {
+  const cached = getCachedStatus(key);
+  if (cached) return cached;
 
-module.exports = { cacheKey, getCachedStatus, putCachedStatus, clearCache };
+  let pending = inFlight.get(key);
+  if (!pending) {
+    pending = Promise.resolve()
+      .then(checker)
+      .then((result) => {
+        if (result?.status !== 'UNKNOWN') putCachedStatus(key, result);
+        return result;
+      })
+      .finally(() => inFlight.delete(key));
+    inFlight.set(key, pending);
+  }
+  return pending;
+}
+
+function clearCache() {
+  cache.clear();
+  // Do not cancel or detach existing requests: they must remain coalesced and
+  // remove themselves from inFlight when they settle.
+}
+
+module.exports = { cacheKey, getOrCheckStatus, clearCache };
 ```
 
-**Caching rule**: only cache entries whose `status !== 'UNKNOWN'`. This covers
-both paths that produce `UNKNOWN`:
-- A checker that **throws** (caught by the dispatcher → `buildUnknownEntry`)
-- A checker that **returns `{ status: 'UNKNOWN' }`** directly (e.g. caught
-  internally and surfaced as UNKNOWN rather than re-thrown)
+**Caching rule**: cache only the upstream **checker result** (`{ status, quotas, limitations, validated, expiresAt, details? }`) — not the fully finalized entry. `finalizeEntry` (DB session count + precedence) always runs fresh on every request because local session state changes frequently and the DB query is cheap. Only cache when `result.status !== 'UNKNOWN'`:
+- A checker that **throws** (caught by the dispatcher → `buildUnknownEntry`) is never cached
+- A checker that **returns `{ status: 'UNKNOWN' }`** directly is never cached
 
-All other statuses — including `INVALID`, `EXPIRED`, `QUOTA_EXHAUSTED`,
-`UNAVAILABLE`, `LIMITED`, `AVAILABLE` — are cached for the full TTL to protect
-upstream rate limits from hammering on every request.
+All other checker statuses — `INVALID`, `EXPIRED`, `QUOTA_EXHAUSTED`, `UNAVAILABLE`, `AVAILABLE` — are cached for the full TTL to protect upstream rate limits. Concurrent checks with the same key share one in-flight upstream request. Note: `LIMITED` is never returned by a checker directly — it is always produced by `finalizeEntry` based on local session state, so it never enters the cache.
 
 ---
 
@@ -135,9 +159,10 @@ function buildUnknownEntry(raw, error) {
   });
   if (error) {
     entry.details.errorCode    = error.code    || null;
-    entry.details.errorMessage = error.message
-      ? redactTokensFromMessage(error.message)
-      : null;
+    // Loader and SDK messages can contain absolute paths, S3 locations, or
+    // request URLs. Error codes are already safe and actionable; expose only
+    // a stable message rather than trying to redact every location format.
+    entry.details.errorMessage = 'Credential status could not be determined.';
   }
   return entry;
 }
@@ -163,25 +188,40 @@ function redactTokensFromMessage(msg) {
 ```javascript
 /**
  * Count non-terminal sessions for this provider + credential fingerprint.
- * GCS does not enforce token uniqueness but still reports the count
- * informationally; it never produces a LIMITED candidate.
+ * Returns null when the count cannot be reported accurately.
+ *
+ * Terminal sets MUST mirror the actual DB partial indexes (db.js):
+ *   codesandbox index: NOT IN ('TERMINATED', 'DELETED', 'FAILED')
+ *   codespaces  index: NOT IN ('TERMINATED', 'FAILED')
  */
 async function countActiveSessions(db, provider, fingerprint) {
+  // Existing GCS sessions never persisted a canonical credential identity.
+  // Counting by raw credentialRef is misleading because list mode may discover
+  // an absolute local path while session creation may have stored a relative
+  // ref or basename for the same credential. GCS has no uniqueness constraint,
+  // so report "unavailable" rather than a false zero.
+  if (provider === 'gcs') return null;
   if (!fingerprint) return 0;
-  // Terminal sets mirror each provider's unique partial index:
-  //   codesandbox: TERMINATED, DELETED, FAILED
-  //   codespaces:  TERMINATED, FAILED  (STOPPED still blocks creation)
-  //   gcs:         TERMINATED, DELETED, FAILED  (no uniqueness index, informational only)
-  const terminalStatuses = ['TERMINATED', 'DELETED', 'FAILED'];
-  const placeholders = terminalStatuses.map((_, i) => `$${i + 3}`).join(', ');
+
+  // Per-provider terminal sets mirror the DB partial indexes exactly.
+  // Using the wrong set causes false negatives (LIMITED not reported when
+  // the DB would actually block a new session).
+  const TERMINAL_SETS = {
+    codesandbox: ['TERMINATED', 'DELETED', 'FAILED'],
+    codespaces:  ['TERMINATED', 'FAILED']  // DELETED never set; STOPPED still blocks
+  };
+  const terminalStatuses = TERMINAL_SETS[provider] || ['TERMINATED', 'DELETED', 'FAILED'];
+  const placeholders = terminalStatuses.map(() => '?').join(', ');
   // NOTE: the column must stay UNQUOTED. It was created via unquoted DDL
   // ("ADD COLUMN credentialFingerprint TEXT"), so Postgres stored it lowercase
   // ('credentialfingerprint'). Quoting it as "credentialFingerprint" would
   // raise: column "credentialFingerprint" does not exist.
+  // Using ? placeholders — db.js convertSql() rewrites them to $1/$2/... before
+  // passing to pg, consistent with every other caller in the codebase.
   const sql = `
     SELECT COUNT(*)::int AS count FROM sessions
-    WHERE provider = $1
-      AND credentialFingerprint = $2
+    WHERE provider = ?
+      AND credentialFingerprint = ?
       AND COALESCE(status, '') NOT IN (${placeholders})
   `;
   const row = await db.get(sql, [provider, fingerprint, ...terminalStatuses]);
@@ -193,7 +233,8 @@ Result lands in `details.localActiveSessions`, never inside `quotas[]`.
 
 Providers that enforce token uniqueness (`codesandbox`, `codespaces`) contribute
 a `LIMITED` candidate when `localActiveSessions > 0`. GCS does not enforce
-uniqueness, so its session count is reported but never downgrades the status.
+uniqueness and existing rows lack a canonical credential identity, so
+`details.localActiveSessions` is `null` for GCS and never downgrades the status.
 
 ### Status precedence resolver
 
@@ -216,11 +257,12 @@ local-constraint candidate and assemble the final envelope.
 ## 3. `src/services/credential-status-service.js`
 
 ```javascript
+const crypto = require('crypto');
 const { getProvider } = require('./provider-factory');
 const { ProviderError } = require('./errors/provider-errors');
 const db = require('../db/db');
 const { listAvailableCredentials } = require('./credentials-lister');
-const { cacheKey, getCachedStatus, putCachedStatus } = require('./status-cache');
+const { cacheKey, getOrCheckStatus } = require('./status-cache');
 const { initGoogleCredentialsFromS3IfNeeded } = require('./google-credentials-loader');
 const { loadCodeSandboxCredentials } = require('./providers/codesandbox/credentials-loader');
 const { loadCodespacesCredentials } = require('./providers/codespaces/credentials-loader');
@@ -238,16 +280,17 @@ const PROVIDER_PREFIXES = {
 // Providers that enforce one-session-per-token (drives LIMITED candidate).
 const ENFORCES_TOKEN_UNIQUENESS = new Set(['codesandbox', 'codespaces']);
 
-// Per-provider loaders, adapted from the existing session-creation path
-// (same functions, so behavior and error codes stay identical).
-//   gcs         → { credentialsPath, credentialRef }
-//                 (google-credentials-loader.js — returns the resolved path)
-//   codesandbox → { token, credentialRef, credentialFingerprint }  (sha256-prefixed)
-//   codespaces  → { token, credentialRef, credentialFingerprint }  (verified shape)
 const LOADERS = {
+  // GCS: derive a stable fingerprint from the credential ref string for the
+  // status cache. Existing GCS session rows do not persist a fingerprint.
+  // initGoogleCredentialsFromS3IfNeeded() does not return a fingerprint, so
+  // we derive one here. Hashing the ref string is stable (same ref → same key)
+  // and cheap. It identifies the credential file, not the service-account identity,
+  // which is sufficient for status-cache keying.
   gcs: async (ref) => ({
     credentialsPath: await initGoogleCredentialsFromS3IfNeeded(ref),
-    credentialRef: ref
+    credentialRef: ref,
+    credentialFingerprint: `sha256:${crypto.createHash('sha256').update(ref).digest('hex')}`
   }),
   codesandbox: (ref) => loadCodeSandboxCredentials(ref),
   codespaces:  (ref) => loadCodespacesCredentials(ref)
@@ -273,8 +316,11 @@ async function loadForStatus(providerName, credentialRef) {
 /**
  * Check the status of one credential ref for a given provider.
  * Returns a normalized entry (never throws; errors become UNKNOWN entries).
+ * `displayName` is optional — the file basename from credentials-lister;
+ * used as the `credential` field in the response to avoid leaking absolute
+ * filesystem paths in local/s3fs modes.
  */
-async function getCredentialStatus(providerName, { credentialRef } = {}) {
+async function getCredentialStatus(providerName, { credentialRef, displayName } = {}) {
   // Reject 'pwd' and unknown providers before touching the factory.
   // provider-factory.getProvider('pwd') succeeds (pwd exists), so we block it here.
   const SUPPORTED_FOR_STATUS = new Set(['gcs', 'codesandbox', 'codespaces']);
@@ -296,10 +342,13 @@ async function getCredentialStatus(providerName, { credentialRef } = {}) {
   let raw;
   try {
     raw = await loadForStatus(providerName, credentialRef);
+    // Attach displayName so finalizeEntry → buildEntry can use it.
+    // Loaders don't return displayName; it comes from credentials-lister.
+    raw.displayName = displayName || null;
   } catch (loadError) {
     // Unresolvable ref → UNKNOWN entry, HTTP 200 (NFR: resilience)
     return buildUnknownEntry(
-      { provider: providerName, credentialRef, credentialFingerprint: null },
+      { provider: providerName, credentialRef, displayName, credentialFingerprint: null },
       loadError
     );
   }
@@ -309,26 +358,23 @@ async function getCredentialStatus(providerName, { credentialRef } = {}) {
   const key = raw.credentialFingerprint
     ? cacheKey(providerName, raw.credentialFingerprint)
     : null;
-  const cached = key ? getCachedStatus(key) : null;
-  if (cached) return cached;
 
+  // Check/cache only the upstream checker result.
+  // finalizeEntry (DB session count + precedence) always runs fresh — local
+  // session state changes frequently and the DB query is cheap (indexed).
+  // Caching the finalized entry would freeze localActiveSessions and the
+  // LIMITED status within the TTL.
   let result;
   try {
-    result = await provider.getCredentialStatus(raw);
+    result = key
+      ? await getOrCheckStatus(key, () => provider.getCredentialStatus(raw))
+      : await provider.getCredentialStatus(raw);
   } catch (error) {
     // Transient/unexpected failure → UNKNOWN, never cached
     return buildUnknownEntry(raw, error);
   }
 
-  const entry = await finalizeEntry(providerName, raw, result);  // ← must await: does async DB call
-
-  // Cache everything except UNKNOWN (covers both checker-returned UNKNOWN
-  // and any status that didn't match a known value). Skip entirely when no
-  // fingerprint (key === null).
-  if (key && entry.status !== 'UNKNOWN') {
-    putCachedStatus(key, entry);
-  }
-  return entry;
+  return finalizeEntry(providerName, raw, result);  // always fresh DB call
 }
 
 /**
@@ -344,8 +390,15 @@ async function listCredentialStatuses(providerName) {
     );
   }
   const { credentials, mode } = await listAvailableCredentials(prefix);
-  const settled = await Promise.allSettled(
-    credentials.map((c) => getCredentialStatus(providerName, { credentialRef: c.key }))
+  // Pass displayName (file basename from credentials-lister) so that
+  // buildEntry uses it as `credential` rather than the raw key, which is an
+  // absolute filesystem path in local/s3fs modes (e.g. /mount/codesandbox/account.json).
+  // A full listing can contain many credentials. Bound validation fan-out so a
+  // single request cannot burst-rate-limit the provider APIs.
+  const settled = await mapWithConcurrency(
+    credentials,
+    4,
+    (c) => getCredentialStatus(providerName, { credentialRef: c.key, displayName: c.displayName })
   );
   return {
     provider: providerName,
@@ -354,7 +407,7 @@ async function listCredentialStatuses(providerName) {
       r.status === 'fulfilled'
         ? r.value
         : buildUnknownEntry(
-            { provider: providerName, credentialRef: credentials[i].key },
+            { provider: providerName, credentialRef: credentials[i].key, displayName: credentials[i].displayName },
             r.reason
           )
     )
@@ -362,14 +415,51 @@ async function listCredentialStatuses(providerName) {
 }
 
 /**
+ * Like Promise.allSettled(items.map(mapper)), but starts no more than `limit`
+ * validations at once and preserves the input order.
+ */
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      try {
+        results[index] = { status: 'fulfilled', value: await mapper(items[index]) };
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason };
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, () => worker())
+  );
+  return results;
+}
+
+/**
  * Merge checker result with local DB state and assemble the final entry.
  */
 async function finalizeEntry(providerName, raw, checkerResult) {
-  const localCount = await countActiveSessions(db, providerName, raw.credentialFingerprint);
+  const localCount = await countActiveSessions(
+    db,
+    providerName,
+    raw.credentialFingerprint
+  );
 
   const candidates = [checkerResult.status];
   if (localCount > 0 && ENFORCES_TOKEN_UNIQUENESS.has(providerName)) {
     candidates.push('LIMITED');
+  }
+
+  const limitations = [...(checkerResult.limitations ?? [])];
+  if (providerName === 'gcs') {
+    limitations.push(limitation(
+      'details.localActiveSessions',
+      'Local active-session count is unavailable for GCS because existing session rows do not persist a canonical credential identity. GCS has no credential uniqueness constraint, so this does not affect availability.'
+    ));
   }
 
   const entry = buildEntry({
@@ -386,7 +476,7 @@ async function finalizeEntry(providerName, raw, checkerResult) {
   entry.details         = {
     ...(checkerResult.details ?? {}),  // provider extras first — explicit fields below win
     validated:           checkerResult.validated   ?? false,
-    limitations:         checkerResult.limitations ?? [],
+    limitations,
     localActiveSessions: localCount,
   };
 
@@ -499,6 +589,14 @@ CREDENTIAL_STATUS_CACHE_TTL_MS=300000   # optional, default 5 min (300000 ms)
    deferral).
 5. **Static limits**: included in every response via `quotas[].limit` +
    `details.referenceLimits` (cheap constants, high client value).
+6. **Aliases deferred** (`credential` field, spec open question #6): no alias
+   registry in v1. `credential` carries `displayName` (file basename) when
+   available from `credentials-lister`, falling back to `credentialRef`. This
+   prevents absolute filesystem paths from leaking in local/s3fs modes where
+   `credentials-lister` returns `key` as a full path (e.g. `/mount/codesandbox/account.json`)
+   but `displayName` is always `path.basename()` (e.g. `account.json`).
+   The list response also includes `mode` (`'local'`, `'s3fs'`, or `'s3-api'`)
+   as a convenience extension beyond the spec §8.1 example shape.
 
 ---
 
@@ -506,13 +604,32 @@ CREDENTIAL_STATUS_CACHE_TTL_MS=300000   # optional, default 5 min (300000 ms)
 
 - Cache: miss → hit within TTL → miss after TTL; `UNKNOWN` never cached
   regardless of whether it came from a thrown error or a returned value.
-- List mode: one failing credential does not affect others (`Promise.allSettled`).
+- Cache stores checker result only (not the finalized entry): calling the same
+  credential twice in quick succession hits the cache for the upstream call but
+  still runs `finalizeEntry` (DB count) fresh both times.
+- `LIMITED` status is never stored in the cache — it is produced by
+  `finalizeEntry` from local session state, not by the checker.
+- `QUOTA_EXHAUSTED`/`INVALID` cached for full TTL: a follow-up request within
+  the TTL returns the cached checker result without hitting upstream again, but
+  `localActiveSessions` and `LIMITED` promotion are still re-evaluated live.
+- List mode: one failing credential does not affect others; validations run at
+  a bounded concurrency of four and preserve credential-list order.
 - Precedence table unit tests, including `LIMITED`-from-local-constraint
   overriding `AVAILABLE`, and `QUOTA_EXHAUSTED` beating `LIMITED`.
-- `buildUnknownEntry`: error message is redacted; `errorCode` is preserved.
-- Redaction: no token/key material in entries or logs (fingerprint only).
+- `buildUnknownEntry`: preserves a safe `errorCode`, returns the stable generic
+  error message, and never exposes a filesystem path, S3 reference, token, or key.
+- GCS local-session count: `details.localActiveSessions === null` and
+  `details.limitations[]` explains that existing rows lack a canonical
+  credential identity. Verify GCS never produces `LIMITED` from local state.
+- Concurrent same-credential cache misses share one upstream checker request;
+  rejected and `UNKNOWN` results do not populate the cache.
 - Credential without fingerprint: check runs uncached (no
   `${provider}:undefined` cache-key collisions).
+- `credential` field in list mode uses `displayName` (file basename), not the
+  raw `key` (which is an absolute path in local/s3fs modes). Verify
+  `credential === 'account.json'` not `'/mount/codesandbox/account.json'`.
+- Unrecognized checker status (e.g. a typo'd string not in `PRECEDENCE`) →
+  `resolveStatus` returns `'UNKNOWN'` → entry is not cached.
 - Route ordering (defensive): `/:provider/credentials/status` registered before
   `/:id`; verify `gcs`, `codesandbox`, `codespaces` reach the status handler,
   never the session handler.
