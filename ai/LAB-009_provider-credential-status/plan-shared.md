@@ -217,10 +217,13 @@ local-constraint candidate and assemble the final envelope.
 
 ```javascript
 const { getProvider } = require('./provider-factory');
+const { ProviderError } = require('./errors/provider-errors');
+const db = require('../db/db');
+const { listAvailableCredentials } = require('./credentials-lister');
+const { cacheKey, getCachedStatus, putCachedStatus } = require('./status-cache');
 const { initGoogleCredentialsFromS3IfNeeded } = require('./google-credentials-loader');
 const { loadCodeSandboxCredentials } = require('./providers/codesandbox/credentials-loader');
 const { loadCodespacesCredentials } = require('./providers/codespaces/credentials-loader');
-// ...
 
 // Matches the actual S3/filesystem prefix used by each provider's credential
 // folder. Must match what credentials-lister.js already uses (verified from
@@ -381,21 +384,23 @@ async function finalizeEntry(providerName, raw, checkerResult) {
   entry.expiresAt       = checkerResult.expiresAt ?? null;
   entry.quotas          = checkerResult.quotas    ?? [];
   entry.details         = {
-    validated:          checkerResult.validated   ?? false,
-    limitations:        checkerResult.limitations ?? [],
+    ...(checkerResult.details ?? {}),  // provider extras first — explicit fields below win
+    validated:           checkerResult.validated   ?? false,
+    limitations:         checkerResult.limitations ?? [],
     localActiveSessions: localCount,
-    ...(checkerResult.details ?? {})
   };
 
   return entry;
 }
+
+module.exports = { getCredentialStatus, listCredentialStatuses };
 ```
 
 ### Error mapping (shared)
 
 | Failure stage | Result |
 |---|---|
-| Unknown provider or `pwd` | `ProviderError` → 404 via `mapErrorToHttp` |
+| Unknown provider or `pwd` | Service throws `ProviderError` (404, `CREDENTIAL_STATUS_UNSUPPORTED`) before `getProvider()` is called — `mapErrorToHttp` returns 404. Note: `UnsupportedProviderError` from the factory is 400, but the service never reaches the factory for unsupported providers. |
 | Provider lacks hook | 400 `CREDENTIAL_STATUS_UNSUPPORTED` |
 | Credential ref missing/unloadable in **single** mode | `UNKNOWN` entry, HTTP 200; `details.errorCode` carries the loader code (e.g. `CODESPACES_NO_CREDENTIAL`) |
 | Same in **list** mode | Per-credential `UNKNOWN` entry; other credentials unaffected |
@@ -436,13 +441,21 @@ to declare this method.
 
 ## 5. Routes (`src/routes/sessions.js`)
 
-Register the route **before** `router.get('/:id', ...)`. Not strictly required
-today — three-segment paths cannot match the single-segment `/:id` — but it
-keeps the router safe against future single-segment additions and reads better
-grouped with the other credential routes.
+Add the require at the top of the file alongside the other service imports:
 
 ```javascript
-// Register before GET /:id
+const credentialStatusService = require('../services/credential-status-service');
+```
+
+Register the route **alongside the other credential routes** (lines ~305–325,
+after `/codesandbox-credentials` and `/codespaces-credentials`) and **before**
+`router.get('/:id', ...)`. The `/:provider/credentials/status` path is three
+segments and cannot collide with the one-segment `/:id` in Express, but placing
+it in the credential-routes block is cleaner and keeps the router safe against
+future single-segment additions.
+
+```javascript
+// Alongside the existing /google-credentials, /codesandbox-credentials, /codespaces-credentials routes
 // GET /api/v1/sessions/:provider/credentials/status
 // GET /api/v1/sessions/:provider/credentials/status?credentialRef=gcloud/account-a.json
 router.get('/:provider/credentials/status', async (req, res) => {
