@@ -26,17 +26,70 @@ function profileDir() {
   return process.env.GITHUB_PROFILE_DIR || DEFAULT_PROFILE_DIR;
 }
 
+function browserOptions({ headless, channel } = {}) {
+  const options = {
+    headless: headless !== undefined ? headless : process.env.HEADFUL !== '1',
+    args: ['--no-sandbox'],
+  };
+
+  if (channel) options.channel = channel;
+  return options;
+}
+
+function shouldFallbackToBundledChromium(err) {
+  return /Chromium distribution 'chrome' is not found|Executable doesn't exist|browserType\.launch/i.test(String(err.message));
+}
+
+async function launchBrowserWithFallback(pw, { headless } = {}) {
+  const channel = process.env.CHROME_CHANNEL || 'chrome';
+  try {
+    return await pw.chromium.launch(browserOptions({ headless, channel }));
+  } catch (err) {
+    if (process.env.CHROME_CHANNEL || !shouldFallbackToBundledChromium(err)) throw err;
+    console.log('Google Chrome is not installed. Falling back to Playwright Chromium...');
+    return pw.chromium.launch(browserOptions({ headless }));
+  }
+}
+
+async function launchPersistentContextWithFallback(pw, dir, contextOptions, { headless } = {}) {
+  const channel = process.env.CHROME_CHANNEL || 'chrome';
+  try {
+    return await pw.chromium.launchPersistentContext(dir, {
+      ...browserOptions({ headless, channel }),
+      ...contextOptions,
+    });
+  } catch (err) {
+    if (process.env.CHROME_CHANNEL || !shouldFallbackToBundledChromium(err)) throw err;
+    console.log('Google Chrome is not installed. Falling back to Playwright Chromium...');
+    return pw.chromium.launchPersistentContext(dir, {
+      ...browserOptions({ headless }),
+      ...contextOptions,
+    });
+  }
+}
+
 async function launchGitHubBrowser({ headless } = {}) {
   const pw = resolvePlaywrightCore();
   const dir = profileDir();
-  const options = {
-    channel: process.env.CHROME_CHANNEL || 'chrome',
-    headless: headless !== undefined ? headless : process.env.HEADFUL !== '1',
-    viewport: { width: 1366, height: 850 },
-    args: ['--no-sandbox'],
-  };
+  const contextOptions = { viewport: { width: 1366, height: 850 } };
+
+  if (process.env.GITHUB_AUTH_FILE) {
+    const browser = await launchBrowserWithFallback(pw, { headless });
+    try {
+      const context = await browser.newContext({
+        ...contextOptions,
+        storageState: process.env.GITHUB_AUTH_FILE,
+      });
+      context.__ownedBrowser = browser;
+      return context;
+    } catch (err) {
+      await browser.close().catch(() => {});
+      throw err;
+    }
+  }
+
   try {
-    return await pw.chromium.launchPersistentContext(dir, options);
+    return await launchPersistentContextWithFallback(pw, dir, contextOptions, { headless });
   } catch (err) {
     if (/ProcessSingleton|SingletonLock|is already running|Failed to create/i.test(String(err.message))) {
       throw new Error(
@@ -49,8 +102,8 @@ async function launchGitHubBrowser({ headless } = {}) {
   }
 }
 
-function pickPage(context) {
-  return context.pages()[0] || context.newPage();
+async function pickPage(context) {
+  return context.pages()[0] || await context.newPage();
 }
 
 async function isLoggedIn(page) {
@@ -81,7 +134,7 @@ async function login(page) {
 }
 
 async function ensureSignedIn(context) {
-  const page = pickPage(context);
+  const page = await pickPage(context);
   if (!await isLoggedIn(page)) {
     await login(page);
   }
@@ -203,7 +256,11 @@ async function deleteCodespace(page, slug) {
 }
 
 async function closeBrowser(context) {
+  const browser = context.__ownedBrowser;
   try { await context.close(); } catch {}
+  if (browser) {
+    try { await browser.close(); } catch {}
+  }
 }
 
 module.exports = {
