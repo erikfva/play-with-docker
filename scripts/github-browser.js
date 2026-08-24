@@ -143,28 +143,156 @@ async function ensureSignedIn(context) {
 
 async function listCodespaces(page) {
   await page.goto('https://github.com/codespaces', { waitUntil: 'domcontentloaded' });
-  await page
-    .waitForSelector('main .Box-row', { timeout: 30000 })
-    .catch(() => {});
-  return page.$$eval('main .Box-row', (rows) =>
-    rows
-      .map((row) => {
-        const link = Array.from(row.querySelectorAll('a[href^="/codespaces/"]')).find((a) =>
-          /^\/codespaces\/[a-z0-9-]+$/.test(a.getAttribute('href') || '')
-        );
-        if (!link) return null;
-        const slug = link.getAttribute('href').split('/').pop();
-        const text = row.innerText;
-        const m = text.match(/\b(Stopped|Active|Running)\b/i);
-        return {
-          slug,
-          name: link.textContent.trim(),
-          status: m ? m[1].toLowerCase() : 'idle',
-        };
-      })
-      .filter(Boolean)
-      .filter((c, i, arr) => arr.findIndex((x) => x.slug === c.slug) === i)
-  );
+
+  // Wait for page to fully load - GitHub uses dynamic content
+  await page.waitForTimeout(3000);
+
+  // Try multiple possible selectors for the codespace list container
+  const containerSelectors = [
+    'main .Box-row',
+    'main [data-testid="codespace-list"] .Box-row',
+    'main .codespace-list .Box-row',
+    '[data-view-component="true"] .Box-row',
+    'main ul li',
+    'main .js-codespace-list-item',
+    'main article',
+    '.codespace-item',
+  ];
+
+  let rows = [];
+  for (const selector of containerSelectors) {
+    try {
+      await page.waitForSelector(selector, { timeout: 5000 });
+      const count = await page.locator(selector).count();
+      if (count > 0) {
+        rows = await page.locator(selector).all();
+        break;
+      }
+    } catch (e) {
+      // Try next selector
+    }
+  }
+
+  if (rows.length === 0) {
+    // Debug: dump page HTML for inspection
+    const html = await page.content();
+    console.log('No codespace rows found. Page title:', await page.title());
+    console.log('Page URL:', page.url());
+    const fs = require('fs');
+    fs.writeFileSync('debug-codespaces-page.html', html);
+    await page.screenshot({ path: 'debug-codespaces-page.png', fullPage: true });
+    console.log('Debug files saved: debug-codespaces-page.html, debug-codespaces-page.png');
+    return [];
+  }
+
+  // Extract data from found rows
+  const results = [];
+  for (const row of rows) {
+    try {
+      let slug = null;
+      let name = '';
+
+      // Strategy 1: Look for the display name in span.h5.pr-2 (GitHub's current UI)
+      try {
+        const nameEl = row.locator('span.h5.pr-2, .col-11.col-lg-6 span.h5, .col span.h5').first();
+        const candidateName = (await nameEl.textContent({ timeout: 1000 }) || '').trim();
+        if (candidateName && candidateName !== 'See repository') {
+          name = candidateName;
+        }
+      } catch (e) {
+        // Continue to other strategies
+      }
+
+      // Strategy 2: Get slug from action menu form (most reliable)
+      // The action menu has forms with action="/codespaces/<slug>"
+      try {
+        const forms = await row.locator('form[action^="/codespaces/"]').all();
+        for (const form of forms) {
+          const action = await form.getAttribute('action');
+          if (action) {
+            const slugMatch = action.match(/\/codespaces\/([a-z0-9-]+)/i);
+            if (slugMatch) {
+              slug = slugMatch[1];
+              break;
+            }
+          }
+        }
+      } catch (e) {
+        // Continue
+      }
+
+      // Strategy 3: Fallback to link analysis
+      if (!slug) {
+        const allLinks = await row.locator('a[href^="/codespaces/"]').all();
+        for (const link of allLinks) {
+          try {
+            const href = await link.getAttribute('href');
+            if (!href || href.includes('github.dev')) continue;
+
+            const slugMatch = href.match(/\/codespaces\/([a-z0-9-]+)/i);
+            if (!slugMatch) continue;
+
+            const text = (await link.textContent({ timeout: 500 }) || '').trim();
+            const skipNames = ['see repository', 'open in browser', 'code', '...', 'view', 'edit', 'settings', 'more', 'actions', 'uh oh!'];
+
+            if (!slug) slug = slugMatch[1];
+            if (text && !skipNames.includes(text.toLowerCase())) {
+              name = text;
+              slug = slugMatch[1];
+              break;
+            }
+          } catch (e) {
+            // Skip problematic links
+          }
+        }
+      }
+
+      // Strategy 4: Try to get name from other elements if we have slug but no name
+      if (slug && !name) {
+        const nameSelectors = [
+          'span.h5',
+          '.col-11.col-lg-6 .col span',
+          'h3 a:not([href*="github.dev"])',
+          'h4 a:not([href*="github.dev"])',
+          'h3',
+          'h4',
+          'strong',
+          '.codespace-name',
+          '[data-testid="codespace-name"]',
+        ];
+        const skipNames = ['see repository', 'open in browser', 'code', '...', 'view', 'edit', 'settings', 'more', 'actions', 'uh oh!'];
+        for (const ns of nameSelectors) {
+          try {
+            const el = row.locator(ns).first();
+            const text = (await el.textContent({ timeout: 500 }) || '').trim();
+            if (text && !skipNames.includes(text.toLowerCase())) {
+              name = text;
+              break;
+            }
+          } catch (e) {
+            // Continue to next selector
+          }
+        }
+      }
+
+      if (!slug) continue;
+
+      // Get status from row text
+      const rowText = await row.textContent({ timeout: 1000 }) || '';
+      const statusMatch = rowText.match(/\b(Stopped|Active|Running|Shutdown|Idle)\b/i);
+      const status = statusMatch ? statusMatch[1].toLowerCase() : 'idle';
+
+      results.push({ slug, name: name || slug, status });
+    } catch (e) {
+      console.log('Error parsing row:', e.message);
+    }
+  }
+
+  // Deduplicate by slug
+  const unique = results.filter((c, i, arr) => arr.findIndex((x) => x.slug === c.slug) === i);
+
+  console.log(`Found ${unique.length} codespaces:`, unique.map(c => `${c.name} (${c.slug}) - ${c.status}`).join(', '));
+  return unique;
 }
 
 async function waitForToast(page, text, timeoutMs = 15000) {
