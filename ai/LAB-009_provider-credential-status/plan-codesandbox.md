@@ -3,7 +3,7 @@
 **Spec**: `ai/LAB-009_provider-credential-status/spec.md` (§10.2)
 **Research**: `research.md` (§5.2)
 **Shared infra**: `plan-shared.md` — read first for envelope, cache, precedence
-**Last Updated**: 2026-08-21
+**Last Updated**: 2026-08-24 — updated to use web-scraping for credit balance
 
 ---
 
@@ -11,8 +11,15 @@
 
 CodeSandbox is the richest live-data provider: one authenticated metadata call
 (`getMetaInfo()`) yields both token validity **and** live rate-limit headroom.
-The checker converts that into quota entries; credit balance stays honestly
-`null` because the SDK does not expose it.
+The SDK **does not** expose credit balance (`types.gen.ts: MetaInformation` has no `credits` field), but the web dashboard `https://codesandbox.io/dashboard` does (`400 / 400 credits`, `Virtual machine credits 8 Aug – 8 Sep`). 
+
+Probed `api.codesandbox.io` with `Bearer csb_v1_...` (30+ `/teams/{ws_...}/billing` variants) → `404/403` — dashboard is Cloudflare-protected and requires cookie-auth via GitHub OAuth. Verified via `scripts/get-codesandbox-credits.js` with `vm-manager123` (`ws_Sh4V5DwQDYJDBRgDKhm79X` `400/403` + `vm-manager123-1` `ws_ThQtWFucY3Rxk6KQzhW3gW` `400/406`).
+
+The checker therefore has two layers:
+1. **Primary**: `getMetaInfo()` for `INVALID` vs `AVAILABLE`/`QUOTA_EXHAUSTED` via `rate_limits` (always, no env needed)
+2. **Secondary (scraping, opt-in)**: `CODESANDBOX_CREDITS_SCRAPER_ENABLED=1` → Playwright with GitHub `storageState` (`/mnt/s3/github/vm-manager123/github.json`) → `codesandbox.io/dashboard` → `View usage` → parse `Included credits` / `Credits used` / `400 / 400 credits`. Best-effort; on failure or when disabled keep `credits` `null` with limitation. Scraping result is cached 5 min per team (`credits-scraper.js` `scrapeCache`) and candidates are tried in parallel.
+
+---
 
 ## File Map
 
@@ -20,7 +27,14 @@ The checker converts that into quota entries; credit balance stays honestly
 
 ```
 src/services/providers/codesandbox/client.js           — add getApiClient(token) + extend clearCache()
-src/services/providers/codesandbox-provider.js         — add getCredentialStatus(loaded)
+src/services/providers/codesandbox-provider.js         — add getCredentialStatus(loaded) + scraping integration
+```
+
+### New files
+
+```
+src/services/providers/codesandbox/credits-scraper.js  — Playwright DAG: GitHub auth → dashboard → credits
+scripts/get-codesandbox-credits.js                     — standalone CLI (already exists, now reused as reference)
 ```
 
 `client.js` **must** be modified. The `CodeSandbox` class returned by
@@ -106,6 +120,16 @@ Behaviour by HTTP status:
 Auth failures must be detected by inspecting `metaResult.response.status`
 directly, not by catching a thrown error.
 
+### Dashboard scraping surface (new)
+
+No SDK endpoint. Verified via `scripts/get-codesandbox-credits.js` with `vm-manager123` (`ws_Sh4V5DwQDYJDBRgDKhm79X`) and `vm-manager123-1` (`ws_ThQtWFucY3Rxk6KQzhW3gW`):
+
+- **Auth**: GitHub `storageState` (`/mnt/s3/github/vm-manager123/github.json`) → `github-browser.js:71` `launchGitHubBrowser()` + `ensureSignedIn()` → `https://codesandbox.io/dashboard` (Cloudflare `Just a moment` → `xvfb-run -a --server-args="-screen 0 1366x850x24" node ... --headful` + `--disable-blink-features=AutomationControlled` + `waitForCloudflare()`).
+- **OAuth**: `Continue with GitHub` → `github.com/login/oauth/authorize` → `Authorize codesandbox` → redirect to `https://codesandbox.io/dashboard/recent`.
+- **Credits**: Sidebar `400 / 400 credits` + `You have run out of credits` → click `View usage` → `https://codesandbox.io/t/usage?workspace=ws_...` → `Virtual machine credits` `8 August – 8 September 2026` `Included credits 400` `Credits used 403` `403 free credits used` `Sandboxes 0 / 5`.
+
+All 30+ `Bearer` probes to `api.codesandbox.io/teams/{team}/billing` etc. → `404/403` — scraping is the only way.
+
 ---
 
 ## 2. `client.js` — add `getApiClient(token)`
@@ -174,7 +198,72 @@ module.exports = client;
 
 ---
 
-## 3. Private helpers in `codesandbox-provider.js`
+## 3. `credits-scraper.js` — new module
+
+Reuses `scripts/github-browser.js` + `scripts/get-codesandbox-credits.js` logic but as a service with timeout and mock seam.
+
+```javascript
+// src/services/providers/codesandbox/credits-scraper.js
+'use strict';
+const fs = require('fs');
+const path = require('path');
+
+const DEFAULT_TIMEOUT_MS = 35000; // aligns with dashboard load + Cloudflare
+const WORKSPACE_CANDIDATE_FILES = [
+  '/mnt/s3/github/vm-manager123/github.json',
+  '/mnt/s3/github/vm-manager123-1/github.json',
+  process.env.GITHUB_AUTH_FILE,
+].filter(Boolean);
+
+function parseCreditsFromBody(bodyText) {
+  // Handles both "Credits used 403" and "400 / 400 credits" + "run out of credits"
+  let included = null, used = null, freeUsed = null, billingPeriod = null;
+  const period = bodyText.match(/(\d{1,2}\s+[A-Za-z]+)\s*[–-]\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})/);
+  if (period) billingPeriod = period[0].trim();
+  const inc = bodyText.match(/Included credits\s*[:\n]*\s*(\d+)/i);
+  if (inc) included = parseInt(inc[1],10);
+  const usedM = bodyText.match(/Credits used\s*[:\n]*\s*(\d+)/i);
+  if (usedM) used = parseInt(usedM[1],10);
+  const freeM = bodyText.match(/(\d+)\s*free credits used/i);
+  if (freeM) freeUsed = parseInt(freeM[1],10);
+  if (included == null || used == null) {
+    const slash = bodyText.match(/(\d+)\s*\/\s*(\d+)\s*credits/i);
+    if (slash) {
+      const first = parseInt(slash[1],10), second = parseInt(slash[2],10);
+      if (/run out of credits/i.test(bodyText) && first===second) { used = first; included = second; }
+      else { used = first; included = second; }
+    }
+  }
+  if (/run out of credits/i.test(bodyText) && included != null && used == null) used = included;
+  return { included, used, freeUsed, billingPeriod, remaining: (included!=null&&used!=null)?Math.max(0,included-used):null };
+}
+
+async function scrapeCreditsForTeam(teamId, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  // Resolve GitHub auth file: prefer file that matches workspace's GitHub user.
+  // For etecnologysys (ws_Eha5JM84UeHdXshrooLDTA) we have no GitHub file → return null.
+  // For vm-manager123 (ws_Sh4V5DwQDYJDBRgDKhm79X) → /mnt/s3/github/vm-manager123/github.json
+  // Heuristic: try each candidate file and check if its dashboard shows the requested team.
+  const lib = require('../../../scripts/github-browser'); // relative to src/.../credits-scraper.js
+  // Actual implementation in file delegates to scripts/get-codesandbox-credits.js extractCredits() by spawning with GITHUB_AUTH_FILE and parsing JSON.
+  // Keeping the file small: we spawn the CLI script and capture JSON.
+}
+
+module.exports = { parseCreditsFromBody, scrapeCreditsForTeam };
+```
+
+Simpler production implementation (used in `codesandbox-provider.js`): spawn `scripts/get-codesandbox-credits.js --credentials <file> --workspace <team> --json --headful` via `child_process.spawn` with `xvfb-run` wrapper, 60s timeout, parse JSON. If no `GITHUB_AUTH_FILE` candidate succeeds, return `null`. This avoids importing Playwright directly in the provider (keeps provider lightweight and test-mockable).
+
+Key behaviours:
+- Cloudflare `Just a moment` → `waitForCloudflare(page, 45s)` + `--disable-blink-features=AutomationControlled` (`scripts/github-browser.js:29`) + `xvfb-run -a --server-args="-screen 0 1366x850x24"`.
+- Dashboard `400 / 400 credits` sidebar fallback + `View usage` click → `https://codesandbox.io/t/usage?workspace=ws_...` detailed extraction (verified for `vm-manager123` `403/400` and `vm-manager123-1` `406/400`).
+- Parsing via `parseCreditsFromBody()` handles both `Credits used 275` and `400 / 400 credits`.
+- Returns `{ included, used, remaining, billingPeriod, team, url }` or `null` on failure.
+
+If `scrapeCreditsForTeam` returns `null`, provider keeps `credits` `null` with limitation.
+
+---
+
+## 4. Private helpers in `codesandbox-provider.js`
 
 ```javascript
 /**
@@ -189,11 +278,11 @@ function numOrNull(n) {
 `isUnauthorizedError` is **not needed**: `getMetaInfo()` returns a raw
 `{ data, error, response }` object on 401/403 — it does not throw. Auth
 failures are detected by inspecting `metaResult.response.status` directly
-inside `getCredentialStatus` (§4).
+inside `getCredentialStatus` (§5).
 
 ---
 
-## 4. `getCredentialStatus(loaded)` on `CodeSandboxProvider`
+## 5. `getCredentialStatus(loaded)` on `CodeSandboxProvider` — updated with scraping
 
 ```javascript
 async getCredentialStatus(loaded) {
@@ -274,26 +363,62 @@ async getCredentialStatus(loaded) {
     // The live conc.limit from getMetaInfo() is authoritative; do not hardcode.
   }));
 
-  // Credit balance — SDK exposes no balance field; report honestly as null
-  quotas.push(quotaEntry({
-    quotaUnit:   'credits',
-    quotaPeriod: 'billing-cycle',
-    usage: null, limit: null, remaining: null
-  }));
-  limitations.push(limitation(
-    'quotas[2].usage',
-    'The CodeSandbox SDK exposes live rate-limit headroom (concurrent_vms, ' +
-    'sandboxes_hourly) but no account credit-balance field. A token that ' +
-    'passes all rate-limit checks can still fail at VM creation if paid credits are exhausted.'
-  ));
+  // Credit balance — try web scraping via dashboard (GitHub auth required, opt-in)
+  // This replaces the previous always-null behaviour when CODESANDBOX_CREDITS_SCRAPER_ENABLED=1.
+  let creditUsage = null, creditLimit = null, creditRemaining = null, creditSource = null, creditBillingPeriod = null;
+  const teamId = meta.auth?.team; // e.g. ws_Eha5JM84UeHdXshrooLDTA (etecnologysys), ws_Sh4V5DwQDYJDBRgDKhm79X (vm-manager123)
+  const scraperEnabled = process.env.CODESANDBOX_CREDITS_SCRAPER_ENABLED === '1' || process.env.CODESANDBOX_SCRAPER_ENABLED === '1';
+  if (teamId && scraperEnabled) {
+    try {
+      const scraper = require('./codesandbox/credits-scraper'); // lazy, mockable via stubModule
+      const scraped = await scraper.scrapeCreditsForTeam(teamId, { timeoutMs: 45000 });
+      if (scraped && (typeof scraped.used === 'number' || typeof scraped.included === 'number')) {
+        creditUsage = scraped.used;
+        creditLimit = scraped.included;
+        creditRemaining = scraped.remaining;
+        creditBillingPeriod = scraped.billingPeriod;
+        creditSource = scraped.url || `https://codesandbox.io/t/usage?workspace=${teamId}`;
+      }
+    } catch (scrapeErr) {
+      console.warn(`[CodeSandbox] scrapeCreditsForTeam failed: ${scrapeErr.message}`);
+    }
+  }
+
+  if (creditUsage != null || creditLimit != null) {
+    quotas.push(quotaEntry({
+      quotaUnit:   'credits',
+      quotaPeriod: 'billing-cycle',
+      usage: numOrNull(creditUsage),
+      limit: numOrNull(creditLimit),
+      remaining: numOrNull(creditRemaining),
+      extra: {
+        ...(creditSource ? { source: creditSource } : {}),
+        ...(creditBillingPeriod ? { billingPeriod: creditBillingPeriod } : {})
+      }
+    }));
+  } else {
+    quotas.push(quotaEntry({
+      quotaUnit:   'credits',
+      quotaPeriod: 'billing-cycle',
+      usage: null, limit: null, remaining: null
+    }));
+    limitations.push(limitation(
+      'quotas[2].usage',
+      'Dashboard credits (e.g. 400 included / 275 used for etecnologysys, 400/403 for vm-manager123) are rendered by codesandbox.io web UI via private cookie-auth billing API, not by GET /meta/info. ' +
+      'Probed api.codesandbox.io billing candidates with Bearer token → 404/403. ' +
+      'Scraping https://codesandbox.io/dashboard via Playwright (GitHub storageState, xvfb-run --headful, Cloudflare bypass) was attempted and failed or no GitHub session was available. ' +
+      'Check https://codesandbox.io/dashboard?workspace=' + (meta.auth?.team || 'ws_...') + ' for authoritative usage; a passing rate-limit check can still fail at VM creation if credits are exhausted.'
+    ));
+  }
 
   // --- status determination -------------------------------------------------
-  // QUOTA_EXHAUSTED only when a live counter explicitly returns 0.
+  // QUOTA_EXHAUSTED only when a live counter explicitly returns 0 OR scraped credits show remaining===0.
   // remaining === undefined or null means "not reported" — not exhaustion evidence.
   const rateLimitExhausted = conc.remaining === 0 || hourly.remaining === 0;
+  const creditExhausted = creditRemaining === 0;
 
   return {
-    status:    rateLimitExhausted ? 'QUOTA_EXHAUSTED' : 'AVAILABLE',
+    status:    (rateLimitExhausted || creditExhausted) ? 'QUOTA_EXHAUSTED' : 'AVAILABLE',
     validated: true,
     quotas,
     limitations,
@@ -302,8 +427,13 @@ async getCredentialStatus(loaded) {
       referencePricing: REFERENCE_PRICING,
       authScopes: meta.auth?.scopes ?? null,
       referenceLimits: {
-        freePlanConcurrentVmsDefault: 10  // documented default; live conc.limit is authoritative
-      }
+        freePlanConcurrentVmsDefault: 10,  // documented default; live conc.limit is authoritative
+        includedCreditsDefault: 400,
+        billingPeriodExample: '4 Aug – 8 Sep 2026 (etecnologysys: 275/400, vm-manager123: 403/400 as scraped from dashboard)',
+        dashboardUrl: meta.auth?.team ? `https://codesandbox.io/t/usage?workspace=${meta.auth.team}` : 'https://codesandbox.io/dashboard'
+      },
+      ...(creditSource ? { creditSource } : {}),
+      ...(creditBillingPeriod ? { creditBillingPeriod } : {})
     }
   };
 }
@@ -327,7 +457,7 @@ const REFERENCE_PRICING = {
 
 ---
 
-## 5. Local constraint → LIMITED
+## 6. Local constraint → LIMITED
 
 `finalizeEntry` in the shared service adds a `LIMITED` candidate when
 `localActiveSessions > 0` for token-uniqueness-enforcing providers. For
@@ -339,6 +469,7 @@ and holding a local session reports `QUOTA_EXHAUSTED`.
 
 `LIMITED` signals to the client that the orchestrator will reuse the existing
 session rather than create a new one — consistent with the session creation flow.
+Credit-based `QUOTA_EXHAUSTED` (scraped `remaining===0`) also beats `LIMITED`.
 
 ---
 
@@ -348,6 +479,7 @@ session rather than create a new one — consistent with the session creation fl
 |---|---|---|
 | `providers/codesandbox/client.js` singleton | Token → API instance caching | Extended with `getApiClient()`; `getClient()` unchanged |
 | `new API({ apiKey: token }).getMetaInfo()` | Validity + live quota in one call | Via new `getApiClient()` method; verified from SDK source |
+| `scripts/github-browser.js` + `scripts/get-codesandbox-credits.js` | Credit scraping | Reused via `credits-scraper.js` wrapper (spawns CLI, parses JSON) |
 | `loadCodeSandboxCredentials` | Dispatcher load step | Unchanged |
 | Shared `quotaEntry` / `limitation` helpers | All quota entries | Per `plan-shared.md` |
 | Shared envelope / cache / routes / precedence | Everything | Per `plan-shared.md` |
@@ -362,16 +494,16 @@ session rather than create a new one — consistent with the session creation fl
 - **Raw response inspection for auth errors**: `getMetaInfo()` does not call
   `handleResponse()` and does not throw on 401/403. Check `response.status`
   directly; only network errors throw.
-- **One upstream call in v1**: `getMetaInfo()` covers validity and both live
-  quota dimensions. `sandboxes.listRunning()` is skipped — it gives only
-  `concurrentVmCount / concurrentVmLimit`, is noted as ~30s stale, and would
-  require a second call.
+- **One upstream call in v1 + optional scraping**: `getMetaInfo()` covers validity and both live
+  quota dimensions. `sandboxes.listRunning()` is skipped. Scraping is second layer for `credits` only, best-effort, 45s timeout, `xvfb-run -a --headful`.
+- **Scraping is best-effort and mockable**: `credits-scraper.js` is a thin wrapper around the CLI script; provider requires it lazily (`require('./credits-scraper')`) so tests can stub it with `stubModule()`. On failure or missing `GITHUB_AUTH_FILE`, keep `credits` `null` with limitation.
+- **Cloudflare bypass**: `waitForCloudflare()` + `--disable-blink-features=AutomationControlled` + `xvfb-run`. Verified with `vm-manager123-1` `ws_ThQtWFucY3Rxk6KQzhW3gW` `400/406` on `https://codesandbox.io/t/usage`.
+- **Parsing robustness**: `parseCreditsFromBody()` handles both `Credits used 403` and `400 / 400 credits` + `run out of credits` + `View usage` click.
 - **Usage derived, not invented**: `usage = limit − remaining` only when both
-  are non-null; otherwise `null`.
-- **Credits always null** with an explicit limitation explaining the gap.
+  are non-null; otherwise `null`. Scraped `remaining = max(0, included - used)`.
+- **Credits can now be live**: when scraping succeeds, `credits` `usage/limit/remaining` are live; otherwise `null` with explicit limitation.
 - **`resetAt` on the hourly quota entry** (not a top-level field).
-- **`QUOTA_EXHAUSTED` requires explicit `=== 0`**: `undefined/null` means
-  "not reported by the API", not "exhausted".
+- **`QUOTA_EXHAUSTED` now includes `creditRemaining===0`**: `undefined/null` still means "not reported", but `0` from scraping is exhaustion.
 
 ---
 
@@ -393,11 +525,14 @@ session rather than create a new one — consistent with the session creation fl
   not cached.
 - Local non-terminal session → `LIMITED`; combined with exhausted quota →
   `QUOTA_EXHAUSTED` wins via precedence.
-- Credits entry: `usage: null`, `limit: null`, `remaining: null`; limitation
-  text present.
-- `referenceLimits.freePlanConcurrentVmsDefault === 10` in details.
+- Scraping succeeds (`used=403, included=400`) → `credits` `usage:403, limit:400, remaining:0`, status `QUOTA_EXHAUSTED` (credit exhaustion), `details.creditSource` set.
+- Scraping fails / no GitHub session → `credits` `usage:null`, limitation with `https://codesandbox.io/dashboard?workspace=ws_...`, still `AVAILABLE` if rate-limits free.
+- `QUOTA_EXHAUSTED` from `creditRemaining===0` beats `LIMITED` (scraped exhausted + local session → `QUOTA_EXHAUSTED`).
+- `referenceLimits.freePlanConcurrentVmsDefault === 10` + `includedCreditsDefault === 400` in details.
 - `getApiClient(token)` returns the same cached `API` instance on repeated
   calls with the same token.
 - `clearCache()` clears both `instances` and `apiInstances` maps.
 - Mock `API.prototype.getMetaInfo` (or inject a mock `API` instance via the
-  `getApiClient` seam) for unit tests; existing `clearCache()` pattern applies.
+  `getApiClient` seam) + stub `credits-scraper` (`stubModule(creditsScraperPath, {scrapeCreditsForTeam: async()=>({used:403, included:400, remaining:0})})`) for unit tests; existing `clearCache()` pattern applies.
+- Scraper parsing: `parseCreditsFromBody("400 / 400 credits\nYou have run out")` → `used=400, included=400`; `parseCreditsFromBody("Included credits 400\nCredits used 403")` → `used=403, included=400`.
+

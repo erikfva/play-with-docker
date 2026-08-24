@@ -6,6 +6,7 @@ const { ProviderError } = require('../services/errors/provider-errors');
 const keepAliveService = require('../services/keep-alive-service');
 const { listAvailableCredentials } = require('../services/credentials-lister');
 const { initGoogleCredentialsFromS3IfNeeded } = require('../services/google-credentials-loader');
+const credentialStatusService = require('../services/credential-status-service');
 const { getRowValue } = require('../utils/helpers');
 
 const router = express.Router();
@@ -332,6 +333,19 @@ router.get('/codespaces-credentials', async (req, res) => {
   }
 });
 
+router.get('/:provider/credentials/status', async (req, res) => {
+  try {
+    const { provider } = req.params;
+    const { credentialRef } = req.query;
+    const result = credentialRef
+      ? await credentialStatusService.getCredentialStatus(provider, { credentialRef })
+      : await credentialStatusService.listCredentialStatuses(provider);
+    return res.json(result);
+  } catch (error) {
+    return mapErrorToHttp(res, error, 'Failed to check credential status');
+  }
+});
+
 router.get('/', async (req, res) => {
   const { status, provider } = req.query;
   const conditions = [];
@@ -482,7 +496,11 @@ router.delete('/:id', async (req, res) => {
       }
     }
 
-    await db.run('DELETE FROM sessions WHERE id = ?', [row.id]);
+    if (row.provider === 'codespaces') {
+      await db.run("UPDATE sessions SET status = 'TERMINATED' WHERE id = ?", [row.id]);
+    } else {
+      await db.run('DELETE FROM sessions WHERE id = ?', [row.id]);
+    }
 
     const response = {
       message: `Session ${row.id} (${row.provider}) terminated and removed from orchestrator.`,

@@ -1,4 +1,4 @@
-@baseUrl = http://localhost:3000/api/v1
+@baseUrl = http://localhost:3200/api/v1
 @s3EndPoint = {{$dotenv CODE_S3_ENDPOINT}}
 @s3AccessKeyId = {{$dotenv CODE_AWS_ACCESS_KEY_ID}}
 @s3SecretAccessKey = {{$dotenv CODE_AWS_SECRET_ACCESS_KEY}}
@@ -368,4 +368,65 @@ X-Server-Token: {{serverToken}}
 
 ### 29. Terminate Codespaces Session
 DELETE {{baseUrl}}/sessions/{{codespacesSessionId}}
+X-Server-Token: {{serverToken}}
+
+###
+# LAB-009 Provider Credential Status and Availability Tests
+# Validates the normalized credential status contract per spec §8-§10.
+# Each credential returns: provider, credential, credentialFingerprint,
+# status (AVAILABLE|UNAVAILABLE|INVALID|EXPIRED|QUOTA_EXHAUSTED|LIMITED|UNKNOWN),
+# checkedAt, expiresAt, quotas[] (quotaUnit, quotaPeriod, usage), details.limitations
+
+### 30. List GCS Credential Status - All Discovered Credentials
+# Expected: 200 { provider:"gcs", mode, credentials:[{ provider, credential, credentialFingerprint, status, checkedAt, expiresAt, quotas:[{quotaUnit:"hours", quotaPeriod:"week", usage:null, limit:50}], details:{validated, limitations, localActiveSessions:null, referenceLimits}}] }
+# GCS usage is always null with a limitation explaining the REST API does not expose remaining hours.
+GET {{baseUrl}}/sessions/gcs/credentials/status
+X-Server-Token: {{serverToken}}
+
+### 31. Check Single GCS Credential Status
+# credentialRef may contain slashes, so it is passed as a query param (spec §8.2).
+# Expected: 200 single entry with same shape as list; status AVAILABLE if credential valid, INVALID/EXPIRED/UNAVAILABLE otherwise.
+GET {{baseUrl}}/sessions/gcs/credentials/status?credentialRef={{googleCredentials}}
+X-Server-Token: {{serverToken}}
+
+### 32. List CodeSandbox Credential Status - All Discovered Credentials
+# Expected: 200 { provider:"codesandbox", mode, credentials:[{ status, quotas:[{quotaUnit:"count", quotaPeriod:"hourly-window", usage, limit, remaining, resetAt}, {quotaUnit:"count", quotaPeriod:null, usage, limit, remaining}, {quotaUnit:"credits", quotaPeriod:"billing-cycle", usage:null}], details:{referencePricing, authScopes, referenceLimits}}] }
+# Live headroom from getMetaInfo(): 401/403 → INVALID, remaining===0 → QUOTA_EXHAUSTED, otherwise AVAILABLE; LIMITED if local session exists for fingerprint.
+GET {{baseUrl}}/sessions/codesandbox/credentials/status
+X-Server-Token: {{serverToken}}
+
+### 33. Check Single CodeSandbox Credential Status
+# Expected: 200 single entry; verify quotaUnit values are normalized (count, credits) and quotaPeriod null for instantaneous concurrent_vms.
+GET {{baseUrl}}/sessions/codesandbox/credentials/status?credentialRef={{codeSandboxCredentials}}
+X-Server-Token: {{serverToken}}
+
+### 34. List Codespaces Credential Status - All Discovered Credentials
+# Expected: 200 { provider:"codespaces", mode, credentials:[{ status, quotas:[{quotaUnit:"core-hours", quotaPeriod:"month", usage, limit, remaining}, {quotaUnit:"GB-month", quotaPeriod:"month", usage, limit, remaining}], details:{referenceLimits, plan, adoptable, adoptedCodespaceState}}] }
+# adoptable===0 → UNAVAILABLE with adopt-don't-create reason; billing usage null with limitation when Plan permission missing; compute in core-hours not clock hours.
+GET {{baseUrl}}/sessions/codespaces/credentials/status
+X-Server-Token: {{serverToken}}
+
+### 35. Check Single Codespaces Credential Status
+# Expected: 200 single entry; plan "pro" → limit 180 core-hours / 20 GB-month, otherwise 120 / 15; remaining derived as limit-usage when billing accessible.
+GET {{baseUrl}}/sessions/codespaces/credentials/status?credentialRef={{codespacesCredentials}}
+X-Server-Token: {{serverToken}}
+
+### 36. Credential Status - Unknown Provider Should Return 404
+# Expected: 404 { code:"CREDENTIAL_STATUS_UNSUPPORTED" }
+GET {{baseUrl}}/sessions/unknown/credentials/status
+X-Server-Token: {{serverToken}}
+
+### 37. Credential Status - PWD Provider Not Supported Should Return 404
+# Expected: 404 { code:"CREDENTIAL_STATUS_UNSUPPORTED" }  - pwd exists in factory but is explicitly blocked for status checks.
+GET {{baseUrl}}/sessions/pwd/credentials/status
+X-Server-Token: {{serverToken}}
+
+### 38. Credential Status - Unresolvable Credential Ref Returns UNKNOWN (200)
+# Expected: 200 { status:"UNKNOWN", details:{ errorCode, errorMessage:"Credential status could not be determined." } }  - per NFR resilience, not 4xx.
+GET {{baseUrl}}/sessions/codesandbox/credentials/status?credentialRef=codesandbox/does-not-exist.json
+X-Server-Token: {{serverToken}}
+
+### 39. Credential Status - Cache Check (Repeat List Should Hit 5-Minute TTL)
+# Expected: 200 same as #32 but served from status-cache (no upstream call) when credential Fingerprint unchanged and status != UNKNOWN.
+GET {{baseUrl}}/sessions/codesandbox/credentials/status
 X-Server-Token: {{serverToken}}
