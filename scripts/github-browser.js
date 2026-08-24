@@ -29,7 +29,13 @@ function profileDir() {
 function browserOptions({ headless, channel } = {}) {
   const options = {
     headless: headless !== undefined ? headless : process.env.HEADFUL !== '1',
-    args: ['--no-sandbox'],
+    args: [
+      '--no-sandbox',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-dev-shm-usage',
+      '--disable-infobars',
+      '--window-size=1366,850',
+    ],
   };
 
   if (channel) options.channel = channel;
