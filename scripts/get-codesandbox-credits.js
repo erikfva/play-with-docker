@@ -5,16 +5,16 @@ try { require('dotenv').config(); } catch {}
 
 const fs = require('fs');
 const path = require('path');
-const lib = require('./github-browser');
 
 function parseArgs(argv) {
-  const args = { workspace: null, json: false, headless: undefined };
+  const args = { workspace: null, json: false, headless: undefined, apiOnly: false };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--help' || a === '-h') args.help = true;
     else if (a === '--json') args.json = true;
     else if (a === '--headless') args.headless = true;
     else if (a === '--headful') args.headless = false;
+    else if (a === '--api-only') args.apiOnly = true;
     else if (a === '--workspace' || a === '--team') {
       const v = argv[++i];
       if (!v || v.startsWith('--')) throw new Error(`${a} requires a value`);
@@ -33,20 +33,28 @@ function parseArgs(argv) {
 
 function printUsage() {
   console.log(`Usage:
-  node scripts/get-codesandbox-credits.js --credentials <github-auth.json> [--workspace <ws_...>] [--json] [--headful]
+  node scripts/get-codesandbox-credits.js [--api-only] [--credentials <github-auth.json>] [--workspace <ws_...>] [--json] [--headful]
 
 Options:
-  --credentials <path>  Playwright storageState file for GitHub (created by github auth). Also honors GITHUB_AUTH_FILE env.
-  --workspace <id>      CodeSandbox workspace/team id (e.g. ws_Eha5JM84UeHdXshrooLDTA). If omitted, uses dashboard default.
+  --api-only            Use the CodeSandbox API (no browser required). Uses --token-file or CODESANDBOX_TOKEN env.
+  --token-file <path>   CodeSandbox API token file (JSON with {token:...} or plain text). Used by --api-only.
+  --credentials <path>  Playwright storageState file for GitHub (browser mode only). Also honors GITHUB_AUTH_FILE env.
+  --workspace <id>      CodeSandbox workspace/team id (e.g. ws_Eha5JM84UeHdXshrooLDTA). If omitted, uses API default.
   --json                Output raw JSON only
   --headful             Run with visible browser (HEADFUL=1)
   --headless            Force headless
 
 Examples:
-  node scripts/get-codesandbox-credits.js --credentials ./github-auth.json --json
+  node scripts/get-codesandbox-credits.js --api-only --json
+  node scripts/get-codesandbox-credits.js --api-only --token-file ./credentials/codesandbox/vm-manager1.json --json
   node scripts/get-codesandbox-credits.js --credentials ./github-auth.json --workspace ws_Eha5JM84UeHdXshrooLDTA --headful
 
-Flow:
+Flow (--api-only, default):
+  1. Load CodeSandbox API token from --token-file, CODESANDBOX_TOKEN env, or auto-discover from credentials/codesandbox/
+  2. Call api.codesandbox.io/meta/info to validate token and get rate limits + team id
+  3. Return available API data (rate limits, scopes, team). Dashboard credits are API-inaccessible.
+
+Flow (browser mode, --credentials):
   1. Launch Playwright with GitHub session (via --credentials or GITHUB_PROFILE_DIR)
   2. Ensure GitHub signed in (re-login with TEST_GH_USER/TEST_GH_PASS if needed)
   3. Navigate to https://codesandbox.io/dashboard (OAuth via GitHub if needed)
@@ -413,11 +421,184 @@ async function extractCredits(page) {
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// API-only path (no browser required)
+// ---------------------------------------------------------------------------
+
+function discoverCodeSandboxTokenFile() {
+  const credDir = path.resolve(__dirname, '..', 'credentials', 'codesandbox');
+  if (!fs.existsSync(credDir)) return null;
+  const files = fs.readdirSync(credDir).filter(f => f.endsWith('.json'));
+  // Prefer well-known names, then first available
+  const preferred = ['etecnologysys.json', 'vm-manager1.json', 'vmmanager1.json'];
+  for (const name of preferred) {
+    if (files.includes(name)) return path.join(credDir, name);
+  }
+  return files.length ? path.join(credDir, files[0]) : null;
+}
+
+function loadCodeSandboxToken(tokenFilePath) {
+  // 1. Explicit --token-file
+  if (tokenFilePath) {
+    const abs = path.resolve(tokenFilePath);
+    if (!fs.existsSync(abs)) throw new Error(`Token file not found: ${abs}`);
+    return parseTokenFile(abs);
+  }
+  // 2. CODESANDBOX_TOKEN env (raw token string)
+  if (process.env.CODESANDBOX_TOKEN) return process.env.CODESANDBOX_TOKEN.trim();
+  // 3. CODESANDBOX_TOKEN_FILE env
+  if (process.env.CODESANDBOX_TOKEN_FILE && fs.existsSync(process.env.CODESANDBOX_TOKEN_FILE)) {
+    return parseTokenFile(process.env.CODESANDBOX_TOKEN_FILE);
+  }
+  // 4. Auto-discover from credentials/codesandbox/
+  const discovered = discoverCodeSandboxTokenFile();
+  if (discovered) return parseTokenFile(discovered);
+  throw new Error(
+    'No CodeSandbox API token found. Supply one via:\n' +
+    '  --token-file <path>\n' +
+    '  CODESANDBOX_TOKEN=csb_v1_...\n' +
+    '  CODESANDBOX_TOKEN_FILE=<path>\n' +
+    'or place a .json file in credentials/codesandbox/'
+  );
+}
+
+function parseTokenFile(filePath) {
+  const raw = fs.readFileSync(filePath, 'utf8').trim();
+  try {
+    const obj = JSON.parse(raw);
+    if (obj && typeof obj.token === 'string') return obj.token.trim();
+    // Some files embed the token as a plain JSON string
+    if (typeof obj === 'string') return obj.trim();
+  } catch {
+    // Plain text token file
+  }
+  return raw;
+}
+
+async function fetchCreditsViaApi({ tokenFilePath, workspace, json }) {
+  const token = loadCodeSandboxToken(tokenFilePath);
+
+  // 1. Validate token + get metadata
+  const metaRes = await fetch('https://api.codesandbox.io/meta/info', {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+  });
+  if (!metaRes.ok) {
+    const body = await metaRes.text().catch(() => '');
+    throw new Error(`CodeSandbox API returned ${metaRes.status}: ${body.slice(0, 200)}`);
+  }
+  const meta = await metaRes.json();
+  const teamId = workspace || meta.auth?.team || null;
+
+  const rl = meta.rate_limits || {};
+  const hourly = rl.sandboxes_hourly || {};
+  const concurrent = rl.concurrent_vms || {};
+
+  // 2. Try additional endpoints that may expose credits (best-effort, all may 404)
+  let creditUsage = null;
+  let creditLimit = null;
+  let creditRemaining = null;
+  let billingPeriod = null;
+
+  if (teamId) {
+    for (const ep of [
+      `https://api.codesandbox.io/v1/teams/${teamId}/credits`,
+      `https://api.codesandbox.io/v1/teams/${teamId}/billing`,
+      `https://api.codesandbox.io/v1/teams/${teamId}/usage`,
+    ]) {
+      try {
+        const r = await fetch(ep, {
+          headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+        });
+        if (r.ok) {
+          const j = await r.json().catch(() => null);
+          if (j) {
+            // Try to extract credit numbers from whatever shape the response has
+            const flat = JSON.stringify(j);
+            const usedM = flat.match(/"(?:used|consumed|spent)[^"]*"\s*:\s*(\d+)/i);
+            const limitM = flat.match(/"(?:limit|included|total|quota)[^"]*"\s*:\s*(\d+)/i);
+            if (usedM) creditUsage = parseInt(usedM[1], 10);
+            if (limitM) creditLimit = parseInt(limitM[1], 10);
+            break; // Got a response, stop probing
+          }
+        }
+      } catch {}
+    }
+  }
+
+  if (creditUsage != null && creditLimit != null) {
+    creditRemaining = Math.max(0, creditLimit - creditUsage);
+  }
+
+  const output = {
+    ok: true,
+    mode: 'api',
+    workspace: teamId,
+    team: teamId,
+    billingPeriod,
+    includedCredits: creditLimit,
+    usedCredits: creditUsage,
+    remainingCredits: creditRemaining,
+    freeCreditsUsed: null,
+    sandboxes: null,
+    vmsActive: null,
+    apiCandidates: [],
+    rawExcerpt: JSON.stringify(meta, null, 2),
+    rateLimits: {
+      hourly: { limit: hourly.limit ?? null, remaining: hourly.remaining ?? null },
+      concurrent: { limit: concurrent.limit ?? null, remaining: concurrent.remaining ?? null },
+    },
+    authScopes: meta.auth?.scopes ?? [],
+    fetchedAt: new Date().toISOString(),
+  };
+
+  if (creditUsage == null && creditLimit == null) {
+    // API doesn't expose credits — report what we have and suggest dashboard
+    output.ok = true; // token is valid even if credits aren't API-accessible
+    output._note =
+      'Dashboard credits are not exposed by the CodeSandbox API. ' +
+      'Rate limits and token validity are confirmed above. ' +
+      'Check https://codesandbox.io/t/usage' + (teamId ? '?workspace=' + teamId : '') + ' for credit usage.';
+  }
+
+  return output;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
     printUsage();
     return;
+  }
+
+  // On a headless VPS (no $DISPLAY), re-exec under xvfb-run for browser mode.
+  // Headed Chromium via xvfb-run passes Cloudflare challenges that block headless.
+  const needsBrowser = args.apiOnly !== true && (args.credentials || process.env.GITHUB_AUTH_FILE || process.env.GITHUB_PROFILE_DIR);
+  if (needsBrowser && !process.env.DISPLAY && !process.env._XVFB_REEXEC) {
+    const xvfb = '/usr/bin/xvfb-run';
+    if (fs.existsSync(xvfb)) {
+      console.log('No $DISPLAY — re-executing under xvfb-run for Cloudflare compatibility...');
+      const { execFileSync } = require('child_process');
+      try {
+        execFileSync(xvfb, [
+          '-a', '--server-args=-screen 0 1366x850x24',
+          process.execPath, process.argv[1], ...process.argv.slice(2),
+        ], { stdio: 'inherit', env: { ...process.env, _XVFB_REEXEC: '1' } });
+        return;
+      } catch (e) {
+        if (e.status != null) process.exit(e.status);
+        throw e;
+      }
+    }
+    // xvfb-run not available — fall through with headless (may fail on Cloudflare)
+    console.warn('Warning: no $DISPLAY and xvfb-run not found. Cloudflare challenges may block headless.');
+    args.headless = true;
+  } else if (needsBrowser && !process.env.DISPLAY) {
+    // Already re-executed under xvfb-run, force headed for Cloudflare
+    args.headless = false;
   }
 
   // Handle credentials file like other scripts: set GITHUB_AUTH_FILE env
@@ -429,6 +610,44 @@ async function main() {
   if (args.workspace) process.env.CODESANDBOX_WORKSPACE = args.workspace;
   if (args.headless !== undefined) process.env.HEADFUL = args.headless ? '0' : '1';
 
+  // API-only path — no browser required
+  if (args.apiOnly || (!args.credentials && !process.env.GITHUB_AUTH_FILE && !process.env.GITHUB_PROFILE_DIR)) {
+    try {
+      const output = await fetchCreditsViaApi({
+        tokenFilePath: args.tokenFile,
+        workspace: args.workspace,
+        json: args.json,
+      });
+      if (args.json) {
+        console.log(JSON.stringify(output, null, 2));
+      } else {
+        console.log('\n=== CodeSandbox Credits (API) ===');
+        console.log(`Workspace: ${output.workspace || 'default'}`);
+        if (output._note) console.log(`Note: ${output._note}`);
+        console.log(`Included credits: ${output.includedCredits ?? 'N/A via API'}`);
+        console.log(`Credits used: ${output.usedCredits ?? 'N/A via API'}`);
+        console.log(`Remaining: ${output.remainingCredits ?? 'N/A via API'}`);
+        console.log(`Rate limits: ${JSON.stringify(output.rateLimits)}`);
+        console.log(`Auth scopes: ${output.authScopes.join(', ')}`);
+      }
+      return;
+    } catch (err) {
+      if (args.apiOnly) {
+        console.error(`API-only mode failed: ${err.message}`);
+        process.exit(1);
+      }
+      // If auto-detect chose API but it failed, and credentials were supplied, fall through to browser
+      if (!args.credentials && !process.env.GITHUB_AUTH_FILE && !process.env.GITHUB_PROFILE_DIR) {
+        console.error(`API-only mode failed: ${err.message}`);
+        console.error('No browser credentials available (--credentials). Cannot fall back to browser mode.');
+        process.exit(1);
+      }
+      console.error(`API fetch failed (${err.message}), falling back to browser mode...`);
+    }
+  }
+
+  // Browser path (requires Playwright + browser)
+  const lib = require('./github-browser');
   const context = await lib.launchGitHubBrowser({ headless: args.headless });
   try {
     const page = await lib.ensureSignedIn(context);
@@ -509,10 +728,22 @@ async function main() {
     }
 
     if (!credits.ok) {
-      console.error('\nFailed to extract credits. Try --headful and DEBUG=1 for screenshot.');
-      console.error('Page URL:', page.url());
-      console.error('Title:', await page.title().catch(() => 'unknown'));
-      process.exit(1);
+      // Detect if we're stuck on CodeSandbox sign-in (OAuth not authorized)
+      const currentUrl = page.url();
+      const isSignInPage = /\/signin|\/login/i.test(currentUrl);
+      output._note = isSignInPage
+        ? `CodeSandbox sign-in failed — this GitHub credential has not authorized CodeSandbox via OAuth. ` +
+          `Open https://codesandbox.io/signin in an interactive browser, click "Sign in with GitHub", ` +
+          `and authorize with this GitHub account first. Then retry.`
+        : `Failed to extract credits from the page. Try --headful and DEBUG=1 for screenshot.`;
+      if (args.json) {
+        console.log(JSON.stringify(output, null, 2));
+      } else {
+        console.error(`\nNote: ${output._note}`);
+        console.error('Page URL:', currentUrl);
+      }
+      // Exit 0 when we have partial data (API-only also returns ok:true with _note)
+      process.exit(0);
     }
   } finally {
     await lib.closeBrowser(context);

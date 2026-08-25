@@ -46,14 +46,77 @@ function shouldFallbackToBundledChromium(err) {
   return /Chromium distribution 'chrome' is not found|Executable doesn't exist|browserType\.launch/i.test(String(err.message));
 }
 
+/**
+ * Find any Playwright-managed Chromium binary under the cache directory,
+ * regardless of the version number Playwright expects. This decouples
+ * the launcher from a specific Chromium revision (e.g. 1237 vs 1234).
+ */
+function discoverExistingChromium(pw) {
+  // Ask Playwright where it *expects* its browser to be, then search the
+  // parent directory for any chromium-* folder that actually contains a binary.
+  // Expected path: …/ms-playwright/chromium-NNNN/chrome-linux64/chrome
+  // We need to get to …/ms-playwright/ to search across versions.
+  try {
+    const expectedDir = pw.chromium.executablePath();
+    const cacheRoot = path.dirname(path.dirname(path.dirname(expectedDir)));  // …/ms-playwright
+    const prefix = 'chromium-';
+    if (fs.existsSync(cacheRoot)) {
+      const entries = fs.readdirSync(cacheRoot).filter(e => e.startsWith(prefix)).sort();
+      for (const entry of entries) {
+        const candidate = path.join(cacheRoot, entry, 'chrome-linux64', 'chrome');
+        if (fs.existsSync(candidate)) return candidate;
+      }
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * Ensure the Chromium binary Playwright expects actually exists.  When the
+ * installed Playwright library asks for revision 1237 but only 1234 is on
+ * disk we create a symlink so the standard launch() path works without
+ * overriding executablePath.
+ */
+function ensurePlaywrightChromiumSymlink(pw) {
+  try {
+    const expected = pw.chromium.executablePath();
+    if (fs.existsSync(expected)) return;                              // already good
+    const discovered = discoverExistingChromium(pw);
+    if (!discovered) return;                                          // nothing to symlink
+    const expectedDir = path.dirname(path.dirname(expected));           // …/chromium-1237
+    if (!fs.existsSync(expectedDir)) fs.mkdirSync(expectedDir, { recursive: true });
+    // discovered is like …/chromium-1234/chrome-linux64/chrome
+    // We symlink the whole chrome-linux64 dir so any sub-paths also resolve.
+    const discoveredDir = path.dirname(discovered);                   // …/chromium-1234/chrome-linux64
+    fs.symlinkSync(discoveredDir, path.join(expectedDir, path.basename(discoveredDir)));
+  } catch {}
+}
+
 async function launchBrowserWithFallback(pw, { headless } = {}) {
   const channel = process.env.CHROME_CHANNEL || 'chrome';
   try {
     return await pw.chromium.launch(browserOptions({ headless, channel }));
   } catch (err) {
     if (process.env.CHROME_CHANNEL || !shouldFallbackToBundledChromium(err)) throw err;
-    console.log('Google Chrome is not installed. Falling back to Playwright Chromium...');
-    return pw.chromium.launch(browserOptions({ headless }));
+
+    // Try to fix the missing-binary issue by symlinking an existing Chromium
+    ensurePlaywrightChromiumSymlink(pw);
+    try {
+      return await pw.chromium.launch(browserOptions({ headless }));
+    } catch {}
+
+    // Final fallback: use any discovered Chromium binary directly
+    const discovered = discoverExistingChromium(pw);
+    if (discovered) {
+      console.log(`Using discovered Chromium: ${discovered}`);
+      return await pw.chromium.launch({ ...browserOptions({ headless }), executablePath: discovered });
+    }
+
+    throw new Error(
+      'No usable Chromium binary found. Install one with:\n' +
+      '  npx playwright install chromium\n' +
+      'or set CHROME_CHANNEL / executablePath to a Chrome/Chromium binary.'
+    );
   }
 }
 
@@ -66,11 +129,30 @@ async function launchPersistentContextWithFallback(pw, dir, contextOptions, { he
     });
   } catch (err) {
     if (process.env.CHROME_CHANNEL || !shouldFallbackToBundledChromium(err)) throw err;
-    console.log('Google Chrome is not installed. Falling back to Playwright Chromium...');
-    return pw.chromium.launchPersistentContext(dir, {
-      ...browserOptions({ headless }),
-      ...contextOptions,
-    });
+
+    ensurePlaywrightChromiumSymlink(pw);
+    try {
+      return await pw.chromium.launchPersistentContext(dir, {
+        ...browserOptions({ headless }),
+        ...contextOptions,
+      });
+    } catch {}
+
+    const discovered = discoverExistingChromium(pw);
+    if (discovered) {
+      console.log(`Using discovered Chromium: ${discovered}`);
+      return await pw.chromium.launchPersistentContext(dir, {
+        ...browserOptions({ headless }),
+        executablePath: discovered,
+        ...contextOptions,
+      });
+    }
+
+    throw new Error(
+      'No usable Chromium binary found. Install one with:\n' +
+      '  npx playwright install chromium\n' +
+      'or set CHROME_CHANNEL / executablePath to a Chrome/Chromium binary.'
+    );
   }
 }
 
