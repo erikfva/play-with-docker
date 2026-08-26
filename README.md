@@ -8,7 +8,37 @@ This is a **multi-provider VPS orchestrator** that exposes a unified API to mana
 
 - Docker + Docker Compose
 - S3-compatible bucket credentials (for `s3fs` mount mode and/or S3 API credential loading)
-- Google service account JSON for Cloud Shell API access
+
+### Provider token permissions
+
+Each provider requires a credential file with the appropriate scopes. The credential status endpoint (`GET /sessions/{provider}/credentials/status`) validates tokens and reads upstream availability, so tokens must have enough permission to support both session management and status checks.
+
+#### GitHub Codespaces (classic PAT)
+
+| Scope | Required | Purpose |
+|-------|----------|---------|
+| `user` | Yes | Token validation (`GET /user`), billing/usage summary (`GET /users/{username}/settings/billing/usage/summary`). Without `user`, `plan` is `null` and billing usage is unavailable. |
+| `codespace` | Yes | Create, list, and manage codespaces (`GET /user/codespaces`, SSH access). |
+| `repo` | Optional | Broad repository access if codespace SSH or repo mounting is needed. |
+
+> **Note:** The billing usage summary endpoint is **public preview** and requires the `user` scope on a classic PAT (or "User permissions → Plan → Read" on a fine-grained token). Without it, compute/storage usage returns `null` with a limitation.
+
+#### CodeSandbox
+
+The credential file contains a `token` field with a CodeSandbox API key (`csb_v1_...`). No configurable scopes — the token itself determines API access. Required capabilities:
+
+- `GET /meta/info` — token validity, rate-limit headroom, and team ID (automatically included for all tokens).
+
+Credit balance is not exposed by the CodeSandbox SDK or API. When `CODESANDBOX_CREDITS_SCRAPER_ENABLED=1`, the orchestrator scrapes the CodeSandbox dashboard via Playwright with a GitHub `storageState` session.
+
+#### Google Cloud Shell
+
+A service account JSON key with Cloud Shell API access. The orchestrator uses `googleapis` (`cloudshell.v1`) and requires:
+
+- `cloudshell.environments.get` — read environment state without starting it.
+- `cloudshell.environments.start` — start environments (session creation only; status checks avoid calling this).
+
+No additional scopes are needed for credential status checks beyond what the service account already has.
 
 ## Quick Start
 

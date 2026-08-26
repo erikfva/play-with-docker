@@ -230,10 +230,68 @@ async function loadCodeSandboxCredentials(credentialRefOrHeader) {
   // Resolve reference to actual source
   const resolvedRef = resolveCredentialReference(credentialRef);
 
-  // Load and validate
-  const result = await loadCredentialFile(resolvedRef);
+  // Try loading directly
+  try {
+    return await loadCredentialFile(resolvedRef);
+  } catch (loadError) {
+    // In S3 API mode, a bare filename (e.g. "sistemamedical.json") resolves to
+    // a flat S3 key that doesn't exist — the real key has a "codesandbox/" prefix.
+    // discoverFullS3Key lists the provider's S3 prefix and matches by basename.
+    // Only attempt this in S3 API mode (not filesystem/local/S3fs).
+    const inS3ApiMode = process.env.S3_BUCKET && !shouldResolveRelativeRefsFromFilesystem();
+    if (inS3ApiMode && credentialRef && !credentialRef.includes('/') && !credentialRef.startsWith('s3://')) {
+      const resolvedRef2 = await discoverFullS3Key(credentialRef);
+      if (resolvedRef2) {
+        return await loadCredentialFile(resolvedRef2);
+      }
+    }
+    throw loadError;
+  }
+}
 
-  return result;
+/**
+ * When a bare filename is passed (e.g. "sistemamedical.json"), find the
+ * full S3 key by listing objects under the codesandbox/ prefix and matching
+ * by the last path segment. Falls back to filesystem resolution when
+ * S3_BUCKET is not configured.
+ */
+async function discoverFullS3Key(filename) {
+  const bucket = process.env.S3_BUCKET;
+  if (!bucket) {
+    return resolveFilesystemCredentialReference(filename);
+  }
+
+  const { ListObjectsV2Command } = require('@aws-sdk/client-s3');
+  let s3;
+  try {
+    s3 = buildS3Client();
+  } catch {
+    return null; // S3 not configured — cannot discover
+  }
+
+  try {
+    const listCmd = new ListObjectsV2Command({
+      Bucket: bucket,
+      Prefix: 'codesandbox/',
+    });
+    const response = await s3.send(listCmd);
+    const match = (response.Contents || []).find(
+      (obj) => obj.Key && obj.Key.endsWith('/' + filename)
+    );
+
+    if (match) {
+      return {
+        type: 's3',
+        bucket,
+        key: match.Key,
+        originalRef: filename
+      };
+    }
+  } catch {
+    // S3 list failed (auth, network) — cannot discover, fall through
+  }
+
+  return null;
 }
 
 module.exports = {
