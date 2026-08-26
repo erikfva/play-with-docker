@@ -1,20 +1,39 @@
 #!/usr/bin/env node
 'use strict';
 
-const lib = require('./github-browser');
+const fs = require('fs');
+const path = require('path');
+const lib = require('./auth-browser');
 
 function parseArgs(argv) {
-  const args = { template: 'blank', stop: false, wait: true };
+  const args = { template: 'blank', stop: false, wait: true, credentials: null };
   for (const arg of argv.slice(2)) {
     if (arg === '--stop') args.stop = true;
     else if (arg === '--no-wait') args.wait = false;
     else if (arg.startsWith('--template=')) args.template = arg.split('=')[1].toLowerCase();
+    else if (arg === '--credentials') {
+      const idx = argv.indexOf('--credentials');
+      args.credentials = argv[idx + 1];
+    } else if (arg.startsWith('--credentials=')) args.credentials = arg.slice('--credentials='.length);
+    else if (arg === '--help' || arg === '-h') args.help = true;
     else {
       console.error(`Unknown argument: ${arg}`);
       process.exit(2);
     }
   }
   return args;
+}
+
+function printUsage() {
+  console.log(`Usage:
+  node scripts/create-codespace.js --credentials <github.json> [--template <name>] [--stop] [--no-wait]
+
+Options:
+  --credentials <path>  Playwright storageState file for GitHub. Also honors GITHUB_AUTH_FILE env.
+  --template <name>     Template to use. Default: blank.
+  --stop                Stop the codespace after creation.
+  --no-wait             Do not wait for the codespace to appear in /codespaces.
+`);
 }
 
 async function waitForCodespaceListed(page, slug, timeoutMs = 180000) {
@@ -30,6 +49,14 @@ async function waitForCodespaceListed(page, slug, timeoutMs = 180000) {
 
 async function main() {
   const args = parseArgs(process.argv);
+  if (args.help) { printUsage(); return; }
+
+  if (args.credentials) {
+    const abs = path.resolve(args.credentials);
+    if (!fs.existsSync(abs)) throw new Error(`Credential file not found: ${abs}`);
+    process.env.GITHUB_AUTH_FILE = abs;
+  }
+
   const context = await lib.launchGitHubBrowser();
   try {
     const page = await lib.ensureSignedIn(context);

@@ -190,6 +190,26 @@ async function launchGitHubBrowser({ headless } = {}) {
   }
 }
 
+/**
+ * Launch a browser with an arbitrary Playwright storageState file.
+ * Works for Google, GitHub, or any other storageState JSON.
+ */
+async function launchBrowserWithStorageState(storageStatePath, { headless } = {}) {
+  const pw = resolvePlaywrightCore();
+  const browser = await launchBrowserWithFallback(pw, { headless });
+  try {
+    const context = await browser.newContext({
+      viewport: { width: 1366, height: 850 },
+      storageState: storageStatePath,
+    });
+    context.__ownedBrowser = browser;
+    return context;
+  } catch (err) {
+    await browser.close().catch(() => {});
+    throw err;
+  }
+}
+
 async function pickPage(context) {
   return context.pages()[0] || await context.newPage();
 }
@@ -203,7 +223,13 @@ async function login(page) {
   const user = process.env.TEST_GH_USER;
   const pass = process.env.TEST_GH_PASS;
   if (!user || !pass) {
-    throw new Error('Not signed in and TEST_GH_USER/TEST_GH_PASS are missing from environment or .env');
+    const authFile = process.env.GITHUB_AUTH_FILE || '(none)';
+    throw new Error(
+      `GitHub session expired or not found in storageState (${authFile}).\n` +
+      'Refresh the session by running:\n' +
+      '  node ai-brain/github/github-auth.js --user <user> --password <pass> --output <path>\n' +
+      'or set TEST_GH_USER and TEST_GH_PASS environment variables for automatic re-login.'
+    );
   }
   await page.goto('https://github.com/login', { waitUntil: 'domcontentloaded' });
   await page.getByRole('textbox', { name: 'Username or email address' }).fill(user);
@@ -481,6 +507,7 @@ async function closeBrowser(context) {
 
 module.exports = {
   launchGitHubBrowser,
+  launchBrowserWithStorageState,
   ensureSignedIn,
   isLoggedIn,
   login,

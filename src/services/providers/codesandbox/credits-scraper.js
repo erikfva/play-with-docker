@@ -55,7 +55,7 @@ function candidateAuthFiles() {
   try {
     const dir = '/config/workspace/play-with-docker/credentials';
     if (fs.existsSync(dir)) {
-      // not exhaustive, just check default profile dir fallback is handled by github-browser
+      // not exhaustive, just check default profile dir fallback is handled by auth-browser
     }
   } catch {}
   return candidates;

@@ -1,6 +1,10 @@
-# Codespace VM Scripts
+# Scripts
 
-Create, list, or delete GitHub Codespace VMs using `codespace-vm.js`.
+Utility scripts for managing Codespace VMs, listing codespaces, and checking CodeSandbox credits.
+
+## Shared Module
+
+All browser-based scripts depend on `auth-browser.js`, which wraps `playwright-core` for launching Chromium with GitHub or Google Playwright `storageState` files. It auto-discovers any installed Chromium binary regardless of Playwright revision, so `npx playwright install chromium` is only needed once.
 
 ## Create A Codespace VM
 
@@ -39,9 +43,8 @@ Create options:
 ## List Codespace VMs
 
 ```bash
-node scripts/codespace-vm.js \
-  --credentials /config/workspace/play-with-docker/github-auth.json \
-  --action list
+node scripts/list-codespaces.js \
+  --credentials /mnt/s3/github/vm-manager123/github.json
 ```
 
 List options:
@@ -77,36 +80,67 @@ Delete options:
 
 ## Get CodeSandbox Credits
 
-Fetch CodeSandbox workspace credit usage via the dashboard (SDK `api.codesandbox.io` exposes only `rate_limits`; credits are UI-only). Authenticates with GitHub via Playwright, then scrapes `https://codesandbox.io/dashboard` → `View usage`.
+Fetch CodeSandbox workspace credit usage. Supports three modes: API-only (no browser), GitHub OAuth, and Google OAuth.
+
+**Defaults:** JSON output, headful mode (auto `xvfb-run` on headless VPS). No extra flags needed.
+
+### API-only mode (no browser required)
+
+Validates the CodeSandbox API token and returns rate limits. Dashboard credits are not exposed by the API, so credit fields will be `null` with a `_note` suggesting the dashboard URL.
 
 ```bash
-# GitHub session from storageState (created by ai-brain/github/github-auth.js or /mnt/s3/github/<user>/github.json)
-node scripts/get-codesandbox-credits.js \
-  --credentials /mnt/s3/github/vm-manager123/github.json --json --headful
+# Auto-discovers token from credentials/codesandbox/*.json
+node scripts/get-codesandbox-credits.js --api-only
 
-# With xvfb on headless servers (bypasses Cloudflare "Just a moment")
-xvfb-run -a --server-args="-screen 0 1366x850x24" \
-  node scripts/get-codesandbox-credits.js \
-  --credentials /mnt/s3/github/vm-manager123/github.json --json --headful
+# Explicit token file
+node scripts/get-codesandbox-credits.js --api-only \
+  --token-file ./credentials/codesandbox/vm-manager1.json
+
+# Or set env var
+CODESANDBOX_TOKEN=csb_v1_... node scripts/get-codesandbox-credits.js --api-only
+```
+
+### GitHub OAuth mode
+
+Signs in to CodeSandbox via GitHub OAuth using a Playwright `storageState` file, then scrapes the dashboard for credit data.
+
+```bash
+node scripts/get-codesandbox-credits.js \
+  --credentials /mnt/s3/github/vm-manager123/github.json
 
 # Specific workspace
 node scripts/get-codesandbox-credits.js \
-  --credentials ./github-auth.json --workspace ws_Sh4V5DwQDYJDBRgDKhm79X --json
-
-# Debug (saves debug-codesandbox-credits.html/.png)
-DEBUG=1 xvfb-run -a node scripts/get-codesandbox-credits.js \
-  --credentials /mnt/s3/github/vm-manager123/github.json --headful
+  --credentials /mnt/s3/github/vm-manager123/github.json \
+  --workspace ws_Sh4V5DwQDYJDBRgDKhm79X
 ```
 
-Options:
+### Google OAuth mode
 
-- `--credentials <path>`: Playwright `storageState` JSON with GitHub cookies (`GITHUB_AUTH_FILE` env also honored). Created via `node ai-brain/github/github-auth.js --user <u> --password <p> --output <path>`.
-- `--workspace <id>`: CodeSandbox workspace/team id (`ws_...` from `GET /meta/info` `auth.team`). If omitted, uses dashboard default.
-- `--json`: Output raw JSON only.
-- `--headful` / `--headless`: Force headed/headless. Dashboard is Cloudflare-protected; `headful` + `xvfb-run` is required on servers.
+Signs in to CodeSandbox via Google OAuth using a Google Playwright `storageState` file (cookies from `accounts.google.com`).
+
+```bash
+node scripts/get-codesandbox-credits.js \
+  --google-credentials /mnt/s3/google/etecnologysys/google.json
+```
+
+### Headless VPS behavior
+
+On a server with no `$DISPLAY`, the script auto-detects this and re-executes itself under `xvfb-run` when browser mode is needed. This passes Cloudflare's "Just a moment" challenge that blocks headless Chromium. No manual `xvfb-run` wrapping is required.
+
+When no credentials of any kind are provided (no `--credentials`, `--google-credentials`, `GITHUB_AUTH_FILE`, or `GOOGLE_AUTH_FILE`), the script automatically falls back to API-only mode.
+
+### All options
+
+- `--api-only`: Use CodeSandbox API directly (no browser). Uses `--token-file` or `CODESANDBOX_TOKEN` env.
+- `--token-file <path>`: CodeSandbox API token file (JSON `{token:...}` or plain text).
+- `--credentials <path>`: Playwright `storageState` for GitHub (`GITHUB_AUTH_FILE` env also honored).
+- `--google-credentials <path>`: Playwright `storageState` for Google (`GOOGLE_AUTH_FILE` env also honored).
+- `--workspace <id>`: CodeSandbox workspace/team id (`ws_...`).
+- `--no-json`: Output human-readable text instead of JSON (JSON is the default).
+- `--headless`: Force headless mode, skip auto `xvfb-run`.
 - `DEBUG=1`: Saves `debug-codesandbox-credits.html` and screenshot on failure.
 
-Output:
+### Output example
 
 ```json
 {
@@ -122,8 +156,8 @@ Output:
 }
 ```
 
-Notes:
+### Notes
 
-- Requires `npx playwright install chrome` (or `chromium`) once per host.
-- `etecnologysys` (`275/400` `4 Aug–4 Sep 2026`) needs its own GitHub session file (e.g. `/mnt/s3/github/etechnologysys/github.json`); the `csb_v1_...` API token alone cannot read the dashboard — `src/services/providers/codesandbox-provider.js:211` probes `api.codesandbox.io/billing` with `Bearer` and correctly returns `quotas[2].usage:null` with limitation pointing to `https://codesandbox.io/dashboard?workspace=<team>`.
-- Implementation: `scripts/get-codesandbox-credits.js:57` handles `Just a moment` + `__Host` OAuth, `extractCredits()` parses `400 / 400 credits` and `View usage` detail.
+- Requires `npx playwright install chromium` once per host for browser mode.
+- The CodeSandbox API (`api.codesandbox.io/meta/info`) does not expose billing/credits — only rate limits and auth scopes. Credits are only available via dashboard scraping.
+- If a GitHub credential hasn't authorized CodeSandbox via OAuth yet, the script exits `0` with a `_note` explaining how to complete the authorization in an interactive browser.
