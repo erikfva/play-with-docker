@@ -8,6 +8,7 @@ services:
     volumes:
       - ./credentials:/mnt/s3:ro
       - ./src:/app/src
+      - ./scripts:/app/scripts
     ports:
       - "${PORT:-3000}:${PORT:-3000}"
     cap_add:

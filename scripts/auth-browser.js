@@ -2,6 +2,9 @@
 
 try { require('dotenv').config(); } catch {}
 
+const fs = require('fs');
+const path = require('path');
+
 function resolvePlaywrightCore() {
   const candidates = [
     () => require('playwright-core'),
@@ -54,8 +57,15 @@ function shouldFallbackToBundledChromium(err) {
 function discoverExistingChromium(pw) {
   // Ask Playwright where it *expects* its browser to be, then search the
   // parent directory for any chromium-* folder that actually contains a binary.
-  // Expected path: …/ms-playwright/chromium-NNNN/chrome-linux64/chrome
+  // Expected path: …/ms-playwright/chromium-NNNN/chrome-linux/chrome
+  //                or …/ms-playwright/chromium-NNNN/chrome-linux64/chrome (older)
   // We need to get to …/ms-playwright/ to search across versions.
+  // Handles both chrome-linux and chrome-linux64 layouts and revision mismatches.
+  const candidates = [
+    'chrome-linux/chrome',
+    'chrome-linux64/chrome',
+    'chrome-linux/arm64/chrome',
+  ];
   try {
     const expectedDir = pw.chromium.executablePath();
     const cacheRoot = path.dirname(path.dirname(path.dirname(expectedDir)));  // …/ms-playwright
@@ -63,8 +73,63 @@ function discoverExistingChromium(pw) {
     if (fs.existsSync(cacheRoot)) {
       const entries = fs.readdirSync(cacheRoot).filter(e => e.startsWith(prefix)).sort();
       for (const entry of entries) {
-        const candidate = path.join(cacheRoot, entry, 'chrome-linux64', 'chrome');
-        if (fs.existsSync(candidate)) return candidate;
+        for (const sub of candidates) {
+          const candidate = path.join(cacheRoot, entry, sub);
+          if (fs.existsSync(candidate)) return candidate;
+        }
+      }
+      // Last resort: recursively search any chromium-* folder for a file named 'chrome'
+      for (const entry of entries) {
+        const base = path.join(cacheRoot, entry);
+        try {
+          const found = searchForChrome(base);
+          if (found) return found;
+        } catch {}
+      }
+    }
+    // Also check if expected path itself exists under PLAYWRIGHT_BROWSERS_PATH
+    if (process.env.PLAYWRIGHT_BROWSERS_PATH && fs.existsSync(process.env.PLAYWRIGHT_BROWSERS_PATH)) {
+      const altRoot = process.env.PLAYWRIGHT_BROWSERS_PATH;
+      if (altRoot !== path.dirname(path.dirname(path.dirname(expectedDir)))) {
+        const entries2 = fs.readdirSync(altRoot).filter(e => e.startsWith(prefix)).sort();
+        for (const entry of entries2) {
+          for (const sub of candidates) {
+            const candidate = path.join(altRoot, entry, sub);
+            if (fs.existsSync(candidate)) return candidate;
+          }
+        }
+      }
+    }
+  } catch {}
+  // Ultimate fallback: scan default cache locations
+  for (const root of ['/ms-playwright', '/root/.cache/ms-playwright', '/home/pwuser/.cache/ms-playwright']) {
+    try {
+      if (!fs.existsSync(root)) continue;
+      const entries = fs.readdirSync(root).filter(e => e.startsWith('chromium-')).sort();
+      for (const entry of entries) {
+        for (const sub of candidates) {
+          const candidate = path.join(root, entry, sub);
+          if (fs.existsSync(candidate)) return candidate;
+        }
+      }
+    } catch {}
+  }
+  return null;
+}
+
+function searchForChrome(dir, depth = 2) {
+  if (depth < 0) return null;
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isFile() && e.name === 'chrome' && fs.existsSync(full)) {
+        // ensure parent dir looks like chrome-linux
+        if (full.includes('chrome-linux')) return full;
+      }
+      if (e.isDirectory()) {
+        const found = searchForChrome(full, depth - 1);
+        if (found) return found;
       }
     }
   } catch {}
@@ -83,12 +148,22 @@ function ensurePlaywrightChromiumSymlink(pw) {
     if (fs.existsSync(expected)) return;                              // already good
     const discovered = discoverExistingChromium(pw);
     if (!discovered) return;                                          // nothing to symlink
-    const expectedDir = path.dirname(path.dirname(expected));           // …/chromium-1237
+    const expectedDir = path.dirname(expected);
+    const discoveredDir = path.dirname(discovered);
+    // Ensure parent exists
     if (!fs.existsSync(expectedDir)) fs.mkdirSync(expectedDir, { recursive: true });
-    // discovered is like …/chromium-1234/chrome-linux64/chrome
-    // We symlink the whole chrome-linux64 dir so any sub-paths also resolve.
-    const discoveredDir = path.dirname(discovered);                   // …/chromium-1234/chrome-linux64
-    fs.symlinkSync(discoveredDir, path.join(expectedDir, path.basename(discoveredDir)));
+    // Try symlinking the whole chrome-linux* directory first (covers all resources)
+    const expectedParent = path.dirname(path.dirname(expected)); // …/chromium-1237
+    if (!fs.existsSync(expectedParent)) fs.mkdirSync(expectedParent, { recursive: true });
+    try {
+      const linkTarget = path.join(expectedParent, path.basename(discoveredDir));
+      if (!fs.existsSync(linkTarget)) fs.symlinkSync(discoveredDir, linkTarget);
+      if (fs.existsSync(expected)) return;
+    } catch {}
+    // Fallback: symlink the chrome binary itself
+    if (!fs.existsSync(expected)) {
+      try { fs.symlinkSync(discovered, expected); } catch {}
+    }
   } catch {}
 }
 
