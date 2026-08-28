@@ -276,15 +276,29 @@ async function loadCodespacesCredentials(credentialRefOrHeader) {
   try {
     return await loadCredentialFile(resolvedRef);
   } catch (loadError) {
-    // In S3 API mode, a bare filename (e.g. "vm-manager123.json") resolves to
-    // a flat S3 key that doesn't exist — the real key has a "codespaces/" prefix.
-    // discoverFullS3Key lists the provider's S3 prefix and matches by basename.
-    // Only attempt this in S3 API mode (not filesystem/local/S3fs).
-    const inS3ApiMode = process.env.S3_BUCKET && !shouldResolveRelativeRefsFromFilesystem();
-    if (inS3ApiMode && credentialRef && !credentialRef.includes('/') && !credentialRef.startsWith('s3://')) {
-      const resolvedRef2 = await discoverFullS3Key(credentialRef);
-      if (resolvedRef2) {
-        return await loadCredentialFile(resolvedRef2);
+    // Bare filename (e.g. "vm-manager123.json") without prefix should also work.
+    // In S3 API mode the real key has a "codespaces/" prefix, in filesystem mode
+    // the file lives under S3_MOUNT_DIR/codespaces/. Try prefixed variant.
+    const isBare = credentialRef && !credentialRef.includes('/') && !credentialRef.startsWith('s3://');
+    if (isBare) {
+      const inS3ApiMode = process.env.S3_BUCKET && !shouldResolveRelativeRefsFromFilesystem();
+      if (inS3ApiMode) {
+        const resolvedRef2 = await discoverFullS3Key(credentialRef);
+        if (resolvedRef2) {
+          return await loadCredentialFile(resolvedRef2);
+        }
+      } else {
+        // Filesystem / local / s3fs mode: try codespaces/<filename>
+        try {
+          const prefixedRef = `codespaces/${credentialRef}`;
+          const resolvedPrefixed = resolveCredentialReference(prefixedRef);
+          return await loadCredentialFile(resolvedPrefixed);
+        } catch {}
+        // Also try to discover via directory listing as last resort
+        const discovered = await discoverFullFilesystemKey(credentialRef);
+        if (discovered) {
+          return await loadCredentialFile(discovered);
+        }
       }
     }
     throw loadError;
@@ -333,6 +347,39 @@ async function discoverFullS3Key(filename) {
     // S3 list failed (auth, network) — cannot discover, fall through
   }
 
+  return null;
+}
+
+async function discoverFullFilesystemKey(filename) {
+  let credsDir;
+  try {
+    credsDir = getCredentialsDirectory();
+  } catch {
+    return null;
+  }
+  const providerDir = path.join(credsDir, 'codespaces');
+  try {
+    const entries = await fs.readdir(providerDir);
+    // Match exact filename or case-insensitive, also handle .json/.txt
+    const match = entries.find((e) => e === filename || e.toLowerCase() === filename.toLowerCase());
+    if (match) {
+      return {
+        type: 'filesystem',
+        path: path.join(providerDir, match),
+        originalRef: filename
+      };
+    }
+    // Also try without provider prefix already handled, but check for basename match
+    const lowerFilename = filename.toLowerCase();
+    const altMatch = entries.find((e) => e.toLowerCase().endsWith('/' + lowerFilename) || e.toLowerCase() === lowerFilename);
+    if (altMatch) {
+      return {
+        type: 'filesystem',
+        path: path.join(providerDir, altMatch),
+        originalRef: filename
+      };
+    }
+  } catch {}
   return null;
 }
 

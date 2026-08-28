@@ -234,15 +234,25 @@ async function loadCodeSandboxCredentials(credentialRefOrHeader) {
   try {
     return await loadCredentialFile(resolvedRef);
   } catch (loadError) {
-    // In S3 API mode, a bare filename (e.g. "sistemamedical.json") resolves to
-    // a flat S3 key that doesn't exist — the real key has a "codesandbox/" prefix.
-    // discoverFullS3Key lists the provider's S3 prefix and matches by basename.
-    // Only attempt this in S3 API mode (not filesystem/local/S3fs).
-    const inS3ApiMode = process.env.S3_BUCKET && !shouldResolveRelativeRefsFromFilesystem();
-    if (inS3ApiMode && credentialRef && !credentialRef.includes('/') && !credentialRef.startsWith('s3://')) {
-      const resolvedRef2 = await discoverFullS3Key(credentialRef);
-      if (resolvedRef2) {
-        return await loadCredentialFile(resolvedRef2);
+    const isBare = credentialRef && !credentialRef.includes('/') && !credentialRef.startsWith('s3://');
+    if (isBare) {
+      const inS3ApiMode = process.env.S3_BUCKET && !shouldResolveRelativeRefsFromFilesystem();
+      if (inS3ApiMode) {
+        const resolvedRef2 = await discoverFullS3Key(credentialRef);
+        if (resolvedRef2) {
+          return await loadCredentialFile(resolvedRef2);
+        }
+      } else {
+        // Filesystem mode: try codesandbox/<filename>
+        try {
+          const prefixedRef = `codesandbox/${credentialRef}`;
+          const resolvedPrefixed = resolveCredentialReference(prefixedRef);
+          return await loadCredentialFile(resolvedPrefixed);
+        } catch {}
+        const discovered = await discoverFullFilesystemKey(credentialRef);
+        if (discovered) {
+          return await loadCredentialFile(discovered);
+        }
       }
     }
     throw loadError;
@@ -258,7 +268,12 @@ async function loadCodeSandboxCredentials(credentialRefOrHeader) {
 async function discoverFullS3Key(filename) {
   const bucket = process.env.S3_BUCKET;
   if (!bucket) {
-    return resolveFilesystemCredentialReference(filename);
+    // Filesystem fallback: try codesandbox/<filename> first
+    try {
+      return resolveFilesystemCredentialReference(`codesandbox/${filename}`);
+    } catch {
+      return resolveFilesystemCredentialReference(filename);
+    }
   }
 
   const { ListObjectsV2Command } = require('@aws-sdk/client-s3');
@@ -291,6 +306,28 @@ async function discoverFullS3Key(filename) {
     // S3 list failed (auth, network) — cannot discover, fall through
   }
 
+  return null;
+}
+
+async function discoverFullFilesystemKey(filename) {
+  let credsDir;
+  try {
+    credsDir = getCredentialsDirectory();
+  } catch {
+    return null;
+  }
+  const providerDir = path.join(credsDir, 'codesandbox');
+  try {
+    const entries = await fs.readdir(providerDir);
+    const match = entries.find((e) => e === filename || e.toLowerCase() === filename.toLowerCase());
+    if (match) {
+      return {
+        type: 'filesystem',
+        path: path.join(providerDir, match),
+        originalRef: filename
+      };
+    }
+  } catch {}
   return null;
 }
 
