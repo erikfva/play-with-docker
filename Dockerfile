@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright:v1.51.1-jammy
+FROM mcr.microsoft.com/playwright:v1.62.1-jammy
 
 LABEL org.opencontainers.image.source="https://github.com/erikfva/vm-manager"
 
@@ -41,6 +41,10 @@ RUN apt-get update \
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=0
+# VPS Cloudflare bypass needs realistic locale/timezone + headed Chromium via xvfb
+ENV TZ=UTC
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
 
 COPY package.json package-lock.json* ./
 RUN if [ "$NODE_ENV" = "local" ]; then \
@@ -52,15 +56,15 @@ RUN if [ "$NODE_ENV" = "local" ]; then \
 
 # Ensure Chromium/Chrome match the installed playwright-core version.
 # Base image ships browsers at $PLAYWRIGHT_BROWSERS_PATH (/ms-playwright), but
-# the npm version may expect a different revision. Installing here guarantees
-# `pw.chromium.executablePath()` resolves and `discoverExistingChromium()` can
-# always find a binary, fixing "No usable Chromium binary found".
-# Use npx with pinned version to match package.json (1.51.1).
-RUN npx --yes playwright@1.51.1 install --with-deps chromium chrome 2>&1 | tail -20 \
-  || npx playwright install --with-deps chromium chrome 2>&1 | tail -20 \
+# npm may expect a different revision. Install for the *local* version (from package.json)
+# not a pinned 1.51.1, so GH Actions image and VPS container both resolve.
+# Install both chromium and chrome (chrome channel is more trusted by Cloudflare).
+RUN npx playwright install --with-deps chromium chrome 2>&1 | tail -30 \
+  || npx --yes playwright install --with-deps chromium chrome 2>&1 | tail -30 \
   || echo "playwright install fallback: browsers already present at $PLAYWRIGHT_BROWSERS_PATH" \
-  && ls -R /ms-playwright 2>&1 | head -n 100 || true \
-  && ls -R /root/.cache/ms-playwright 2>&1 | head -n 20 || true
+  && ls -R /ms-playwright 2>&1 | head -n 120 || true \
+  && ls -R /root/.cache/ms-playwright 2>&1 | head -n 30 || true \
+  && npx playwright --version 2>&1 | head -5; node -e "console.log(require('playwright-core/package.json').version, require('playwright-core').chromium.executablePath())" 2>&1 | head -5
 
 COPY src ./src
 COPY scripts ./scripts

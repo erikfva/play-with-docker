@@ -5,6 +5,8 @@ services:
       args:
         NODE_ENV: local
     image: erikvargas/play-with-docker:latest
+    shm_size: 2g
+    init: true
     volumes:
       - ./credentials:/mnt/s3:ro
       - ./src:/app/src

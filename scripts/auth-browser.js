@@ -38,12 +38,37 @@ function browserOptions({ headless, channel } = {}) {
       '--disable-dev-shm-usage',
       '--disable-infobars',
       '--window-size=1366,850',
+      '--disable-features=IsolateOrigins,site-per-process',
+      '--disable-setuid-sandbox',
+      '--no-first-run',
+      '--no-zygote',
+      '--disable-extensions',
+      '--disable-popup-blocking',
     ],
   };
 
   if (channel) options.channel = channel;
   return options;
 }
+
+function stealthScript() {
+  try {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    // @ts-ignore
+    window.chrome = window.chrome || { runtime: {} };
+    Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US','en'] });
+    // hide permissions query
+    if (navigator.permissions) {
+      const originalQuery = navigator.permissions.query;
+      navigator.permissions.query = (params) => originalQuery.call(navigator.permissions, params).catch(()=> ({ state: 'granted' }));
+    }
+    try { delete navigator.__proto__.webdriver; } catch {}
+    // @ts-ignore
+    window.navigator.chrome = window.chrome;
+  } catch {}
+}
+const STEALTH_SCRIPT = stealthScript;
 
 function shouldFallbackToBundledChromium(err) {
   return /Chromium distribution 'chrome' is not found|Executable doesn't exist|browserType\.launch/i.test(String(err.message));
@@ -598,4 +623,6 @@ module.exports = {
   displayNameFromSlug,
   slugifyName,
   closeBrowser,
+  STEALTH_SCRIPT,
+  browserOptions,
 };

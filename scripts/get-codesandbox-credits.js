@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 
 function parseArgs(argv) {
-  const args = { workspace: null, json: true, headless: false, apiOnly: false, googleCredentials: null };
+  const args = { workspace: null, json: true, headless: false, apiOnly: false, googleCredentials: null, tokenFile: null };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--help' || a === '-h') args.help = true;
@@ -16,6 +16,11 @@ function parseArgs(argv) {
     else if (a === '--headless') args.headless = true;
     else if (a === '--headful') args.headless = false;
     else if (a === '--api-only') args.apiOnly = true;
+    else if (a === '--token-file') {
+      const v = argv[++i];
+      if (!v || v.startsWith('--')) throw new Error(`${a} requires a value`);
+      args.tokenFile = v;
+    } else if (a.startsWith('--token-file=')) args.tokenFile = a.slice('--token-file='.length);
     else if (a === '--workspace' || a === '--team') {
       const v = argv[++i];
       if (!v || v.startsWith('--')) throw new Error(`${a} requires a value`);
@@ -77,45 +82,84 @@ Flow (browser mode, --google-credentials):
 
 async function waitForCloudflare(page, timeoutMs = 60000) {
   const deadline = Date.now() + timeoutMs;
+  let lastTitle = '';
   while (Date.now() < deadline) {
     const title = await page.title().catch(() => '');
-    const body = await page.locator('body').innerText().catch(() => '');
+    const body = await page.locator('body').innerText().catch(() => '').then(t => t.slice(0, 200));
     const url = page.url();
-    const isChallenge = /just a moment|perfor.*security verification|cdn-cgi\/challenge|challenges\.cloudflare/i.test(title + ' ' + body + ' ' + url);
+    const isChallenge = /just a moment|perfor.*security verification|cdn-cgi\/challenge|challenges\.cloudflare|attention required|checking if the site connection is secure/i.test(title + ' ' + body + ' ' + url);
     if (!isChallenge) return true;
-    console.log('Cloudflare challenge detected, waiting 5s... title:', title.slice(0, 60));
+    if (title !== lastTitle) console.log('Cloudflare challenge detected, waiting 5s... title:', title.slice(0, 80), 'url:', url.slice(0, 60));
+    lastTitle = title;
     await page.waitForTimeout(5000);
-    // Try to click any "Verify" button if present (Turnstile)
+    // Try to click any "Verify" button / Turnstile checkbox
     try {
+      // Cloudflare Turnstile is often inside an iframe; check for it
+      const frames = page.frames();
+      for (const f of frames) {
+        try {
+          const cb = f.locator('input[type="checkbox"], div[role="checkbox"], iframe[src*="challenges.cloudflare"] ~ div, span:has-text("Verify")').first();
+          if (await cb.count() && await cb.isVisible().catch(()=>false)) {
+            console.log('Attempting to click Turnstile checkbox...');
+            await cb.click({ force: true }).catch(()=>{});
+          }
+        } catch {}
+      }
       const verifyBtn = page.locator('input[type="button"], button').filter({ hasText: /verify|continue|proceed/i }).first();
       if (await verifyBtn.count() && await verifyBtn.isVisible().catch(() => false)) {
-        await verifyBtn.click().catch(() => {});
+        console.log('Clicking Verify/Continue button...');
+        await verifyBtn.click({ force: true }).catch(() => {});
       }
+      // Sometimes just waiting and letting CF JS solve is enough; trigger mouse move
+      await page.mouse.move(400 + Math.random()*100, 300 + Math.random()*100).catch(()=>{});
     } catch {}
   }
+  const finalTitle = await page.title().catch(()=> '');
+  console.log(`Cloudflare challenge still present after ${timeoutMs}ms (title: ${finalTitle.slice(0,60)}). Giving up.`);
   return false;
 }
 
 async function ensureCodeSandboxSignedIn(page, context) {
-  // Hide automation flag for Cloudflare
+  // Hide automation flag for Cloudflare – inject before any navigation
   try {
-    await page.addInitScript(() => {
+    // Use the stealth script from auth-browser if available
+    const stealth = (() => {
+      try { return require('./auth-browser').STEALTH_SCRIPT; } catch { return null; }
+    })();
+    if (stealth) await page.addInitScript(stealth);
+    else await page.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      // @ts-ignore
       window.chrome = window.chrome || { runtime: {} };
     });
+    // Also set a realistic UA at context level if possible
+    await page.context().addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    }).catch(()=>{});
   } catch {}
 
   // Go to codesandbox dashboard. If not authenticated, it redirects to /signin.
   await page.goto('https://codesandbox.io/dashboard', { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(3000);
-  await waitForCloudflare(page, 45000);
+  const cfPassed = await waitForCloudflare(page, 45000);
+  if (!cfPassed) {
+    console.warn('Cloudflare challenge did not clear in 45s. Trying reload + retry...');
+    try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{}); await page.waitForTimeout(5000); } catch {}
+    await waitForCloudflare(page, 30000);
+  }
 
   let url = page.url();
   // Handle Cloudflare interstitial (fallback)
-  if (/cdn-cgi\/challenge|just a moment/i.test(await page.title().catch(() => '')) || url.includes('challenges.cloudflare.com')) {
+  if (/cdn-cgi\/challenge|just a moment|attention required/i.test(await page.title().catch(() => '')) || url.includes('challenges.cloudflare.com')) {
     console.log('Waiting for Cloudflare challenge to pass (retry)...');
-    await waitForCloudflare(page, 30000);
+    const passed2 = await waitForCloudflare(page, 30000);
+    if (!passed2) {
+      const htmlSnippet = await page.content().catch(()=> '').then(h=> h.slice(0,500));
+      console.error('Cloudflare still blocking. HTML snippet:', htmlSnippet.slice(0,200));
+      console.error('TIP: This VPS IP may be flagged by Cloudflare. Try --api-only mode (no browser needed):');
+      console.error('  node scripts/get-codesandbox-credits.js --api-only --token-file /mnt/s3/codesandbox/vm-manager1.json');
+      console.error('Or run with DEBUG=1 for screenshot: DEBUG=1 node scripts/get-codesandbox-credits.js --credentials ...');
+      throw new Error('Cloudflare challenge timeout – dashboard not reachable. Use --api-only as fallback.');
+    }
     url = page.url();
   }
 
@@ -228,9 +272,10 @@ async function ensureCodeSandboxSignedIn(page, context) {
 async function ensureCodeSandboxSignedInViaGoogle(page) {
   // Hide automation flag for Cloudflare
   try {
-    await page.addInitScript(() => {
+    const stealth = (() => { try { return require('./auth-browser').STEALTH_SCRIPT; } catch { return null; }})();
+    if (stealth) await page.addInitScript(stealth);
+    else await page.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      // @ts-ignore
       window.chrome = window.chrome || { runtime: {} };
     });
   } catch {}
@@ -238,14 +283,23 @@ async function ensureCodeSandboxSignedInViaGoogle(page) {
   // Go to codesandbox dashboard
   await page.goto('https://codesandbox.io/dashboard', { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForTimeout(3000);
-  await waitForCloudflare(page, 45000);
+  const cfPassed = await waitForCloudflare(page, 45000);
+  if (!cfPassed) {
+    console.warn('Cloudflare challenge did not clear in 45s (Google flow). Trying reload...');
+    try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(()=>{}); await page.waitForTimeout(5000); } catch {}
+    await waitForCloudflare(page, 30000);
+  }
 
   let url = page.url();
 
   // Handle Cloudflare interstitial
-  if (/cdn-cgi\/challenge|just a moment/i.test(await page.title().catch(() => '')) || url.includes('challenges.cloudflare.com')) {
+  if (/cdn-cgi\/challenge|just a moment|attention required/i.test(await page.title().catch(() => '')) || url.includes('challenges.cloudflare.com')) {
     console.log('Waiting for Cloudflare challenge to pass (retry)...');
-    await waitForCloudflare(page, 30000);
+    const passed2 = await waitForCloudflare(page, 30000);
+    if (!passed2) {
+      console.error('Cloudflare still blocking (Google flow). Try --api-only fallback.');
+      throw new Error('Cloudflare challenge timeout – dashboard not reachable. Use --api-only as fallback.');
+    }
     url = page.url();
   }
 
