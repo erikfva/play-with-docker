@@ -410,7 +410,7 @@ GET {{baseUrl}}/sessions/codespaces/credentials/status
 X-Server-Token: {{serverToken}}
 
 ###
-@codespacesCredentials = codespaces/vm-manager123.json
+@codespacesCredentials = vm-manager234.json
 
 ### 35. Check Single Codespaces Credential Status
 # Expected: 200 single entry; plan "pro" → limit 180 core-hours / 20 GB-month, otherwise 120 / 15; remaining derived as limit-usage when billing accessible.
