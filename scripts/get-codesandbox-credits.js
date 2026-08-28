@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 
 function parseArgs(argv) {
-  const args = { workspace: null, json: true, headless: false, apiOnly: false, googleCredentials: null, tokenFile: null };
+  const args = { workspace: null, json: true, headless: false, apiOnly: false, googleCredentials: null, tokenFile: null, codesandboxCredentials: null, saveState: null };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--help' || a === '-h') args.help = true;
@@ -37,6 +37,20 @@ function parseArgs(argv) {
       if (!v) throw new Error('--google-credentials requires a value');
       args.googleCredentials = v;
     } else if (a.startsWith('--google-credentials=')) args.googleCredentials = a.slice('--google-credentials='.length);
+    else if (a === '--codesandbox-credentials' || a === '--cs-credentials' || a === '--csb-credentials') {
+      const v = argv[++i];
+      if (!v) throw new Error(`${a} requires a value`);
+      args.codesandboxCredentials = v;
+    } else if (a.startsWith('--codesandbox-credentials=')) args.codesandboxCredentials = a.slice('--codesandbox-credentials='.length);
+    else if (a.startsWith('--cs-credentials=')) args.codesandboxCredentials = a.slice('--cs-credentials='.length);
+    else if (a.startsWith('--csb-credentials=')) args.codesandboxCredentials = a.slice('--csb-credentials='.length);
+    else if (a === '--save-state' || a === '--save-codesandbox-state' || a === '--save-auth') {
+      const v = argv[++i];
+      if (!v) throw new Error(`${a} requires a value`);
+      args.saveState = v;
+    } else if (a.startsWith('--save-state=')) args.saveState = a.slice('--save-state='.length);
+    else if (a.startsWith('--save-codesandbox-state=')) args.saveState = a.slice('--save-codesandbox-state='.length);
+    else if (a.startsWith('--save-auth=')) args.saveState = a.slice('--save-auth='.length);
     else throw new Error(`Unknown argument: ${a}`);
   }
   return args;
@@ -44,7 +58,7 @@ function parseArgs(argv) {
 
 function printUsage() {
   console.log(`Usage:
-  node scripts/get-codesandbox-credits.js [--api-only] [--credentials <github.json>] [--google-credentials <google.json>] [--workspace <ws_...>]
+  node scripts/get-codesandbox-credits.js [--api-only] [--credentials <github.json>] [--google-credentials <google.json>] [--codesandbox-credentials <csb.json>] [--workspace <ws_...>] [--save-state <out.json>]
 
 Defaults: --json, --headful (auto xvfb-run on headless VPS).
 
@@ -53,6 +67,9 @@ Options:
   --token-file <path>       CodeSandbox API token file (JSON with {token:...} or plain text). Used by --api-only.
   --credentials <path>      Playwright storageState file for GitHub (browser mode). Also honors GITHUB_AUTH_FILE env.
   --google-credentials <p>  Playwright storageState file for Google (browser mode). Also honors GOOGLE_AUTH_FILE env.
+  --codesandbox-credentials <p>  Playwright storageState for CodeSandbox directly (avoids GitHub/Google OAuth). Also honors CODESANDBOX_AUTH_FILE env.
+  --save-state <path>       After successful browser login, save CodeSandbox storageState to <path> for reuse (like github-auth.js --output).
+                            Example: --google-credentials /mnt/s3/google/simca.scz/google.json --save-state /mnt/s3/codesandbox-web/simca.scz.json
   --workspace <id>          CodeSandbox workspace/team id (e.g. ws_Eha5JM84UeHdXshrooLDTA). If omitted, uses API default.
   --no-json                 Output human-readable text instead of JSON
   --headless                Force headless (no xvfb-run)
@@ -61,6 +78,10 @@ Examples:
   node scripts/get-codesandbox-credits.js --api-only
   node scripts/get-codesandbox-credits.js --credentials /mnt/s3/github/vm-manager123/github.json
   node scripts/get-codesandbox-credits.js --google-credentials /mnt/s3/google/etecnologysys/google.json
+  # Save CodeSandbox session for reuse (like github-auth.js):
+  node scripts/get-codesandbox-credits.js --google-credentials /mnt/s3/google/simca.scz/google.json --save-state /mnt/s3/codesandbox-web/simca.scz.json
+  # Reuse without re-OAuth:
+  node scripts/get-codesandbox-credits.js --codesandbox-credentials /mnt/s3/codesandbox-web/simca.scz.json
 
 Flow (--api-only, default):
   1. Load CodeSandbox API token from --token-file, CODESANDBOX_TOKEN env, or auto-discover from credentials/codesandbox/
@@ -77,6 +98,10 @@ Flow (browser mode, --google-credentials):
   1. Launch Playwright with Google session (via --google-credentials or GOOGLE_AUTH_FILE)
   2. Navigate to https://codesandbox.io/dashboard (OAuth via Google if needed)
   3. Extract "Virtual machine credits" → included / used / period
+
+Flow (browser mode, --codesandbox-credentials):
+  1. Launch Playwright with CodeSandbox storageState directly (from prior --save-state)
+  2. No GitHub/Google needed – goes straight to dashboard
 `);
 }
 
@@ -802,7 +827,8 @@ async function main() {
   // Headed Chromium via xvfb-run passes Cloudflare challenges that block headless.
   const hasGithubCreds = !!(args.credentials || process.env.GITHUB_AUTH_FILE || process.env.GITHUB_PROFILE_DIR);
   const hasGoogleCreds = !!(args.googleCredentials || process.env.GOOGLE_AUTH_FILE);
-  const needsBrowser = args.apiOnly !== true && (hasGithubCreds || hasGoogleCreds);
+  const hasCodesandboxCredsEarly = !!(args.codesandboxCredentials || process.env.CODESANDBOX_AUTH_FILE);
+  const needsBrowser = args.apiOnly !== true && (hasGithubCreds || hasGoogleCreds || hasCodesandboxCredsEarly);
   if (needsBrowser && !process.env.DISPLAY && !process.env._XVFB_REEXEC) {
     const xvfb = '/usr/bin/xvfb-run';
     if (fs.existsSync(xvfb)) {
@@ -838,11 +864,28 @@ async function main() {
     if (!fs.existsSync(abs)) throw new Error(`Google credential file not found: ${abs}`);
     process.env.GOOGLE_AUTH_FILE = abs;
   }
+  if (args.codesandboxCredentials) {
+    const abs = path.resolve(args.codesandboxCredentials);
+    if (!fs.existsSync(abs)) throw new Error(`CodeSandbox credential file not found: ${abs}`);
+    process.env.CODESANDBOX_AUTH_FILE = abs;
+  } else if (process.env.CODESANDBOX_AUTH_FILE) {
+    // already set via env
+  }
+  if (args.saveState) {
+    const abs = path.resolve(args.saveState);
+    // ensure parent dir exists early so we fail fast if unwritable
+    try { fs.mkdirSync(path.dirname(abs), { recursive: true }); } catch {}
+    process.env.CODESANDBOX_SAVE_STATE = abs;
+  }
   if (args.workspace) process.env.CODESANDBOX_WORKSPACE = args.workspace;
   if (args.headless !== undefined) process.env.HEADFUL = args.headless ? '0' : '1';
 
+  // Re-evaluate after possibly setting CODESANDBOX_AUTH_FILE / SAVE_STATE
+  const hasCodesandboxCreds = !!(args.codesandboxCredentials || process.env.CODESANDBOX_AUTH_FILE);
+  const hasAnyBrowserCreds = hasGithubCreds || hasGoogleCreds || hasCodesandboxCreds;
+
   // API-only path — no browser required
-  if (args.apiOnly || (!hasGithubCreds && !hasGoogleCreds)) {
+  if (args.apiOnly || (!hasAnyBrowserCreds)) {
     try {
       const output = await fetchCreditsViaApi({
         tokenFilePath: args.tokenFile,
@@ -868,9 +911,9 @@ async function main() {
         process.exit(1);
       }
       // If auto-detect chose API but it failed, and credentials were supplied, fall through to browser
-      if (!hasGithubCreds && !hasGoogleCreds) {
+      if (!hasGithubCreds && !hasGoogleCreds && !hasCodesandboxCredsEarly) {
         console.error(`API-only mode failed: ${err.message}`);
-        console.error('No browser credentials available (--credentials / --google-credentials). Cannot fall back to browser mode.');
+        console.error('No browser credentials available (--credentials / --google-credentials / --codesandbox-credentials). Cannot fall back to browser mode.');
         process.exit(1);
       }
       console.error(`API fetch failed (${err.message}), falling back to browser mode...`);
@@ -882,7 +925,47 @@ async function main() {
   let context;
   let page;
 
-  if (hasGoogleCreds) {
+  // Priority: direct CodeSandbox storageState > Google > GitHub
+  // This mirrors github-auth.js: once you save the state, you reuse it without re-OAuth.
+  if (hasCodesandboxCredsEarly) {
+    const csbFile = process.env.CODESANDBOX_AUTH_FILE;
+    console.log(`Loading CodeSandbox credentials from ${csbFile}...`);
+    context = await lib.launchBrowserWithStorageState(csbFile, { headless: args.headless });
+    page = await context.pages()[0] || await context.newPage();
+    // Minimal stealth still helps against Cloudflare on dashboard
+    try {
+      await page.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        window.chrome = window.chrome || { runtime: {} };
+      });
+    } catch {}
+    console.log('CodeSandbox credentials loaded, verifying session...');
+    // Verify by going to dashboard – if session expired, fallback will be reported later
+    await page.goto('https://codesandbox.io/dashboard', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForTimeout(3000);
+    // Light Cloudflare wait (same as Google flow)
+    const title = await page.title().catch(() => '');
+    const body = await page.locator('body').innerText().catch(() => '').then(t => t.slice(0, 200));
+    const url = page.url();
+    const isCF = /just a moment|perfor.*security verification|cdn-cgi\/challenge|challenges\.cloudflare|attention required|checking if the site connection is secure/i.test(title + ' ' + body + ' ' + url);
+    if (isCF) {
+      console.log('Cloudflare challenge detected on dashboard, waiting...');
+      let deadline = Date.now() + 30000;
+      while (Date.now() < deadline) {
+        const t = await page.title().catch(() => '');
+        const b = await page.locator('body').innerText().catch(() => '').then(x => x.slice(0, 200));
+        const u = page.url();
+        if (!/just a moment|perfor.*security|cdn-cgi\/challenge|challenges\.cloudflare|attention required/i.test(t + ' ' + b + ' ' + u)) break;
+        await page.waitForTimeout(5000);
+        await page.mouse.move(400 + Math.random()*100, 300 + Math.random()*100).catch(()=>{});
+      }
+    }
+    if (page.url().includes('/signin') || await page.locator('text=Sign in to CodeSandbox').first().count().then(c=>c>0).catch(()=>false)) {
+      console.warn('CodeSandbox storageState expired or not signed in – session needs refresh.');
+      console.warn('Re-create it with: node scripts/get-codesandbox-credits.js --google-credentials <google.json> --save-state ' + csbFile);
+      // Continue – extractCredits will report ok:false with hint
+    }
+  } else if (hasGoogleCreds) {
     // Google credentials: launch browser with Google storageState
     const googleFile = process.env.GOOGLE_AUTH_FILE;
     console.log(`Loading Google credentials from ${googleFile}...`);
@@ -899,6 +982,20 @@ async function main() {
   }
 
   try {
+
+    // Save CodeSandbox storageState for reuse (like github-auth.js --output) – do it before extract
+    // so even if extract fails, the session is cached. Overwrites the file atomically.
+    const saveStatePath = process.env.CODESANDBOX_SAVE_STATE || args.saveState;
+    if (saveStatePath && context) {
+      try {
+        const abs = path.resolve(saveStatePath);
+        await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+        await context.storageState({ path: abs });
+        console.log(`CodeSandbox session saved to ${abs} (reuse with --codesandbox-credentials ${abs})`);
+      } catch (e) {
+        console.warn(`Failed to save storageState to ${saveStatePath}: ${e.message}`);
+      }
+    }
 
     const credits = await extractCredits(page);
 
