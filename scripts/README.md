@@ -169,6 +169,8 @@ node scripts/codesandbox-auth.js \
   --credentials /mnt/s3/github/vm-manager123/github.json \
   --output /mnt/s3/codesandbox-web/vm-manager123.json
 
+docker exec play-with-docker-app-1 bash -c "timeout 180 node scripts/codesandbox-auth.js --google-credentials /mnt/s3/google/etecnologysys/google.json --output /mnt/s3/codesandbox-web/etecnologysys.json"
+
 # Refresh an existing CodeSandbox session
 node scripts/codesandbox-auth.js \
   --codesandbox-credentials /mnt/s3/codesandbox-web/simca.scz.json \

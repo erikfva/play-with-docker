@@ -8,7 +8,7 @@ services:
     shm_size: 2g
     init: true
     volumes:
-      - ./credentials:/mnt/s3:ro
+      - ./credentials:/mnt/s3
       - ./src:/app/src
       - ./scripts:/app/scripts
     ports:
