@@ -4,21 +4,23 @@ Utility scripts for managing Codespace VMs, listing codespaces, and checking Cod
 
 ## Shared Module
 
-All browser-based scripts depend on `auth-browser.js`, which wraps `playwright-core` for launching Chromium with GitHub or Google Playwright `storageState` files. It auto-discovers any installed Chromium binary regardless of Playwright revision, so `npx playwright install chromium` is only needed once.
+All browser-based scripts depend on `auth-browser.js`, which wraps `playwright-core` for launching Chromium with GitHub, Google, or CodeSandbox Playwright `storageState` files (`launchBrowserWithStorageState`, `launchGitHubBrowser`, `ensureSignedIn`). It auto-discovers any installed Chromium binary regardless of Playwright revision, so `npx playwright install chromium` is only needed once. Inside Docker, the host folder `./credentials` is mounted as `/mnt/s3` (`docker-compose.yml:11` `./credentials:/mnt/s3:ro`), so host `credentials/codesandbox-web/*.json` appears as `/mnt/s3/codesandbox-web/*.json` in the container.
 
 ## Create A Codespace VM
 
 ```bash
+# storageState created by ai-brain/github/github-auth.js --output
 node scripts/codespace-vm.js \
-  --credentials /config/workspace/play-with-docker/github-auth.json \
+  --credentials /mnt/s3/github/vm-manager123/github.json \
   --action create
+# host path: credentials/github/vm-manager123/github.json
 ```
 
 Create and stop the Codespace after it appears in the Codespaces list:
 
 ```bash
 node scripts/codespace-vm.js \
-  --credentials /config/workspace/play-with-docker/github-auth.json \
+  --credentials /mnt/s3/github/vm-manager123/github.json \
   --action create \
   --stop
 ```
@@ -27,14 +29,14 @@ Create without waiting for the Codespace to appear in `/codespaces`:
 
 ```bash
 node scripts/codespace-vm.js \
-  --credentials /config/workspace/play-with-docker/github-auth.json \
+  --credentials /mnt/s3/github/vm-manager123/github.json \
   --action create \
   --no-wait
 ```
 
 Create options:
 
-- `--credentials <path>`: Required. Playwright storage-state file created by `github-auth.js`.
+- `--credentials <path>`: Required. Playwright `storageState` file created by `ai-brain/github/github-auth.js --output` (e.g. `credentials/github/<name>/github.json` → `/mnt/s3/github/<name>/github.json` in container).
 - `--action create`: Required.
 - `--template <name>`: Template name. Defaults to `blank`.
 - `--stop`: Stop the Codespace after creation.
@@ -56,7 +58,7 @@ List options:
 
 ```bash
 node scripts/codespace-vm.js \
-  --credentials /config/workspace/play-with-docker/github-auth.json \
+  --credentials /mnt/s3/github/vm-manager123/github.json \
   --action delete \
   --target <codespace-name-or-slug>
 ```
@@ -65,7 +67,7 @@ Stop and delete an active Codespace:
 
 ```bash
 node scripts/codespace-vm.js \
-  --credentials /config/workspace/play-with-docker/github-auth.json \
+  --credentials /mnt/s3/github/vm-manager123/github.json \
   --action delete \
   --target <codespace-name-or-slug> \
   --force
@@ -73,7 +75,7 @@ node scripts/codespace-vm.js \
 
 Delete options:
 
-- `--credentials <path>`: Required. Playwright storage-state file created by `github-auth.js`.
+- `--credentials <path>`: Required. Playwright `storageState` file created by `ai-brain/github/github-auth.js --output`.
 - `--action delete`: Required.
 - `--target <name-or-slug>`: Required. Codespace name or slug to delete.
 - `--force`: Stop an active Codespace before deleting it.
@@ -160,7 +162,7 @@ node scripts/get-codesandbox-credits.js \
   --credentials /mnt/s3/github/vm-manager123/github.json \
   --save-state /mnt/s3/codesandbox-web/vm-manager123.json --json
 
-# Standalone wrapper (same as above, explicit --output)
+# Standalone wrapper (same as above, explicit --output) — run on host (host /mnt/s3 is the S3 mount)
 node scripts/codesandbox-auth.js \
   --google-credentials /mnt/s3/google/simca.scz/google.json \
   --output /mnt/s3/codesandbox-web/simca.scz.json
@@ -169,7 +171,11 @@ node scripts/codesandbox-auth.js \
   --credentials /mnt/s3/github/vm-manager123/github.json \
   --output /mnt/s3/codesandbox-web/vm-manager123.json
 
-docker exec play-with-docker-app-1 bash -c "timeout 180 node scripts/codesandbox-auth.js --google-credentials /mnt/s3/google/etecnologysys/google.json --output /mnt/s3/codesandbox-web/etecnologysys.json"
+# Inside Docker the mount is ro, so use /tmp then copy:
+docker exec play-with-docker-app-1 bash -c "timeout 180 node scripts/codesandbox-auth.js --google-credentials /mnt/s3/google/etecnologysys/google.json --output /tmp/etecnologysys.json && ls -lh /tmp/etecnologysys.json"
+docker cp play-with-docker-app-1:/tmp/etecnologysys.json credentials/codesandbox-web/etecnologysys.json
+# or via get-codesandbox-credits.js directly inside Docker:
+docker exec play-with-docker-app-1 bash -c "timeout 180 node scripts/get-codesandbox-credits.js --google-credentials /mnt/s3/google/etecnologysys/google.json --save-state /tmp/etecnologysys.json --json"
 
 # Refresh an existing CodeSandbox session
 node scripts/codesandbox-auth.js \
@@ -177,7 +183,29 @@ node scripts/codesandbox-auth.js \
   --output /mnt/s3/codesandbox-web/simca.scz.json
 ```
 
-Saved files are standard Playwright `storageState` JSON (`{cookies, origins}`) stored in `credentials/codesandbox-web/` on the host (mounted as `/mnt/s3/codesandbox-web` inside the container via `docker-compose.yml:11` `./credentials:/mnt/s3:ro`). If the session expires, the script warns `CodeSandbox storageState expired … Re-create it with: node scripts/get-codesandbox-credits.js --google-credentials <google.json> --save-state <csb.json>`.
+Saved files are standard Playwright `storageState` JSON (`{cookies, origins}`) stored in `credentials/codesandbox-web/` on the host (mounted as `/mnt/s3/codesandbox-web` inside the container via `docker-compose.yml:11` `./credentials:/mnt/s3:ro`). `--save-state` only writes on `ok:true`; on `ok:false` (e.g. cold Cloudflare cache) the script auto-retries once after 5s and warns `Not saving storageState ... not overwriting existing file` — if no file existed it saves a small failure state for debugging (delete before retry). If the session expires, the script warns `CodeSandbox storageState expired … Re-create it with: node scripts/get-codesandbox-credits.js --google-credentials <google.json> --save-state <csb.json>`.
+
+### Batch: generate for all GitHub credentials
+
+```bash
+mkdir -p /mnt/s3/codesandbox-web
+for d in /mnt/s3/github/*; do
+  [ -d "$d" ] || continue
+  name=$(basename "$d")
+  [ -f "/mnt/s3/codesandbox-web/$name.json" ] && echo "SKIP $name already exists" && continue
+  echo "Generating $name..."
+  timeout 240 node scripts/codesandbox-auth.js \
+    --credentials "$d/github.json" \
+    --output "/mnt/s3/codesandbox-web/$name.json" || echo "FAILED $name"
+done
+ls -lh /mnt/s3/codesandbox-web
+# known failures: etecnologysys-byte → ok:false not authorized (needs codesandbox.io/signin → Authorize),
+# vmmanager-1 → GitHub session expired (re-run ai-brain/github/github-auth.js)
+```
+
+### codesandbox-auth.js (wrapper)
+
+Thin wrapper around `get-codesandbox-credits.js --save-state` with `ai-brain/github/github-auth.js`-style `--output`. Priority: `--codesandbox-credentials` > `--google-credentials` > `--credentials`. Honors `CODESANDBOX_AUTH_FILE`/`GOOGLE_AUTH_FILE`/`GITHUB_AUTH_FILE` env vars. See `scripts/codesandbox-auth.js:1` for usage.
 
 ### Headless VPS behavior
 
