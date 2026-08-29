@@ -983,21 +983,59 @@ async function main() {
 
   try {
 
-    // Save CodeSandbox storageState for reuse (like github-auth.js --output) – do it before extract
-    // so even if extract fails, the session is cached. Overwrites the file atomically.
-    const saveStatePath = process.env.CODESANDBOX_SAVE_STATE || args.saveState;
-    if (saveStatePath && context) {
-      try {
-        const abs = path.resolve(saveStatePath);
-        await fs.promises.mkdir(path.dirname(abs), { recursive: true });
-        await context.storageState({ path: abs });
-        console.log(`CodeSandbox session saved to ${abs} (reuse with --codesandbox-credentials ${abs})`);
-      } catch (e) {
-        console.warn(`Failed to save storageState to ${saveStatePath}: ${e.message}`);
+    let credits = await extractCredits(page);
+
+    // Cold Cloudflare cache: first navigation to /dashboard may get a
+    // "Just a moment..." challenge that sets cf_clearance cookie, but
+    // extractCredits may have already fallen through to /signin before
+    // the cookie is usable. Retry once – second attempt reuses the
+    // freshly set cookie and succeeds (observed with vm-manager232:
+    // 1st run ok:false, 2nd run ok:true without any file change).
+    if (!credits.ok && (hasGithubCreds || hasGoogleCreds)) {
+      const isSignIn = /\/signin/i.test(credits.url) || /Sign in to CodeSandbox/.test(credits.rawExcerpt);
+      if (isSignIn) {
+        console.log('First extraction landed on sign-in (likely cold Cloudflare/OAuth), retrying once in 5s...');
+        await page.waitForTimeout(5000);
+        // Re-ensure OAuth – the cf_clearance is now set, so this will pass
+        try {
+          if (hasGoogleCreds) await ensureCodeSandboxSignedInViaGoogle(page);
+          else await ensureCodeSandboxSignedIn(page, context);
+        } catch (e) {
+          console.warn('Retry ensure sign-in failed:', e.message);
+        }
+        credits = await extractCredits(page);
+        if (credits.ok) console.log('Retry succeeded.');
+        else console.warn('Retry still failed – will report original error.');
       }
     }
 
-    const credits = await extractCredits(page);
+    // Save CodeSandbox storageState for reuse (like github-auth.js --output)
+    // Only save when credits were actually extracted (ok:true) – avoids
+    // overwriting a good file with a sign-in page on Cloudflare/OAuth flake.
+    const saveStatePath = process.env.CODESANDBOX_SAVE_STATE || args.saveState;
+    if (saveStatePath && context) {
+      if (credits.ok) {
+        try {
+          const abs = path.resolve(saveStatePath);
+          await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+          await context.storageState({ path: abs });
+          console.log(`CodeSandbox session saved to ${abs} (reuse with --codesandbox-credentials ${abs})`);
+        } catch (e) {
+          console.warn(`Failed to save storageState to ${saveStatePath}: ${e.message}`);
+        }
+      } else {
+        console.warn(`Not saving storageState to ${saveStatePath}: credits extraction failed (ok:false) – not overwriting existing file.`);
+        // If no file existed before, still save for debugging the failure
+        const abs = path.resolve(saveStatePath);
+        if (!fs.existsSync(abs)) {
+          try {
+            await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+            await context.storageState({ path: abs });
+            console.log(`Saved failure state to ${abs} for debugging (ok:false). Delete it before retrying.`);
+          } catch {}
+        }
+      }
+    }
 
     const output = {
       ok: credits.ok,
