@@ -1072,20 +1072,8 @@ async function main() {
         }).catch(() => null);
         if (localStorageTeam) output.team = localStorageTeam;
       }
-      // 2. Fallback to token file only if still null and workspace matches etecnologysys
-      if (!output.team) {
-        const tokenPath = path.join(__dirname, '..', 'credentials', 'codesandbox', 'etecnologysys.json');
-        if (fs.existsSync(tokenPath)) {
-          const tokenData = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
-          if (tokenData.token) {
-            const res = await fetch('https://api.codesandbox.io/meta/info', {
-              headers: { Authorization: `Bearer ${tokenData.token}` }
-            });
-            const j = await res.json().catch(() => null);
-            if (j?.auth?.team) output.team = j.auth.team;
-          }
-        }
-      }
+      // Team ID was not found in the page URL, HTML, or localStorage.
+      // No hardcoded fallback — the team is only knowable from the authenticated session.
     } catch {}
 
     if (args.json) {

@@ -388,14 +388,15 @@ async function listCodespaces(page) {
   }
 
   if (rows.length === 0) {
-    // Debug: dump page HTML for inspection
-    const html = await page.content();
     console.log('No codespace rows found. Page title:', await page.title());
     console.log('Page URL:', page.url());
-    const fs = require('fs');
-    fs.writeFileSync('debug-codespaces-page.html', html);
-    await page.screenshot({ path: 'debug-codespaces-page.png', fullPage: true });
-    console.log('Debug files saved: debug-codespaces-page.html, debug-codespaces-page.png');
+    if (process.env.DEBUG) {
+      const html = await page.content();
+      const fs = require('fs');
+      fs.writeFileSync('debug-codespaces-page.html', html);
+      await page.screenshot({ path: 'debug-codespaces-page.png', fullPage: true });
+      console.log('Debug files saved: debug-codespaces-page.html, debug-codespaces-page.png');
+    }
     return [];
   }
 

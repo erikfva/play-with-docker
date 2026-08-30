@@ -4,8 +4,8 @@ LABEL org.opencontainers.image.source="https://github.com/erikfva/vm-manager"
 
 # Playwright base (Ubuntu 22.04 jammy) already ships Node 20, Chromium/Firefox/WebKit,
 # their system deps, and xvfb. We keep the VM-manager additions on top.
-# Pin to v1.51.1-jammy so Node stays on the 20.x line (original project base was node:20-bullseye-slim)
-# and playwright-core 1.51.x matches the baked browsers. Bump both together when upgrading.
+# Pinned to v1.62.1-jammy — Node stays on the 20.x line (original project base was node:20-bullseye-slim)
+# and playwright-core 1.62.x matches the baked browsers. Bump both together when upgrading.
 
 USER root
 
@@ -57,14 +57,22 @@ RUN if [ "$NODE_ENV" = "local" ]; then \
 # Ensure Chromium/Chrome match the installed playwright-core version.
 # Base image ships browsers at $PLAYWRIGHT_BROWSERS_PATH (/ms-playwright), but
 # npm may expect a different revision. Install for the *local* version (from package.json)
-# not a pinned 1.51.1, so GH Actions image and VPS container both resolve.
+# not a pinned 1.62.1, so GH Actions image and VPS container both resolve.
 # Install both chromium and chrome (chrome channel is more trusted by Cloudflare).
 RUN npx playwright install --with-deps chromium chrome 2>&1 | tail -30 \
   || npx --yes playwright install --with-deps chromium chrome 2>&1 | tail -30 \
-  || echo "playwright install fallback: browsers already present at $PLAYWRIGHT_BROWSERS_PATH" \
-  && ls -R /ms-playwright 2>&1 | head -n 120 || true \
-  && ls -R /root/.cache/ms-playwright 2>&1 | head -n 30 || true \
-  && npx playwright --version 2>&1 | head -5; node -e "console.log(require('playwright-core/package.json').version, require('playwright-core').chromium.executablePath())" 2>&1 | head -5
+  || true \
+  ; ls -R /ms-playwright 2>&1 | head -n 120 || true \
+  ; ls -R /root/.cache/ms-playwright 2>&1 | head -n 30 || true \
+  ; npx playwright --version 2>&1 | head -5 \
+  ; node -e "console.log(require('playwright-core/package.json').version, require('playwright-core').chromium.executablePath())" 2>&1 | head -5 \
+  ; node -e " \
+      const { chromium } = require('playwright-core'); \
+      const bin = chromium.executablePath(); \
+      const fs = require('fs'); \
+      if (!fs.existsSync(bin)) { console.error('ERROR: Chromium binary not found at', bin); process.exit(1); } \
+      console.log('Chromium binary verified:', bin); \
+    "
 
 COPY src ./src
 COPY scripts ./scripts

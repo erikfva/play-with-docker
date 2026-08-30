@@ -198,66 +198,18 @@ module.exports = client;
 
 ---
 
-## 3. `credits-scraper.js` — new module
+## 3. `credits-scraper.js` — implemented module
 
-Reuses `scripts/github-browser.js` + `scripts/get-codesandbox-credits.js` logic but as a service with timeout and mock seam.
+> **Note**: The full corrected implementation is in `plan-codesandbox-scraping.md`. This section is a summary for context.
 
-```javascript
-// src/services/providers/codesandbox/credits-scraper.js
-'use strict';
-const fs = require('fs');
-const path = require('path');
+The module is at `src/services/providers/codesandbox/credits-scraper.js` and uses **CodeSandbox `storageState`** files from `credentials/codesandbox-web/`, **not** GitHub session files. Key design points:
 
-const DEFAULT_TIMEOUT_MS = 35000; // aligns with dashboard load + Cloudflare
-const WORKSPACE_CANDIDATE_FILES = [
-  '/mnt/s3/github/vm-manager123/github.json',
-  '/mnt/s3/github/vm-manager123-1/github.json',
-  process.env.GITHUB_AUTH_FILE,
-].filter(Boolean);
-
-function parseCreditsFromBody(bodyText) {
-  // Handles both "Credits used 403" and "400 / 400 credits" + "run out of credits"
-  let included = null, used = null, freeUsed = null, billingPeriod = null;
-  const period = bodyText.match(/(\d{1,2}\s+[A-Za-z]+)\s*[–-]\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})/);
-  if (period) billingPeriod = period[0].trim();
-  const inc = bodyText.match(/Included credits\s*[:\n]*\s*(\d+)/i);
-  if (inc) included = parseInt(inc[1],10);
-  const usedM = bodyText.match(/Credits used\s*[:\n]*\s*(\d+)/i);
-  if (usedM) used = parseInt(usedM[1],10);
-  const freeM = bodyText.match(/(\d+)\s*free credits used/i);
-  if (freeM) freeUsed = parseInt(freeM[1],10);
-  if (included == null || used == null) {
-    const slash = bodyText.match(/(\d+)\s*\/\s*(\d+)\s*credits/i);
-    if (slash) {
-      const first = parseInt(slash[1],10), second = parseInt(slash[2],10);
-      if (/run out of credits/i.test(bodyText) && first===second) { used = first; included = second; }
-      else { used = first; included = second; }
-    }
-  }
-  if (/run out of credits/i.test(bodyText) && included != null && used == null) used = included;
-  return { included, used, freeUsed, billingPeriod, remaining: (included!=null&&used!=null)?Math.max(0,included-used):null };
-}
-
-async function scrapeCreditsForTeam(teamId, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-  // Resolve GitHub auth file: prefer file that matches workspace's GitHub user.
-  // For etecnologysys (ws_Eha5JM84UeHdXshrooLDTA) we have no GitHub file → return null.
-  // For vm-manager123 (ws_Sh4V5DwQDYJDBRgDKhm79X) → /mnt/s3/github/vm-manager123/github.json
-  // Heuristic: try each candidate file and check if its dashboard shows the requested team.
-  const lib = require('../../../scripts/github-browser'); // relative to src/.../credits-scraper.js
-  // Actual implementation in file delegates to scripts/get-codesandbox-credits.js extractCredits() by spawning with GITHUB_AUTH_FILE and parsing JSON.
-  // Keeping the file small: we spawn the CLI script and capture JSON.
-}
-
-module.exports = { parseCreditsFromBody, scrapeCreditsForTeam };
-```
-
-Simpler production implementation (used in `codesandbox-provider.js`): spawn `scripts/get-codesandbox-credits.js --credentials <file> --workspace <team> --json --headful` via `child_process.spawn` with `xvfb-run` wrapper, 60s timeout, parse JSON. If no `GITHUB_AUTH_FILE` candidate succeeds, return `null`. This avoids importing Playwright directly in the provider (keeps provider lightweight and test-mockable).
-
-Key behaviours:
-- Cloudflare `Just a moment` → `waitForCloudflare(page, 45s)` + `--disable-blink-features=AutomationControlled` (`scripts/github-browser.js:29`) + `xvfb-run -a --server-args="-screen 0 1366x850x24"`.
-- Dashboard `400 / 400 credits` sidebar fallback + `View usage` click → `https://codesandbox.io/t/usage?workspace=ws_...` detailed extraction (verified for `vm-manager123` `403/400` and `vm-manager123-1` `406/400`).
-- Parsing via `parseCreditsFromBody()` handles both `Credits used 275` and `400 / 400 credits`.
-- Returns `{ included, used, remaining, billingPeriod, team, url }` or `null` on failure.
+- `listWebCredentialFiles()` — discovers `codesandbox-web/*.json` files from `CODESANDBOX_WEB_CREDENTIALS_DIR` (falls back to `/mnt/s3/codesandbox-web` then `credentials/codesandbox-web`). Re-reads on every call; no directory listing cache.
+- `runScraperWithCredential(credFile, teamId, timeoutMs)` — spawns `scripts/get-codesandbox-credits.js` with `--codesandbox-credentials <file>` (direct session, no GitHub/Google OAuth). Deletes `_XVFB_REEXEC` from child env so the child can re-exec under `xvfb-run` if needed.
+- `scrapeCreditsForTeam(teamId, opts)` — checks TTL cache first; tries a `credentialHint` file directly (same basename as the API token file) before falling back to sequential search. One Chromium at a time, stops at first match.
+- `putCachedScrape` only stores non-null results. `null` (no match found) is never cached so newly added session files are picked up immediately.
+- Cache TTL controlled by `CODESANDBOX_CREDITS_CACHE_TTL_SECONDS` (default 300 s).
+- Returns `{ included, used, remaining, billingPeriod, team, url, fetchedAt }` or `null`.
 
 If `scrapeCreditsForTeam` returns `null`, provider keeps `credits` `null` with limitation.
 

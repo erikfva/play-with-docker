@@ -171,7 +171,7 @@ node scripts/codesandbox-auth.js \
   --credentials /mnt/s3/github/vm-manager123/github.json \
   --output /mnt/s3/codesandbox-web/vm-manager123.json
 
-# Inside Docker the mount is ro, so use /tmp then copy:
+# Inside Docker the mount is read-write; write directly or use /tmp if permissions differ:
 docker exec play-with-docker-app-1 bash -c "timeout 180 node scripts/codesandbox-auth.js --google-credentials /mnt/s3/google/etecnologysys/google.json --output /tmp/etecnologysys.json && ls -lh /tmp/etecnologysys.json"
 docker cp play-with-docker-app-1:/tmp/etecnologysys.json credentials/codesandbox-web/etecnologysys.json
 # or via get-codesandbox-credits.js directly inside Docker:

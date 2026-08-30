@@ -76,10 +76,9 @@ response. This is fixed in **CS-6** below alongside the full scraper replacement
 
 ## CS-5 — Write unit tests
 
-**Status**: ❌ TODO
+**Status**: ✅ DONE
 
-**File**: `tests/codesandbox-credential-status.test.js` (new file — follows the
-naming convention of `tests/codesandbox-provider-create.test.js`)
+**File**: `tests/codesandbox-credential-status.test.js`
 
 **Test framework**: `node:test` with `assert` — matches all existing test files
 in this project. Do not use Jest or Sinon.
@@ -285,9 +284,9 @@ Test indirectly via quota entry assertions above, or export for direct testing:
 
 ## CS-6 — Replace `credits-scraper.js` with corrected implementation
 
-**Status**: ❌ TODO
+**Status**: ✅ DONE
 
-**File**: `src/services/providers/codesandbox/credits-scraper.js` (full replacement)
+**File**: `src/services/providers/codesandbox/credits-scraper.js`
 
 **Why**: The current implementation has 7 documented issues — see
 `plan-codesandbox-scraping.md` § "Issues Found in the Current Implementation"
@@ -343,9 +342,9 @@ corrected scraper stubbed; no real browser is launched.
 
 ## CS-7 — Write `credits-scraper.js` unit tests
 
-**Status**: ❌ TODO
+**Status**: ✅ DONE
 
-**File**: `tests/codesandbox-credits-scraper.test.js` (new file)
+**File**: `tests/codesandbox-credits-scraper.test.js`
 
 **Depends on**: CS-6 (corrected `credits-scraper.js` must be in place)
 
