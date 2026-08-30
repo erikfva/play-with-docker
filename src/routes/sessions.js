@@ -496,22 +496,7 @@ router.delete('/:id', async (req, res) => {
       }
     }
 
-    if (row.provider === 'codespaces') {
-      // Codespaces rows are soft-deleted (status = TERMINATED) rather than
-      // hard-deleted so that countActiveSessions() in credential-status-service
-      // can correctly report 0 active sessions after termination. Without this,
-      // a hard-deleted row would still appear "active" in any in-flight status
-      // check that ran before the delete committed.
-      //
-      // NOTE: TERMINATED rows are never automatically purged. They accumulate
-      // indefinitely. If this becomes a concern, add a periodic cleanup job:
-      //   DELETE FROM sessions WHERE provider = 'codespaces'
-      //     AND status = 'TERMINATED'
-      //     AND updatedAt < NOW() - INTERVAL '30 days';
-      await db.run("UPDATE sessions SET status = 'TERMINATED' WHERE id = ?", [row.id]);
-    } else {
-      await db.run('DELETE FROM sessions WHERE id = ?', [row.id]);
-    }
+    await db.run('DELETE FROM sessions WHERE id = ?', [row.id]);
 
     const response = {
       message: `Session ${row.id} (${row.provider}) terminated and removed from orchestrator.`,
