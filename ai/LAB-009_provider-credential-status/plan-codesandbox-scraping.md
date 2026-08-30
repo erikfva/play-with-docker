@@ -300,7 +300,25 @@ function resolveWebCredentialsDir() {
 // ---------------------------------------------------------------------------
 
 const scrapeCache = new Map(); // teamId → { result, expiresAt }
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Cache TTL in milliseconds. Controlled by CODESANDBOX_CREDITS_CACHE_TTL_SECONDS.
+ * Evaluated once at module load time so the value is stable within a process.
+ *
+ * - Default: 300 s (5 minutes) — avoids re-launching Chromium on back-to-back
+ *   status checks while still reflecting credit changes within one billing cycle.
+ * - Set to 0 to disable caching (every call scrapes fresh — useful for debugging).
+ * - Set to a large value (e.g. 3600) to reduce scraping frequency on deployments
+ *   that poll credential status frequently.
+ */
+const CACHE_TTL_MS = (() => {
+  const raw = process.env.CODESANDBOX_CREDITS_CACHE_TTL_SECONDS;
+  if (raw !== undefined && raw !== '') {
+    const parsed = parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed >= 0) return parsed * 1000;
+  }
+  return 5 * 60 * 1000; // default: 5 minutes
+})();
 
 function getCachedScrape(teamId) {
   const hit = scrapeCache.get(teamId);
@@ -731,17 +749,18 @@ never caches the directory listing. This means:
 
 The TTL cache is keyed by `teamId` (workspace ID), not by file path or filename.
 A cached result means "we successfully scraped credits for this workspace within
-the last 5 minutes". This has two implications:
+the configured TTL window" (default 5 minutes, controlled by
+`CODESANDBOX_CREDITS_CACHE_TTL_SECONDS`). This has two implications:
 
 - **New file added for a team that previously had no match** → because `null`
   results are never cached, the next call immediately tries the full candidate
   list including the new file. There is no delay.
 - **Matching file deleted while a cached result is live** → the cache serves
-  the last known result for up to 5 minutes. After expiry, the next call will
+  the last known result until the TTL expires. After expiry, the next call will
   try the remaining files. If no match is found, `null` is returned (not cached),
   so subsequent calls keep retrying.
 - **File refreshed (session re-authenticated)** → the cache may serve the
-  result from the old session for up to 5 minutes. This is acceptable — the
+  result from the old session until the TTL expires. This is acceptable — the
   credits data itself (balance, billing period) does not change because the
   session was refreshed; only the cookies changed.
 
@@ -766,8 +785,9 @@ The scraper re-reads the directory listing on every effective scrape invocation.
 | `team` field absent from script result | Accepted as match if `ok:true` and credit fields present (`resultMatchesTeam` fallback path). |
 | `remaining: 0` from scraping | `creditExhausted = true`; status → `QUOTA_EXHAUSTED` even if rate-limits are free. |
 | Rate-limits exhausted + active local session | `QUOTA_EXHAUSTED` beats `LIMITED` via precedence. |
-| Same team requested twice within 5 min TTL | Second call returns cached result; no browser launched. |
-| List mode: 3 credentials, same team across calls | Cache prevents redundant launches after the first match; each subsequent call returns the cached result. |
+| Same team requested twice within TTL window | Second call returns cached result; no browser launched. TTL length controlled by `CODESANDBOX_CREDITS_CACHE_TTL_SECONDS` (default 300 s). |
+| `CODESANDBOX_CREDITS_CACHE_TTL_SECONDS=0` | Caching effectively disabled — every call scrapes fresh. `putCachedScrape` stores the entry but `getCachedScrape` returns it as expired immediately (`Date.now() > expiresAt` when TTL is 0 ms). |
+| List mode: 3 credentials, same team across calls | Cache prevents redundant launches after the first match; each subsequent call within TTL returns the cached result. |
 | `NODE_ENV=test` | `scrapeCreditsForTeam` returns `null` immediately; tests use `stubModule` to inject mock scrapers. |
 | **New file added to `codesandbox-web/`** | Picked up immediately on the next cache miss — `listWebCredentialFiles()` re-reads the directory every time. No restart needed. |
 | **File deleted from `codesandbox-web/`** | `fs.existsSync` check skips the missing file silently. If it was the only match for a team, the cache serves the last result until TTL expires, then returns `null`. |
@@ -843,6 +863,10 @@ CODESANDBOX_CREDITS_SCRAPER_ENABLED=0
 CODESANDBOX_WEB_CREDENTIALS_DIR=
 # Per-candidate browser timeout in ms (default 60000)
 CODESANDBOX_SCRAPER_TIMEOUT_MS=60000
+# How long (in seconds) to cache a successful scrape result per workspace.
+# Set to 0 to disable caching (scrape fresh on every status check).
+# Default: 300 (5 minutes).
+CODESANDBOX_CREDITS_CACHE_TTL_SECONDS=300
 ```
 
 Note: `CODESANDBOX_SCRAPER_ENABLED` (without `CREDITS_`) is accepted as an
@@ -892,6 +916,7 @@ alias in the provider but `CODESANDBOX_CREDITS_SCRAPER_ENABLED` is canonical.
 - First matching candidate wins; subsequent candidates not tried.
 - Successful result cached; `putCachedScrape` called with non-null value.
 - `clearScrapeCache` resets the map; next call re-scrapes.
+- **Configurable TTL**: `CODESANDBOX_CREDITS_CACHE_TTL_SECONDS=10` → cache entry expires after 10 s; `CODESANDBOX_CREDITS_CACHE_TTL_SECONDS=0` → `CACHE_TTL_MS === 0`; `putCachedScrape` still stores the entry but `getCachedScrape` returns it as expired immediately (since `Date.now() > hit.expiresAt` when TTL is 0 ms), so every call re-scrapes fresh.
 - **Dynamic: new file added after a prior null result** → next call includes the
   new file (null was not cached; directory re-read fresh).
 - **Dynamic: matching file deleted after a cached hit** → cache serves last result

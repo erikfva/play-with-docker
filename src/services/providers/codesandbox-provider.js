@@ -208,9 +208,8 @@ class CodeSandboxProvider extends BaseProvider {
       remaining: numOrNull(conc.remaining)
     }));
 
-    // Dashboard credits (400 included / 275 used for etecnologysys) are UI-only.
-    // api.codesandbox.io exposes no billing endpoint (probed 30+ candidates → 404).
-    // Try web-scraping via Playwright (GitHub storageState → dashboard) — best-effort.
+    // Credit balance is not exposed by the CodeSandbox API (probed 30+ candidates → 404).
+    // Try web-scraping via Playwright (codesandbox-web storageState → dashboard) — best-effort.
     let creditUsage = null;
     let creditLimit = null;
     let creditRemaining = null;
@@ -256,10 +255,15 @@ class CodeSandboxProvider extends BaseProvider {
       }));
       limitations.push(limitation(
         'quotas[2].usage',
-        'Dashboard credits (e.g. 400 included / 275 used for etecnologysys, 400/403 for vm-manager123) are rendered by codesandbox.io web UI via private cookie-auth billing API, not by GET /meta/info. ' +
-        'Probed api.codesandbox.io billing candidates with Bearer token → 404/403. ' +
-        'Scraping https://codesandbox.io/dashboard via Playwright (GitHub storageState, xvfb-run --headful, Cloudflare bypass) was attempted and failed or no GitHub session was available. ' +
-        'Check https://codesandbox.io/dashboard?workspace=' + (teamId || 'ws_...') + ' for authoritative usage; a passing rate-limit check can still fail at VM creation if credits are exhausted.'
+        'The CodeSandbox API does not expose credit balance. Credits are available only via ' +
+        'the dashboard at ' + (teamId
+          ? `https://codesandbox.io/t/usage?workspace=${teamId}`
+          : 'https://codesandbox.io/dashboard') + '. ' +
+        (scraperEnabled
+          ? 'Scraping was enabled but no matching web credential file was found for this workspace. ' +
+            'Ensure a codesandbox-web session file exists in CODESANDBOX_WEB_CREDENTIALS_DIR.'
+          : 'Set CODESANDBOX_CREDITS_SCRAPER_ENABLED=1 and provide web session files in ' +
+            'CODESANDBOX_WEB_CREDENTIALS_DIR to retrieve live credit balance.')
       ));
     }
 
@@ -278,7 +282,6 @@ class CodeSandboxProvider extends BaseProvider {
         referenceLimits: {
           freePlanConcurrentVmsDefault: 10,
           includedCreditsDefault: 400,
-          billingPeriodExample: '4 Aug – 8 Sep 2026 (etecnologysys: 275/400, vm-manager123: 403/400 as scraped from dashboard)',
           dashboardUrl: teamId ? `https://codesandbox.io/t/usage?workspace=${teamId}` : 'https://codesandbox.io/dashboard'
         },
         ...(creditSource ? { creditSource } : {}),
