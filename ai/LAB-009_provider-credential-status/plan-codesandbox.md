@@ -3,7 +3,7 @@
 **Spec**: `ai/LAB-009_provider-credential-status/spec.md` (§10.2)
 **Research**: `research.md` (§5.2)
 **Shared infra**: `plan-shared.md` — read first for envelope, cache, precedence
-**Last Updated**: 2026-08-24 — updated to use web-scraping for credit balance
+**Last Updated**: 2026-08-30 — updated to reflect codesandbox-web storageState approach
 
 ---
 
@@ -11,13 +11,13 @@
 
 CodeSandbox is the richest live-data provider: one authenticated metadata call
 (`getMetaInfo()`) yields both token validity **and** live rate-limit headroom.
-The SDK **does not** expose credit balance (`types.gen.ts: MetaInformation` has no `credits` field), but the web dashboard `https://codesandbox.io/dashboard` does (`400 / 400 credits`, `Virtual machine credits 8 Aug – 8 Sep`). 
+The SDK **does not** expose credit balance (`types.gen.ts: MetaInformation` has no `credits` field), but the web dashboard `https://codesandbox.io/dashboard` does (`400 / 400 credits`, `Virtual machine credits 8 Aug – 8 Sep`).
 
-Probed `api.codesandbox.io` with `Bearer csb_v1_...` (30+ `/teams/{ws_...}/billing` variants) → `404/403` — dashboard is Cloudflare-protected and requires cookie-auth via GitHub OAuth. Verified via `scripts/get-codesandbox-credits.js` with `vm-manager123` (`ws_Sh4V5DwQDYJDBRgDKhm79X` `400/403` + `vm-manager123-1` `ws_ThQtWFucY3Rxk6KQzhW3gW` `400/406`).
+Probed `api.codesandbox.io` with `Bearer csb_v1_...` (30+ `/teams/{ws_...}/billing` variants) → `404/403` — dashboard is Cloudflare-protected and requires cookie-authenticated browser session.
 
 The checker therefore has two layers:
 1. **Primary**: `getMetaInfo()` for `INVALID` vs `AVAILABLE`/`QUOTA_EXHAUSTED` via `rate_limits` (always, no env needed)
-2. **Secondary (scraping, opt-in)**: `CODESANDBOX_CREDITS_SCRAPER_ENABLED=1` → Playwright with GitHub `storageState` (`/mnt/s3/github/vm-manager123/github.json`) → `codesandbox.io/dashboard` → `View usage` → parse `Included credits` / `Credits used` / `400 / 400 credits`. Best-effort; on failure or when disabled keep `credits` `null` with limitation. Scraping result is cached 5 min per team (`credits-scraper.js` `scrapeCache`) and candidates are tried in parallel.
+2. **Secondary (scraping, opt-in)**: `CODESANDBOX_CREDITS_SCRAPER_ENABLED=1` → Playwright with **CodeSandbox** `storageState` from `credentials/codesandbox-web/` (passed as `--codesandbox-credentials` — direct session, no GitHub/Google OAuth needed) → `codesandbox.io/t/usage?workspace=ws_...` → parse `Included credits` / `Credits used`. Best-effort; on failure or when disabled keep `credits` `null` with limitation. Scraping result is cached per team with a configurable TTL (`CODESANDBOX_CREDITS_CACHE_TTL_SECONDS`, default 300s). Candidates are tried **sequentially** (one Chromium at a time). When `credentialHint` is provided (same basename as the API token file), the matching `codesandbox-web/` file is tried first — avoiding a full sequential scan in the common case.
 
 ---
 
@@ -33,7 +33,7 @@ src/services/providers/codesandbox-provider.js         — add getCredentialStat
 ### New files
 
 ```
-src/services/providers/codesandbox/credits-scraper.js  — Playwright DAG: GitHub auth → dashboard → credits
+src/services/providers/codesandbox/credits-scraper.js  — codesandbox-web storageState → dashboard → credits
 scripts/get-codesandbox-credits.js                     — standalone CLI (already exists, now reused as reference)
 ```
 

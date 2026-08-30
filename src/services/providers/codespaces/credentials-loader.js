@@ -360,22 +360,14 @@ async function discoverFullFilesystemKey(filename) {
   const providerDir = path.join(credsDir, 'codespaces');
   try {
     const entries = await fs.readdir(providerDir);
-    // Match exact filename or case-insensitive, also handle .json/.txt
+    // Match exact filename or case-insensitive variant.
+    // fs.readdir returns bare filenames (no path separators), so endsWith('/')
+    // can never match — only the exact/case-insensitive check is needed here.
     const match = entries.find((e) => e === filename || e.toLowerCase() === filename.toLowerCase());
     if (match) {
       return {
         type: 'filesystem',
         path: path.join(providerDir, match),
-        originalRef: filename
-      };
-    }
-    // Also try without provider prefix already handled, but check for basename match
-    const lowerFilename = filename.toLowerCase();
-    const altMatch = entries.find((e) => e.toLowerCase().endsWith('/' + lowerFilename) || e.toLowerCase() === lowerFilename);
-    if (altMatch) {
-      return {
-        type: 'filesystem',
-        path: path.join(providerDir, altMatch),
         originalRef: filename
       };
     }

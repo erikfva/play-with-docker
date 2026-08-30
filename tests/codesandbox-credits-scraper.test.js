@@ -533,3 +533,67 @@ test('listWebCredentialFiles omits deleted files on subsequent call', () => {
     process.env.CODESANDBOX_WEB_CREDENTIALS_DIR = origDir;
   });
 });
+
+// ============================================================================
+// Section 8: scrapeCreditsForTeam — end-to-end cache hit path
+// Pre-populate the cache via putCachedScrape, then call scrapeCreditsForTeam
+// in non-test NODE_ENV. The function should return the cached value without
+// calling listWebCredentialFiles or runScraperWithCredential.
+// ============================================================================
+
+test('scrapeCreditsForTeam end-to-end: returns cached value from putCachedScrape without hitting the filesystem', async () => {
+  const origNodeEnv = process.env.NODE_ENV;
+  const origDir = process.env.CODESANDBOX_WEB_CREDENTIALS_DIR;
+
+  // Use production mode so the early NODE_ENV=test guard does not fire
+  process.env.NODE_ENV = 'production';
+  // Point at a non-existent dir — if the cache miss path runs it returns null
+  // because listWebCredentialFiles returns []. If we see the cached value back
+  // it proves the cache hit path was taken.
+  process.env.CODESANDBOX_WEB_CREDENTIALS_DIR = '/tmp/__csb_cache_e2e_test__';
+
+  const scraper = freshScraper();
+  scraper.clearScrapeCache();
+
+  const cachedValue = {
+    included: 400,
+    used: 120,
+    remaining: 280,
+    billingPeriod: '1 Aug – 1 Sep 2026',
+    team: 'ws_e2e',
+    url: 'https://codesandbox.io/t/usage?workspace=ws_e2e',
+    fetchedAt: new Date().toISOString(),
+  };
+
+  // Manually prime the cache (mirrors what a successful scrape would do)
+  scraper.putCachedScrape('ws_e2e', cachedValue);
+
+  // Call scrapeCreditsForTeam — should return the cached value, not null
+  const result = await scraper.scrapeCreditsForTeam('ws_e2e');
+
+  assert.deepStrictEqual(result, cachedValue, 'should return the cached value');
+
+  process.env.NODE_ENV = origNodeEnv;
+  process.env.CODESANDBOX_WEB_CREDENTIALS_DIR = origDir;
+});
+
+test('scrapeCreditsForTeam end-to-end: cache miss falls through to no-files path', async () => {
+  const origNodeEnv = process.env.NODE_ENV;
+  const origDir = process.env.CODESANDBOX_WEB_CREDENTIALS_DIR;
+
+  process.env.NODE_ENV = 'production';
+  process.env.CODESANDBOX_WEB_CREDENTIALS_DIR = '/tmp/__csb_cache_miss_e2e__';
+
+  const scraper = freshScraper();
+  scraper.clearScrapeCache();
+
+  // No cache entry → falls through to listWebCredentialFiles → [] → returns null
+  const result = await scraper.scrapeCreditsForTeam('ws_miss');
+  assert.strictEqual(result, null, 'cache miss with no files should return null');
+
+  // Null must not be cached
+  assert.strictEqual(scraper.getCachedScrape('ws_miss'), null, 'null result must not be cached');
+
+  process.env.NODE_ENV = origNodeEnv;
+  process.env.CODESANDBOX_WEB_CREDENTIALS_DIR = origDir;
+});

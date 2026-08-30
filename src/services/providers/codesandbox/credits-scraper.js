@@ -139,7 +139,7 @@ function runScraperWithCredential(credFile, teamId, timeoutMs) {
     });
 
     let stdout = '';
-    let stderr = ''; // eslint-disable-line no-unused-vars
+    let stderr = '';
     let settled = false;
 
     const timer = setTimeout(() => {
@@ -168,6 +168,9 @@ function runScraperWithCredential(credFile, teamId, timeoutMs) {
         console.warn(
           `[credits-scraper] Script exited ${code} for ${path.basename(credFile)}`
         );
+        if (stderr.trim()) {
+          console.warn(`[credits-scraper] stderr: ${stderr.trim().slice(0, 500)}`);
+        }
       }
 
       // The script emits log lines before the JSON block.

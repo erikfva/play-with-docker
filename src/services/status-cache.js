@@ -31,7 +31,19 @@ function putCachedStatus(key, value, ttlMs = DEFAULT_TTL_MS) {
 
 /**
  * Return a cached checker result or share one in-progress upstream check.
- * UNKNOWN results and rejected checks are deliberately not cached.
+ *
+ * Caching rules:
+ * - Only non-UNKNOWN checker results are cached. A checker that returns
+ *   { status: 'UNKNOWN' } directly, or throws (which the caller converts to
+ *   buildUnknownEntry before this function is involved), is never stored.
+ * - If a checker returns null (should not happen by contract, but defensive),
+ *   putCachedStatus stores null; getCachedStatus returns null on the next call
+ *   and re-runs the checker — effectively the same as not caching. No special
+ *   handling is needed since the contract requires checkers to return an object.
+ * - UNKNOWN results are never cached so transient upstream failures don't
+ *   poison the cache and every subsequent request retries the upstream call.
+ * - LIMITED is never returned by a checker (it is added by finalizeEntry from
+ *   local DB state), so it never enters this cache.
  */
 async function getOrCheckStatus(key, checker) {
   const cached = getCachedStatus(key);

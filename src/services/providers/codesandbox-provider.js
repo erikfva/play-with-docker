@@ -1,5 +1,6 @@
 const BaseProvider = require('./base-provider');
 const db = require('../../db/db');
+const path = require('path');
 const codesandboxClient = require('./codesandbox/client');
 const { loadCodeSandboxCredentials } = require('./codesandbox/credentials-loader');
 const { mapToSession } = require('./codesandbox/session-mapper');
@@ -226,7 +227,7 @@ class CodeSandboxProvider extends BaseProvider {
         // file in codesandbox-web/ first (e.g. codesandbox/vm-manager232.json →
         // codesandbox-web/vm-manager232.json), avoiding a full sequential search.
         const credentialHint = loaded.credentialRef
-          ? require('path').basename(loaded.credentialRef)
+          ? path.basename(loaded.credentialRef)
           : undefined;
         const scraped = await scraper.scrapeCreditsForTeam(teamId, { timeoutMs: 45000, credentialHint });
         if (scraped && (typeof scraped.used === 'number' || typeof scraped.included === 'number')) {

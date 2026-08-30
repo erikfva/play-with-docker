@@ -4,7 +4,7 @@ Utility scripts for managing Codespace VMs, listing codespaces, and checking Cod
 
 ## Shared Module
 
-All browser-based scripts depend on `auth-browser.js`, which wraps `playwright-core` for launching Chromium with GitHub, Google, or CodeSandbox Playwright `storageState` files (`launchBrowserWithStorageState`, `launchGitHubBrowser`, `ensureSignedIn`). It auto-discovers any installed Chromium binary regardless of Playwright revision, so `npx playwright install chromium` is only needed once. Inside Docker, the host folder `./credentials` is mounted as `/mnt/s3` (`docker-compose.yml:11` `./credentials:/mnt/s3:ro`), so host `credentials/codesandbox-web/*.json` appears as `/mnt/s3/codesandbox-web/*.json` in the container.
+All browser-based scripts depend on `auth-browser.js`, which wraps `playwright-core` for launching Chromium with GitHub, Google, or CodeSandbox Playwright `storageState` files (`launchBrowserWithStorageState`, `launchGitHubBrowser`, `ensureSignedIn`). It auto-discovers any installed Chromium binary regardless of Playwright revision, so `npx playwright install chromium` is only needed once. Inside Docker, the host folder `./credentials` is mounted as `/mnt/s3` (`docker-compose.yml` `./credentials:/mnt/s3`), so host `credentials/codesandbox-web/*.json` appears as `/mnt/s3/codesandbox-web/*.json` in the container.
 
 ## Create A Codespace VM
 
@@ -183,7 +183,7 @@ node scripts/codesandbox-auth.js \
   --output /mnt/s3/codesandbox-web/simca.scz.json
 ```
 
-Saved files are standard Playwright `storageState` JSON (`{cookies, origins}`) stored in `credentials/codesandbox-web/` on the host (mounted as `/mnt/s3/codesandbox-web` inside the container via `docker-compose.yml:11` `./credentials:/mnt/s3:ro`). `--save-state` only writes on `ok:true`; on `ok:false` (e.g. cold Cloudflare cache) the script auto-retries once after 5s and warns `Not saving storageState ... not overwriting existing file` — if no file existed it saves a small failure state for debugging (delete before retry). If the session expires, the script warns `CodeSandbox storageState expired … Re-create it with: node scripts/get-codesandbox-credits.js --google-credentials <google.json> --save-state <csb.json>`.
+Saved files are standard Playwright `storageState` JSON (`{cookies, origins}`) stored in `credentials/codesandbox-web/` on the host (mounted as `/mnt/s3/codesandbox-web` inside the container via `docker-compose.yml` `./credentials:/mnt/s3`). `--save-state` only writes on `ok:true`; on `ok:false` (e.g. cold Cloudflare cache) the script auto-retries once after 5s and warns `Not saving storageState ... not overwriting existing file` — if no file existed it saves a small failure state for debugging (delete before retry). If the session expires, the script warns `CodeSandbox storageState expired … Re-create it with: node scripts/get-codesandbox-credits.js --google-credentials <google.json> --save-state <csb.json>`.
 
 ### Batch: generate for all GitHub credentials
 

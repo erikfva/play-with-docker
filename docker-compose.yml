@@ -8,6 +8,11 @@ services:
     shm_size: 2g
     init: true
     volumes:
+      # Read-write (not :ro) so codesandbox-auth.js can write refreshed
+      # Playwright storageState files (credentials/codesandbox-web/*.json)
+      # back to the host when run inside the container via docker exec.
+      # CLI scraper scripts that need to update session files require write
+      # access; the application itself never writes to this directory.
       - ./credentials:/mnt/s3
       - ./src:/app/src
       - ./scripts:/app/scripts

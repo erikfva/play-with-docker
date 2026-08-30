@@ -396,7 +396,7 @@ GET {{baseUrl}}/sessions/codesandbox/credentials/status
 X-Server-Token: {{serverToken}}
 
 ###
-@codeSandboxCredentials = vm-manager232-santi.json
+@codeSandboxCredentials = vm-manager234-1.json
 
 ### 33. Check Single CodeSandbox Credential Status
 # Expected: 200 single entry; verify quotaUnit values are normalized (count, credits) and quotaPeriod null for instantaneous concurrent_vms.
