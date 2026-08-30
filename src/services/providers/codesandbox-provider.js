@@ -222,7 +222,13 @@ class CodeSandboxProvider extends BaseProvider {
       try {
         // Lazy require for test mockability (stubModule can stub credits-scraper)
         const scraper = require('./codesandbox/credits-scraper');
-        const scraped = await scraper.scrapeCreditsForTeam(teamId, { timeoutMs: 45000 });
+        // Pass the API token filename as a hint so the scraper tries the same-named
+        // file in codesandbox-web/ first (e.g. codesandbox/vm-manager232.json →
+        // codesandbox-web/vm-manager232.json), avoiding a full sequential search.
+        const credentialHint = loaded.credentialRef
+          ? require('path').basename(loaded.credentialRef)
+          : undefined;
+        const scraped = await scraper.scrapeCreditsForTeam(teamId, { timeoutMs: 45000, credentialHint });
         if (scraped && (typeof scraped.used === 'number' || typeof scraped.included === 'number')) {
           creditUsage = scraped.used;
           creditLimit = scraped.included;

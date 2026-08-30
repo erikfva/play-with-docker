@@ -171,13 +171,28 @@ function runScraperWithCredential(credFile, teamId, timeoutMs) {
       }
 
       // The script emits log lines before the JSON block.
-      // Find the last line that starts with '{' — that is the JSON output.
-      const lines = stdout.split('\n');
-      const jsonLine = [...lines].reverse().find((l) => l.trim().startsWith('{'));
-      if (!jsonLine) return resolve(null);
+      // The JSON output is pretty-printed across multiple lines, starting with
+      // a line that begins with '{'. Find the character offset of the last such
+      // line and take everything from there — that is the full JSON object.
+      const jsonStart = (() => {
+        let pos = -1;
+        let search = 0;
+        while (search < stdout.length) {
+          const nl = stdout.indexOf('\n', search);
+          const lineStart = search;
+          const lineEnd = nl === -1 ? stdout.length : nl;
+          const line = stdout.slice(lineStart, lineEnd).trimStart();
+          if (line.startsWith('{')) pos = lineStart;
+          search = lineEnd + 1;
+        }
+        return pos;
+      })();
+      if (jsonStart === -1) return resolve(null);
+
+      const jsonStr = stdout.slice(jsonStart).trim();
 
       try {
-        const parsed = JSON.parse(jsonLine.trim());
+        const parsed = JSON.parse(jsonStr);
         resolve(typeof parsed === 'object' && parsed !== null ? parsed : null);
       } catch {
         console.warn(
@@ -213,20 +228,43 @@ function resultMatchesTeam(parsed, teamId) {
 }
 
 // ---------------------------------------------------------------------------
+// Result builder
+// ---------------------------------------------------------------------------
+
+/** Normalise a raw scraper script result into the ScrapedCredits shape. */
+function buildResult(parsed, teamId) {
+  return {
+    included:      parsed.includedCredits  ?? null,
+    used:          parsed.usedCredits       ?? null,
+    remaining:     parsed.remainingCredits  ?? null,
+    billingPeriod: parsed.billingPeriod     ?? null,
+    team:          parsed.team              ?? teamId,
+    url:           parsed.url               ?? null,
+    fetchedAt:     parsed.fetchedAt         ?? new Date().toISOString(),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /**
  * Scrape credit balance for a CodeSandbox workspace.
  *
- * Tries codesandbox-web/*.json session files sequentially.
- * Stops at the first file whose dashboard shows the target team ID.
+ * When `opts.credentialHint` is provided (the basename of the API token file,
+ * e.g. "vm-manager232.json"), the scraper first tries the file with the same
+ * name in the web-credentials directory. This avoids iterating all candidates
+ * when the naming convention matches (API token file and web session file share
+ * the same basename). Falls back to sequential search if the hint file is
+ * absent or does not match the target team.
+ *
  * Returns null when no match is found or scraping is disabled.
  * Never throws (errors are caught internally or result in null).
  *
  * @param {string} teamId  - Workspace ID from meta.auth.team (e.g. ws_...)
  * @param {object} [opts]
- * @param {number} [opts.timeoutMs]  - Per-candidate timeout (default from env or 60s)
+ * @param {number} [opts.timeoutMs]      - Per-candidate timeout (default from env or 60s)
+ * @param {string} [opts.credentialHint] - Basename of the API token file to try first
  * @returns {Promise<ScrapedCredits|null>}
  *
  * @typedef {object} ScrapedCredits
@@ -238,7 +276,7 @@ function resultMatchesTeam(parsed, teamId) {
  * @property {string|null} url            - URL that was scraped
  * @property {string}      fetchedAt      - ISO timestamp
  */
-async function scrapeCreditsForTeam(teamId, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+async function scrapeCreditsForTeam(teamId, { timeoutMs = DEFAULT_TIMEOUT_MS, credentialHint } = {}) {
   if (!teamId) return null;
 
   // In test mode skip real browser scraping — tests stub this module directly.
@@ -247,18 +285,55 @@ async function scrapeCreditsForTeam(teamId, { timeoutMs = DEFAULT_TIMEOUT_MS } =
   const cached = getCachedScrape(teamId);
   if (cached !== null) return cached;
 
+  const webDir = resolveWebCredentialsDir();
+
+  // --- hint-first: try the same-named file in codesandbox-web/ directly ----
+  // When the API token file and the web session file share the same basename
+  // (e.g. codesandbox/vm-manager232.json → codesandbox-web/vm-manager232.json),
+  // skip the sequential candidate search entirely.
+  if (credentialHint) {
+    const hintBasename = path.basename(credentialHint);
+    const hintFile = path.join(webDir, hintBasename);
+    if (fs.existsSync(hintFile)) {
+      let parsed;
+      try {
+        parsed = await runScraperWithCredential(hintFile, teamId, timeoutMs);
+      } catch {
+        parsed = null;
+      }
+      if (parsed && resultMatchesTeam(parsed, teamId)) {
+        const result = buildResult(parsed, teamId);
+        putCachedScrape(teamId, result);
+        return result;
+      }
+      if (parsed) {
+        console.log(
+          `[credits-scraper] hint ${hintBasename} returned team=${parsed.team || 'unknown'}, want ${teamId} — falling back to full search`
+        );
+      }
+    } else {
+      console.log(
+        `[credits-scraper] hint file ${hintBasename} not found in ${webDir} — falling back to full search`
+      );
+    }
+  }
+
+  // --- fallback: sequential search across all candidates -------------------
   const candidates = listWebCredentialFiles();
   if (candidates.length === 0) {
     console.warn(
       '[credits-scraper] No web credential files found in',
-      resolveWebCredentialsDir()
+      webDir
     );
     return null;
   }
 
-  // Sequential: one Playwright/Chromium process at a time.
-  // Stop at the first candidate that matches the target team.
+  // Skip the hint file if we already tried it above
+  const hintPath = credentialHint ? path.join(webDir, path.basename(credentialHint)) : null;
+
   for (const credFile of candidates) {
+    if (hintPath && credFile === hintPath) continue; // already tried
+
     let parsed;
     try {
       parsed = await runScraperWithCredential(credFile, teamId, timeoutMs);
@@ -269,15 +344,7 @@ async function scrapeCreditsForTeam(teamId, { timeoutMs = DEFAULT_TIMEOUT_MS } =
     if (!parsed) continue;
 
     if (resultMatchesTeam(parsed, teamId)) {
-      const result = {
-        included:      parsed.includedCredits  ?? null,
-        used:          parsed.usedCredits       ?? null,
-        remaining:     parsed.remainingCredits  ?? null,
-        billingPeriod: parsed.billingPeriod     ?? null,
-        team:          parsed.team              ?? teamId,
-        url:           parsed.url               ?? null,
-        fetchedAt:     parsed.fetchedAt         ?? new Date().toISOString(),
-      };
+      const result = buildResult(parsed, teamId);
       putCachedScrape(teamId, result);
       return result;
     }
@@ -288,7 +355,7 @@ async function scrapeCreditsForTeam(teamId, { timeoutMs = DEFAULT_TIMEOUT_MS } =
   }
 
   console.warn(
-    `[credits-scraper] No web credential matched team ${teamId} after ${candidates.length} candidates`
+    `[credits-scraper] No web credential matched team ${teamId} after searching ${candidates.length} candidate(s)`
   );
   return null;
 }

@@ -136,7 +136,7 @@ Reuses a previously saved CodeSandbox Playwright `storageState` (like `github-au
 ```bash
 # Reuse saved session (created via --save-state or codesandbox-auth.js)
 node scripts/get-codesandbox-credits.js \
-  --codesandbox-credentials /mnt/s3/codesandbox-web/simca.scz.json
+  --codesandbox-credentials /mnt/s3/codesandbox-web/simcascz-svg.json
 
 # Or via env var (same as GITHUB_AUTH_FILE / GOOGLE_AUTH_FILE)
 CODESANDBOX_AUTH_FILE=/mnt/s3/codesandbox-web/simca.scz.json \

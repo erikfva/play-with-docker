@@ -1,4 +1,4 @@
-@baseUrl = http://localhost:3200/api/v1
+@baseUrl = http://dockerhost:3200/api/v1
 @s3EndPoint = {{$dotenv CODE_S3_ENDPOINT}}
 @s3AccessKeyId = {{$dotenv CODE_AWS_ACCESS_KEY_ID}}
 @s3SecretAccessKey = {{$dotenv CODE_AWS_SECRET_ACCESS_KEY}}
@@ -396,7 +396,7 @@ GET {{baseUrl}}/sessions/codesandbox/credentials/status
 X-Server-Token: {{serverToken}}
 
 ###
-@codeSandboxCredentials = codesandbox/vm-manager232.json
+@codeSandboxCredentials = vm-manager232-santi.json
 
 ### 33. Check Single CodeSandbox Credential Status
 # Expected: 200 single entry; verify quotaUnit values are normalized (count, credits) and quotaPeriod null for instantaneous concurrent_vms.

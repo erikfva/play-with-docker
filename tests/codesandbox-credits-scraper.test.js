@@ -249,7 +249,7 @@ test('runScraperWithCredential returns null when credFile does not exist', async
   assert.strictEqual(result, null);
 });
 
-test('runScraperWithCredential extracts last JSON line from stdout', async () => {
+test('runScraperWithCredential extracts last JSON block from stdout (multi-line pretty-printed)', async () => {
   const scraper = freshScraper();
 
   // Create a temporary stub script that emits log lines then a JSON line

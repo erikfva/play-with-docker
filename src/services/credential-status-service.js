@@ -149,6 +149,16 @@ async function finalizeEntry(providerName, raw, checkerResult) {
   return entry;
 }
 
+// Error codes that mean "the credential file does not exist" — these should
+// surface as 404 when the caller explicitly named a credentialRef, rather
+// than being swallowed into a 200 UNKNOWN response.
+const NOT_FOUND_CODES = new Set([
+  'CODESPACES_NO_CREDENTIAL',
+  'CODESANDBOX_CREDENTIALS_MISSING',
+  'CREDENTIAL_NOT_FOUND',
+  'GCS_CREDENTIAL_NOT_FOUND',
+]);
+
 async function getCredentialStatus(providerName, { credentialRef, displayName } = {}) {
   const SUPPORTED_FOR_STATUS = new Set(['gcs', 'codesandbox', 'codespaces']);
   if (!SUPPORTED_FOR_STATUS.has(providerName)) {
@@ -171,6 +181,14 @@ async function getCredentialStatus(providerName, { credentialRef, displayName } 
     raw = await loadForStatus(providerName, credentialRef);
     raw.displayName = displayName || null;
   } catch (loadError) {
+    // When the caller explicitly named a credentialRef and the file doesn't
+    // exist, return 404 rather than a 200 UNKNOWN entry.
+    if (credentialRef && NOT_FOUND_CODES.has(loadError.code)) {
+      throw new ProviderError(
+        `Credential '${credentialRef}' not found for provider '${providerName}'`,
+        { code: 'CREDENTIAL_NOT_FOUND', statusCode: 404 }
+      );
+    }
     return buildUnknownEntry(
       { provider: providerName, credentialRef, displayName, credentialFingerprint: null },
       loadError
