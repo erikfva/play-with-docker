@@ -6,6 +6,7 @@ const { ProviderError } = require('../services/errors/provider-errors');
 const keepAliveService = require('../services/keep-alive-service');
 const { listAvailableCredentials } = require('../services/credentials-lister');
 const { initGoogleCredentialsFromS3IfNeeded } = require('../services/google-credentials-loader');
+const credentialStatusService = require('../services/credential-status-service');
 const { getRowValue } = require('../utils/helpers');
 
 const router = express.Router();
@@ -329,6 +330,19 @@ router.get('/codespaces-credentials', async (req, res) => {
     return res.json(result);
   } catch (error) {
     return mapErrorToHttp(res, error, 'Failed to list credentials');
+  }
+});
+
+router.get('/:provider/credentials/status', async (req, res) => {
+  try {
+    const { provider } = req.params;
+    const { credentialRef } = req.query;
+    const result = credentialRef
+      ? await credentialStatusService.getCredentialStatus(provider, { credentialRef })
+      : await credentialStatusService.listCredentialStatuses(provider);
+    return res.json(result);
+  } catch (error) {
+    return mapErrorToHttp(res, error, 'Failed to check credential status');
   }
 });
 

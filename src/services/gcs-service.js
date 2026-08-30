@@ -48,6 +48,13 @@ async function startCloudShellSession(options = {}) {
   }
 }
 
+async function getEnvironmentAccess(options = {}) {
+  const auth = await getAuthClient(options.credentialsPath);
+  const name = await getEnvironmentName(auth, options.credentialsPath);
+  const res = await cloudshell.users.environments.get({ name, auth });
+  return { envName: name, state: res.data.state };
+}
+
 async function getCloudShellStatus(envName, options = {}) {
   try {
     const auth = await getAuthClient(options.credentialsPath);
@@ -111,6 +118,9 @@ async function removePublicKey(keyName, envName, options = {}) {
 module.exports = {
   startCloudShellSession,
   getCloudShellStatus,
+  getEnvironmentAccess,
+  getAuthClient,
+  getEnvironmentName,
   addPublicKey,
   removePublicKey
 };

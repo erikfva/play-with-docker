@@ -1,11 +1,20 @@
-FROM node:20-bullseye-slim
+FROM mcr.microsoft.com/playwright:v1.62.1-jammy
 
 LABEL org.opencontainers.image.source="https://github.com/erikfva/vm-manager"
+
+# Playwright base (Ubuntu 22.04 jammy) already ships Node 20, Chromium/Firefox/WebKit,
+# their system deps, and xvfb. We keep the VM-manager additions on top.
+# Pinned to v1.62.1-jammy — Node stays on the 20.x line (original project base was node:20-bullseye-slim)
+# and playwright-core 1.62.x matches the baked browsers. Bump both together when upgrading.
+
+USER root
 
 WORKDIR /app
 
 ARG NODE_ENV=production
 
+# Keep original play-with-docker deps + headless display support for scripts/get-codesandbox-credits.js (xvfb-run)
+# s3fs/fuse/openssh-client/gh are required by the orchestrator (see ai/project-overview.md and docker-entrypoint.sh)
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     python3 \
@@ -17,6 +26,7 @@ RUN apt-get update \
     ca-certificates \
     curl \
     gnupg \
+    xvfb \
   && mkdir -p /usr/share/keyrings \
   && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
      | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
@@ -26,9 +36,17 @@ RUN apt-get update \
   && apt-get update \
   && apt-get install -y --no-install-recommends gh \
   && gh --version \
+  && xvfb-run --help >/dev/null 2>&1 || true \
   && rm -rf /var/lib/apt/lists/*
 
-COPY package.json ./
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=0
+# VPS Cloudflare bypass needs realistic locale/timezone + headed Chromium via xvfb
+ENV TZ=UTC
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+
+COPY package.json package-lock.json* ./
 RUN if [ "$NODE_ENV" = "local" ]; then \
       npm install; \
     else \
@@ -36,11 +54,32 @@ RUN if [ "$NODE_ENV" = "local" ]; then \
     fi \
   && npm cache clean --force
 
+# Ensure Chromium/Chrome match the installed playwright-core version.
+# Base image ships browsers at $PLAYWRIGHT_BROWSERS_PATH (/ms-playwright), but
+# npm may expect a different revision. Install for the *local* version (from package.json)
+# not a pinned 1.62.1, so GH Actions image and VPS container both resolve.
+# Install both chromium and chrome (chrome channel is more trusted by Cloudflare).
+RUN npx playwright install --with-deps chromium chrome 2>&1 | tail -30 \
+  || npx --yes playwright install --with-deps chromium chrome 2>&1 | tail -30 \
+  || true \
+  ; ls -R /ms-playwright 2>&1 | head -n 120 || true \
+  ; ls -R /root/.cache/ms-playwright 2>&1 | head -n 30 || true \
+  ; npx playwright --version 2>&1 | head -5 \
+  ; node -e "console.log(require('playwright-core/package.json').version, require('playwright-core').chromium.executablePath())" 2>&1 | head -5 \
+  ; node -e " \
+      const { chromium } = require('playwright-core'); \
+      const bin = chromium.executablePath(); \
+      const fs = require('fs'); \
+      if (!fs.existsSync(bin)) { console.error('ERROR: Chromium binary not found at', bin); process.exit(1); } \
+      console.log('Chromium binary verified:', bin); \
+    "
+
 COPY src ./src
+COPY scripts ./scripts
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
-  && mkdir -p /mnt/s3 /var/log/s3fs \
+  && mkdir -p /mnt/s3 /mnt/s3/github /var/log/s3fs \
   && touch /etc/fuse.conf \
   && ( grep -qxF "user_allow_other" /etc/fuse.conf || echo "user_allow_other" >> /etc/fuse.conf )
 

@@ -272,10 +272,107 @@ async function loadCodespacesCredentials(credentialRefOrHeader) {
   // Resolve reference to actual source
   const resolvedRef = resolveCredentialReference(credentialRef);
 
-  // Load and validate
-  const result = await loadCredentialFile(resolvedRef);
+  // Try loading directly
+  try {
+    return await loadCredentialFile(resolvedRef);
+  } catch (loadError) {
+    // Bare filename (e.g. "vm-manager123.json") without prefix should also work.
+    // In S3 API mode the real key has a "codespaces/" prefix, in filesystem mode
+    // the file lives under S3_MOUNT_DIR/codespaces/. Try prefixed variant.
+    const isBare = credentialRef && !credentialRef.includes('/') && !credentialRef.startsWith('s3://');
+    if (isBare) {
+      const inS3ApiMode = process.env.S3_BUCKET && !shouldResolveRelativeRefsFromFilesystem();
+      if (inS3ApiMode) {
+        const resolvedRef2 = await discoverFullS3Key(credentialRef);
+        if (resolvedRef2) {
+          return await loadCredentialFile(resolvedRef2);
+        }
+      } else {
+        // Filesystem / local / s3fs mode: try codespaces/<filename>
+        try {
+          const prefixedRef = `codespaces/${credentialRef}`;
+          const resolvedPrefixed = resolveCredentialReference(prefixedRef);
+          return await loadCredentialFile(resolvedPrefixed);
+        } catch {}
+        // Also try to discover via directory listing as last resort
+        const discovered = await discoverFullFilesystemKey(credentialRef);
+        if (discovered) {
+          return await loadCredentialFile(discovered);
+        }
+      }
+    }
+    throw loadError;
+  }
+}
 
-  return result;
+/**
+ * When a bare filename is passed (e.g. "vm-manager123.json"), find the
+ * full S3 key by listing objects under the codespaces/ prefix and matching
+ * by the last path segment. Falls back to filesystem resolution when
+ * S3_BUCKET is not configured.
+ */
+async function discoverFullS3Key(filename) {
+  const bucket = process.env.S3_BUCKET;
+  if (!bucket) {
+    return null; // No S3 — cannot discover
+  }
+
+  const { ListObjectsV2Command } = require('@aws-sdk/client-s3');
+  let s3;
+  try {
+    s3 = buildS3Client();
+  } catch {
+    return null; // S3 not configured — cannot discover
+  }
+
+  try {
+    const listCmd = new ListObjectsV2Command({
+      Bucket: bucket,
+      Prefix: 'codespaces/',
+    });
+    const response = await s3.send(listCmd);
+    const match = (response.Contents || []).find(
+      (obj) => obj.Key && obj.Key.endsWith('/' + filename)
+    );
+
+    if (match) {
+      return {
+        type: 's3',
+        bucket,
+        key: match.Key,
+        originalRef: filename
+      };
+    }
+  } catch {
+    // S3 list failed (auth, network) — cannot discover, fall through
+  }
+
+  return null;
+}
+
+async function discoverFullFilesystemKey(filename) {
+  let credsDir;
+  try {
+    credsDir = getCredentialsDirectory();
+  } catch {
+    return null;
+  }
+  const providerDir = path.join(credsDir, 'codespaces');
+  try {
+    const entries = await fs.readdir(providerDir);
+    // Match exact filename or case-insensitive variant.
+    // fs.readdir returns bare filenames (no path separators), so endsWith('/')
+    // can never match — only the exact/case-insensitive check is needed here.
+    const match = entries.find((e) => e === filename || e.toLowerCase() === filename.toLowerCase());
+    if (match) {
+      return {
+        type: 'filesystem',
+        path: path.join(providerDir, match),
+        originalRef: filename
+      };
+    }
+  } catch {}
+  return null;
 }
 
 module.exports = {

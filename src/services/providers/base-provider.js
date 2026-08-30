@@ -52,6 +52,23 @@ class BaseProvider {
   async isSessionActive(sessionRow) {
     throw new Error('isSessionActive must be implemented by provider');
   }
+
+  /**
+   * Check a credential's validity and quota without creating sessions or running
+   * commands. Returns:
+   *   { status, quotas, limitations, validated, expiresAt, details? }
+   *
+   * Throwing causes the dispatcher to return an UNKNOWN entry (not cached).
+   * Returning { status: 'UNKNOWN' } has the same effect and is appropriate for
+   * provider-internal soft failures (e.g. a sub-call that is expected to be
+   * unreliable).
+   *
+   * Optional — base default throws to signal "not implemented". Providers that
+   * support status checking override this method.
+   */
+  async getCredentialStatus(loadedCredential) {
+    throw new Error('getCredentialStatus must be implemented by provider');
+  }
 }
 
 module.exports = BaseProvider;

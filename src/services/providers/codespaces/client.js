@@ -257,6 +257,13 @@ async function validateToken(token) {
   return githubGet('/user', token);
 }
 
+async function getBillingUsageSummary(token, login) {
+  return githubGet(
+    `/users/${encodeURIComponent(login)}/settings/billing/usage/summary`,
+    token
+  );
+}
+
 /**
  * List codespaces for the authenticated account.
  * @param {string} token
@@ -289,5 +296,6 @@ module.exports = {
   startCodespace,
   stopCodespace,
   validateToken,
+  getBillingUsageSummary,
   invalidateCodespace
 };

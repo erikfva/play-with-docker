@@ -1,5 +1,6 @@
 const BaseProvider = require('./base-provider');
 const db = require('../../db/db');
+const path = require('path');
 const codesandboxClient = require('./codesandbox/client');
 const { loadCodeSandboxCredentials } = require('./codesandbox/credentials-loader');
 const { mapToSession } = require('./codesandbox/session-mapper');
@@ -21,6 +22,24 @@ const DOCKER_HOST_ENV_FILE = '/tmp/codesandbox-docker-host.env';
 const DEFAULT_HIBERNATION_TIMEOUT_SECONDS = 86400;
 const DEFAULT_KEEP_ALIVE_INTERVAL_MINUTES = 60;
 const KEEP_ALIVE_COMMAND = 'printf "%s\\n" "$(date -u +%FT%TZ)" > /tmp/play-with-docker-keepalive';
+
+const REFERENCE_PRICING = {
+  Pico: { creditsPerHour: 5 },
+  Nano: { creditsPerHour: 10 },
+  Micro: { creditsPerHour: 20 },
+  Small: { creditsPerHour: 40 },
+  Medium: { creditsPerHour: 80 },
+  Large: { creditsPerHour: 160 },
+  XLarge: { creditsPerHour: 320 }
+};
+
+function numOrNull(n) {
+  return typeof n === 'number' && Number.isFinite(n) ? n : null;
+}
+function limitation(field, reason) { return { field, reason }; }
+function quotaEntry({ quotaUnit, quotaPeriod, usage = null, limit = null, remaining = null, extra = {} }) {
+  return { quotaUnit, quotaPeriod, usage, limit, remaining, ...extra };
+}
 
 function parseMetadata(metadata) {
   if (!metadata) {
@@ -126,6 +145,155 @@ class CodeSandboxProvider extends BaseProvider {
       intervalMinutes: parsePositiveInteger(keepAlive.intervalMinutes, DEFAULT_KEEP_ALIVE_INTERVAL_MINUTES),
       strategy: keepAlive.strategy || 'codesandbox-sdk-command',
       runOnStart: true
+    };
+  }
+
+  async getCredentialStatus(loaded) {
+    const limitations = [];
+    const quotas = [];
+
+    const apiClient = codesandboxClient.getApiClient(loaded.token);
+    const metaResult = await apiClient.getMetaInfo();
+
+    const httpStatus = metaResult?.response?.status;
+
+    if (httpStatus === 401 || httpStatus === 403) {
+      return {
+        status: 'INVALID',
+        validated: false,
+        quotas: [],
+        expiresAt: null,
+        limitations: [limitation(
+          'status',
+          `getMetaInfo() returned HTTP ${httpStatus}: token is expired, revoked, or lacks required scopes (sandbox_create, vm_manage).`
+        )]
+      };
+    }
+
+    if (!metaResult?.data) {
+      const err = new Error(`getMetaInfo() returned HTTP ${httpStatus ?? 'unknown'}`);
+      err.statusCode = httpStatus;
+      throw err;
+    }
+
+    const meta = metaResult.data;
+
+    const rl = meta.rate_limits || {};
+    const hourly = rl.sandboxes_hourly || {};
+    const conc = rl.concurrent_vms || {};
+
+    const hourlyUsage =
+      hourly.limit != null && hourly.remaining != null
+        ? numOrNull(hourly.limit - hourly.remaining)
+        : null;
+
+    quotas.push(quotaEntry({
+      quotaUnit: 'count',
+      quotaPeriod: 'hourly-window',
+      usage: hourlyUsage,
+      limit: numOrNull(hourly.limit),
+      remaining: numOrNull(hourly.remaining),
+      extra: { resetAt: hourly.reset ?? null }
+    }));
+
+    const concUsage =
+      conc.limit != null && conc.remaining != null
+        ? numOrNull(conc.limit - conc.remaining)
+        : null;
+
+    quotas.push(quotaEntry({
+      quotaUnit: 'count',
+      quotaPeriod: null,
+      usage: concUsage,
+      limit: numOrNull(conc.limit),
+      remaining: numOrNull(conc.remaining)
+    }));
+
+    // Credit balance is not exposed by the CodeSandbox API (probed 30+ candidates → 404).
+    // Try web-scraping via Playwright (codesandbox-web storageState → dashboard) — best-effort.
+    let creditUsage = null;
+    let creditLimit = null;
+    let creditRemaining = null;
+    let creditSource = null;
+    let creditBillingPeriod = null;
+
+    const teamId = meta.auth?.team;
+    const scraperEnabled = process.env.CODESANDBOX_CREDITS_SCRAPER_ENABLED === '1' || process.env.CODESANDBOX_SCRAPER_ENABLED === '1';
+    if (teamId && scraperEnabled) {
+      try {
+        // Lazy require for test mockability (stubModule can stub credits-scraper)
+        const scraper = require('./codesandbox/credits-scraper');
+        // Pass the API token filename as a hint so the scraper tries the same-named
+        // file in codesandbox-web/ first (e.g. codesandbox/vm-manager232.json →
+        // codesandbox-web/vm-manager232.json), avoiding a full sequential search.
+        const credentialHint = loaded.credentialRef
+          ? path.basename(loaded.credentialRef)
+          : undefined;
+        const scraped = await scraper.scrapeCreditsForTeam(teamId, { timeoutMs: 45000, credentialHint });
+        if (scraped && (typeof scraped.used === 'number' || typeof scraped.included === 'number')) {
+          creditUsage = scraped.used;
+          creditLimit = scraped.included;
+          creditRemaining = scraped.remaining;
+          creditBillingPeriod = scraped.billingPeriod;
+          creditSource = scraped.url || `https://codesandbox.io/t/usage?workspace=${teamId}`;
+        }
+      } catch (scrapeErr) {
+        console.warn(`[CodeSandbox] scrapeCreditsForTeam failed: ${scrapeErr.message}`);
+      }
+    }
+
+    if (creditUsage != null || creditLimit != null) {
+      quotas.push(quotaEntry({
+        quotaUnit: 'credits',
+        quotaPeriod: 'billing-cycle',
+        usage: numOrNull(creditUsage),
+        limit: numOrNull(creditLimit),
+        remaining: numOrNull(creditRemaining),
+        extra: {
+          ...(creditSource ? { source: creditSource } : {}),
+          ...(creditBillingPeriod ? { billingPeriod: creditBillingPeriod } : {})
+        }
+      }));
+    } else {
+      quotas.push(quotaEntry({
+        quotaUnit: 'credits',
+        quotaPeriod: 'billing-cycle',
+        usage: null, limit: null, remaining: null
+      }));
+      limitations.push(limitation(
+        'quotas[2].usage',
+        'The CodeSandbox API does not expose credit balance. Credits are available only via ' +
+        'the dashboard at ' + (teamId
+          ? `https://codesandbox.io/t/usage?workspace=${teamId}`
+          : 'https://codesandbox.io/dashboard') + '. ' +
+        (scraperEnabled
+          ? 'Scraping was enabled but no matching web credential file was found for this workspace. ' +
+            'Ensure a codesandbox-web session file exists in CODESANDBOX_WEB_CREDENTIALS_DIR.'
+          : 'Set CODESANDBOX_CREDITS_SCRAPER_ENABLED=1 and provide web session files in ' +
+            'CODESANDBOX_WEB_CREDENTIALS_DIR to retrieve live credit balance.')
+      ));
+    }
+
+    const rateLimitExhausted = conc.remaining === 0 || hourly.remaining === 0;
+    const creditExhausted = creditRemaining === 0;
+
+    return {
+      status: (rateLimitExhausted || creditExhausted) ? 'QUOTA_EXHAUSTED' : 'AVAILABLE',
+      validated: true,
+      quotas,
+      limitations,
+      expiresAt: null,
+      details: {
+        referencePricing: REFERENCE_PRICING,
+        authScopes: meta.auth?.scopes ?? null,
+        referenceLimits: {
+          freePlanConcurrentVmsDefault: 10,
+          includedCreditsDefault: 400,
+          dashboardUrl: teamId ? `https://codesandbox.io/t/usage?workspace=${teamId}` : 'https://codesandbox.io/dashboard'
+        },
+        ...(creditSource ? { creditSource } : {}),
+        ...(creditBillingPeriod ? { creditBillingPeriod } : {})
+      }
     };
   }
 
