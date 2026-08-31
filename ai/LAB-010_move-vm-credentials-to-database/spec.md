@@ -319,13 +319,14 @@ Existing session routes are unchanged.
 | File | Change |
 |:---|:---|
 | `src/db/db.js` | Add `vps` table and indexes to schema bootstrap |
+| `src/services/vps-credential-utils.js` | **New** — shared validation, per-provider fingerprinting, and JSON-without-token guard |
 | `src/services/db-credentials-loader.js` | **New** — DB-backed credential resolution with TTL cache |
 | `src/routes/vps.js` | **New** — CRUD routes for `vps` |
 | `src/server.js` | Mount `vps.js` router at `/api/v1/vps` |
-| `src/routes/sessions.js` | DB-first resolution with legacy fallback in credential helper functions |
-| `src/services/providers/codesandbox/credentials-loader.js` | No change (fallback path) |
-| `src/services/providers/codespaces/credentials-loader.js` | No change (fallback path) |
-| `src/services/google-credentials-loader.js` | No change (fallback path) |
+| `src/routes/sessions.js` | Remove direct `initGoogleCredentialsFromS3IfNeeded` call in `DELETE /:id` (now handled inside GCS loader) |
+| `src/services/providers/codespaces/credentials-loader.js` | Add DB-first prefix before legacy path in `loadCodespacesCredentials` |
+| `src/services/providers/codesandbox/credentials-loader.js` | Add DB-first prefix before legacy path in `loadCodeSandboxCredentials` |
+| `src/services/google-credentials-loader.js` | Add DB-first prefix before legacy path in `initGoogleCredentialsFromS3IfNeeded` |
 | `scripts/seed-credentials.js` | **New** — bulk import script |
 | `package.json` | Add `seed-credentials` script entry |
 

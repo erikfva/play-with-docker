@@ -189,6 +189,30 @@ db.ready = (async () => {
       AND COALESCE(status, '') NOT IN ('TERMINATED', 'FAILED')
   `);
 
+    // vps table — stores provider credentials for DB-first resolution
+    await run(`CREATE TABLE IF NOT EXISTS vps (
+      id                    TEXT PRIMARY KEY,
+      provider              TEXT NOT NULL,
+      name                  TEXT NOT NULL,
+      credentialfilename    TEXT NOT NULL,
+      credentialcontent     TEXT NOT NULL,
+      credentialfingerprint TEXT NOT NULL,
+      createdat             TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+      updatedat             TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    await run(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_vps_provider_name
+      ON vps (provider, name)
+    `);
+
+    await run(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_vps_provider_fingerprint
+      ON vps (provider, credentialfingerprint)
+    `);
+
+    console.log('[DB] ✓ vps table ready');
+
     console.log('[DB] ✓ Schema initialized successfully');
   } catch (err) {
     console.error('[DB] ✗ Schema initialization failed:', err.message);
