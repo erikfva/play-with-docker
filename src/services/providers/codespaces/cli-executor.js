@@ -30,6 +30,18 @@ function classifyGhStderrError(text) {
     });
   }
 
+  // Billing issue — quota exhausted or payment required.
+  // gh CLI surfaces this as "HTTP 402: ... billing issue ..." inside stderr.
+  if (/http 402|billing issue|usage.*disallowed|disallowed.*billing/i.test(text)) {
+    // Extract the GitHub message after "HTTP 402:" if present, otherwise use the full text.
+    const match = text.match(/HTTP 402:\s*(.+)/i);
+    const message = match ? match[1].trim() : text.trim();
+    return new ProviderError(message, {
+      code: 'CODESPACES_BILLING_ERROR',
+      statusCode: 402
+    });
+  }
+
   if (/bad credentials|token.*invalid|invalid.*token|401/i.test(text)) {
     return new ProviderError('GitHub token is invalid or expired', {
       code: 'CODESPACES_TOKEN_INVALID',
