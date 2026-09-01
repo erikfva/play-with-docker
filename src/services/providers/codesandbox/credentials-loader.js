@@ -227,7 +227,18 @@ async function loadCredentialFile(credentialRefObj) {
 async function loadCodeSandboxCredentials(credentialRefOrHeader) {
   const credentialRef = credentialRefOrHeader;
 
-  // Resolve reference to actual source
+  // 1. Try DB first — if the ref matches a vps.name for this provider, use it.
+  try {
+    const { loadCredentialByRef } = require('../../../services/db-credentials-loader');
+    const dbResult = await loadCredentialByRef('codesandbox', credentialRef);
+    if (dbResult) return dbResult;
+  } catch (err) {
+    if (err.code !== 'VPS_NOT_FOUND') throw err;
+    // VPS_NOT_FOUND → no DB record with this name; fall through to legacy loader
+    console.warn(`[Credentials] DB lookup miss for codesandbox/${credentialRef}, falling back to legacy loader`);
+  }
+
+  // 2. Legacy path — resolve from filesystem / S3
   const resolvedRef = resolveCredentialReference(credentialRef);
 
   // Load and validate

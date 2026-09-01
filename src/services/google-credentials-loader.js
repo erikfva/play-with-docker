@@ -163,9 +163,30 @@ function buildS3Client() {
 }
 
 async function initGoogleCredentialsFromS3IfNeeded( googleCredentials ) {
+  const credentialsRef = (googleCredentials || process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
+
+  // 1. Try DB first — if the ref matches a vps.name for gcs, use it.
+  if (credentialsRef) {
+    try {
+      const { loadCredentialByRef } = require('./db-credentials-loader');
+      const dbResult = await loadCredentialByRef('gcs', credentialsRef);
+      if (dbResult && dbResult.keyFilePath) {
+        // The DB loader already wrote the JSON to a temp file at keyFilePath.
+        // Mirror what the legacy path does: set the env var so the googleapis
+        // client picks it up, and return the path.
+        process.env.GOOGLE_APPLICATION_CREDENTIALS = dbResult.keyFilePath;
+        return dbResult.keyFilePath;
+      }
+    } catch (err) {
+      if (err.code !== 'VPS_NOT_FOUND') throw err;
+      // VPS_NOT_FOUND → no DB record with this name; fall through to legacy loader
+      console.warn(`[Credentials] DB lookup miss for gcs/${credentialsRef}, falling back to legacy loader`);
+    }
+  }
+
+  // 2. Legacy path — unchanged below
   if (isLocalNodeEnv()) {
     console.log('Credential mode: local (read GOOGLE_APPLICATION_CREDENTIALS from S3_MOUNT_DIR)');
-    const credentialsRef = (googleCredentials || process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
     if (!credentialsRef) {
       console.log('Credential mode: local skipped (GOOGLE_APPLICATION_CREDENTIALS is empty)');
       return;
@@ -186,9 +207,9 @@ async function initGoogleCredentialsFromS3IfNeeded( googleCredentials ) {
 
   if (isS3fsEnabled()) {
     console.log('Credential mode: s3fs (filesystem path from GOOGLE_APPLICATION_CREDENTIALS)');
-    const credentialsRef = (googleCredentials || '').trim();
-    if (credentialsRef) {
-      const credentialsPath = resolveS3fsCredentialsPath(credentialsRef);
+    const s3fsRef = (googleCredentials || '').trim();
+    if (s3fsRef) {
+      const credentialsPath = resolveS3fsCredentialsPath(s3fsRef);
       try {
         await fs.access(credentialsPath);
       } catch (error) {
@@ -202,7 +223,6 @@ async function initGoogleCredentialsFromS3IfNeeded( googleCredentials ) {
   }
 
   console.log('Credential mode: s3-api (download GOOGLE_APPLICATION_CREDENTIALS from object storage)');
-  const credentialsRef = (googleCredentials || process.env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
   if (!credentialsRef) {
     console.log('Credential mode: s3-api skipped (GOOGLE_APPLICATION_CREDENTIALS is empty)');
     return;

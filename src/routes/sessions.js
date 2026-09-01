@@ -5,39 +5,10 @@ const { getProvider, listProviders, normalizeProviderName } = require('../servic
 const { ProviderError } = require('../services/errors/provider-errors');
 const keepAliveService = require('../services/keep-alive-service');
 const { listAvailableCredentials } = require('../services/credentials-lister');
-const { initGoogleCredentialsFromS3IfNeeded } = require('../services/google-credentials-loader');
 const { getRowValue } = require('../utils/helpers');
+const { mapErrorToHttp } = require('../utils/http-helpers');
 
 const router = express.Router();
-
-function mapErrorToHttp(res, error, fallbackMessage) {
-  if (error instanceof ProviderError) {
-    return res.status(error.statusCode).json({
-      error: error.message,
-      code: error.code,
-      details: error.details
-    });
-  }
-
-  console.error(error);
-
-  function isValidHttpStatus(v) {
-    return Number.isInteger(v) && v >= 100 && v < 600;
-  }
-
-  const statusCode = isValidHttpStatus(error.statusCode)
-    ? error.statusCode
-    : isValidHttpStatus(error.status)
-      ? error.status
-      : isValidHttpStatus(error.code)
-        ? error.code
-        : 500;
-
-  return res.status(statusCode).json({
-    error: error.message || fallbackMessage,
-    code: error.code
-  });
-}
 
 function parseMetadata(rawMetadata) {
   if (!rawMetadata) {
@@ -461,8 +432,9 @@ router.delete('/:id', async (req, res) => {
 
     // Initialize provider-aware credentials for GCS termination
     if (row.provider === 'gcs') {
-      const credentialRef = requireGoogleCredentialRefForRequest(req, row);
-      await initGoogleCredentialsFromS3IfNeeded(credentialRef);
+      requireGoogleCredentialRefForRequest(req, row);
+      // initGoogleCredentialsFromS3IfNeeded is now called inside gcs-provider via
+      // initGoogleCredentialsFromS3IfNeeded (DB-first) — no need to call it here.
     }
 
     const provider = getProvider(row.provider);

@@ -108,6 +108,22 @@ function buildError(res, body) {
     );
   }
 
+  if (statusCode === 402) {
+    // Billing issue — quota exhausted or payment required.
+    // GitHub returns the reason in body.message (e.g. "There is a billing issue
+    // that is preventing you from starting this codespace.")
+    const billingMessage = body && typeof body === 'object' && body.message
+      ? body.message
+      : typeof body === 'string' && body.trim()
+        ? body.trim()
+        : 'Codespace cannot be started due to a billing issue on the GitHub account';
+
+    return new ProviderError(billingMessage, {
+      code: 'CODESPACES_BILLING_ERROR',
+      statusCode: 402
+    });
+  }
+
   if (statusCode === 404) {
     return new ProviderError('Codespace not found', {
       code: 'CODESPACES_NOT_FOUND',

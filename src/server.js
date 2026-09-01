@@ -7,6 +7,7 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const db = require('./db/db');
 const sessionRoutes = require('./routes/sessions');
+const vpsRoutes = require('./routes/vps');
 const { requireServerToken } = require('./middleware/require-server-token');
 const keepAliveService = require('./services/keep-alive-service');
 
@@ -17,6 +18,7 @@ app.use(bodyParser.json());
 
 // Routes
 app.use('/api/v1/sessions', requireServerToken, sessionRoutes);
+app.use('/api/v1/vps', requireServerToken, vpsRoutes);
 
 // Health Check
 app.get('/health', (req, res) => {

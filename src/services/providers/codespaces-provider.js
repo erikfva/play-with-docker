@@ -256,20 +256,35 @@ class CodespacesProvider extends BaseProvider {
 
     const session = mapToSession(codespace, resolvedRef, credentialFingerprint);
 
-    // Mark the session RUNNING immediately — the codespace is confirmed
-    // Available at this point. Background cleanup (docker prune, temp-file
-    // removal) is fire-and-forgotten so provision returns quickly instead of
-    // blocking on a multi-minute docker prune with a 30s command timeout.
-    session.status = 'RUNNING';
+    // Run the VM initialization (docker prune + temp-file cleanup) synchronously
+    // so we confirm the codespace is actually usable before committing the session
+    // to the database. In particular, this catches billing errors (HTTP 402) that
+    // only surface when the first SSH command is attempted — GitHub allows listing
+    // and adopting a codespace even when billing blocks its use.
+    //
+    // If initialization fails due to a billing issue or other fatal error, the
+    // session is NOT persisted and the error is returned to the caller.
+    // Non-fatal/transient failures (timeouts, generic SSH errors) are tolerated
+    // so a slow or busy codespace doesn't block adoption.
+    try {
+      await this.initializeSession({ providerSessionId, credentialRef: resolvedRef });
+    } catch (initError) {
+      // Billing errors and account suspension are definitive — the codespace
+      // cannot be used at all. Abort without persisting the session.
+      if (
+        initError.code === 'CODESPACES_BILLING_ERROR' ||
+        initError.code === 'CODESPACES_ACCOUNT_SUSPENDED' ||
+        initError.code === 'CODESPACES_TOKEN_INVALID'
+      ) {
+        throw initError;
+      }
+      // All other errors (timeout, command failed, etc.) are treated as
+      // non-fatal: log a warning and continue — the session will be created
+      // and the user can still run commands.
+      console.warn(`[Codespaces] Non-fatal initialization failure for ${providerSessionId}: ${initError.message}`);
+    }
 
-    // Fire-and-forget: initialize (clean) the VM after adoption.
-    // docker system prune and docker builder prune can take several minutes on
-    // a codespace with cached images — far beyond the 30s COMMAND_TIMEOUT_MS.
-    // Running this in the background means the session is returned immediately
-    // while cleanup proceeds asynchronously.
-    this.initializeSession({ providerSessionId, credentialRef: resolvedRef }).catch((error) => {
-      console.warn(`[Codespaces] Background initialization failed for ${providerSessionId}: ${error.message}`);
-    });
+    session.status = 'RUNNING';
 
     // Inject keep-alive config into metadata (mapper builds its own metadata)
     const syntheticMetadata = { ...(session.metadata || {}) };
@@ -517,7 +532,21 @@ class CodespacesProvider extends BaseProvider {
 
     // Auto-start stopped codespaces before executing
     if (normalizeStatus(sessionRow.status) === 'STOPPED') {
-      await githubClient.startCodespace(token, providerSessionId);
+      try {
+        await githubClient.startCodespace(token, providerSessionId);
+      } catch (startError) {
+        // A billing issue (402) means the codespace cannot be started at all —
+        // mark the session FAILED so it is not retried, then surface the error.
+        if (startError.code === 'CODESPACES_BILLING_ERROR') {
+          try {
+            await db.run("UPDATE sessions SET status = 'FAILED' WHERE id = ?", [getRowValue(sessionRow, 'id')]);
+          } catch (dbErr) {
+            console.warn(`[Codespaces] executeCommand: failed to mark session FAILED after billing error: ${dbErr.message}`);
+          }
+          throw startError;
+        }
+        throw startError;
+      }
 
       const deadline = Date.now() + BOOT_TIMEOUT_MS;
       let state = null;
