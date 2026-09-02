@@ -15,20 +15,136 @@ const { ProviderError } = require('../services/errors/provider-errors');
 const router = express.Router();
 
 // ---------------------------------------------------------------------------
+// Sorting allowlist — maps lowercased query param value → actual DB column.
+// Only values present here are accepted; anything else → 400 VPS_INVALID_PARAM.
+// ---------------------------------------------------------------------------
+const SORT_FIELD_MAP = {
+  name:      'name',
+  provider:  'provider',
+  createdat: 'createdat',
+  updatedat: 'updatedat',
+  status:    'status',
+};
+const VALID_SORT_ORDERS = new Set(['asc', 'desc']);
+
+// Correlated EXISTS sub-query used in both the SELECT list and the
+// sessionActive WHERE filter. Contains no ? placeholders so it never
+// disturbs convertSql's $n index rewriting.
+const SESSION_ACTIVE_SUBQUERY = `EXISTS (
+    SELECT 1 FROM sessions s
+    WHERE s.credentialfingerprint = v.credentialfingerprint
+      AND s.provider              = v.provider
+      AND COALESCE(s.status, '') NOT IN ('TERMINATED', 'DELETED', 'FAILED')
+  )`;
+
+// ---------------------------------------------------------------------------
 // Safe column list — credentialcontent is intentionally excluded from all
 // SELECT queries that feed API responses.
 // PostgreSQL lowercases unquoted identifiers, so we use explicit AS aliases
 // to restore camelCase in the returned rows.
+// All columns are v.-prefixed; every query using this list must alias the
+// vps table as v (i.e., FROM vps v).
 // ---------------------------------------------------------------------------
 const VPS_SAFE_COLUMNS = `
-  id,
-  provider,
-  name,
-  credentialfilename    AS "credentialFileName",
-  credentialfingerprint AS "credentialFingerprint",
-  createdat             AS "createdAt",
-  updatedat             AS "updatedAt"
+  v.id,
+  v.provider,
+  v.name,
+  v.credentialfilename    AS "credentialFileName",
+  v.credentialfingerprint AS "credentialFingerprint",
+  v.status,
+  v.createdat             AS "createdAt",
+  v.updatedat             AS "updatedAt",
+  ${SESSION_ACTIVE_SUBQUERY} AS "sessionActive"
 `;
+
+// ---------------------------------------------------------------------------
+// parseListParams — validate and normalise all GET / query parameters.
+// Throws ProviderError(VPS_INVALID_PARAM, 400) on any violation.
+// Returns { providerFilter, sessionActiveFilter, limitVal, offsetVal,
+//           sortCol, sortDir, nullsClause }
+// ---------------------------------------------------------------------------
+function parseListParams(query) {
+  const { provider, sessionActive, limit, offset, sortBy, sortOrder } = query;
+
+  // --- provider ---
+  let providerFilter = null;
+  if (provider !== undefined) {
+    try {
+      validateProvider(provider);   // throws VPS_INVALID_PROVIDER on bad value
+    } catch {
+      // Re-throw with the correct code for query-param context (US-5)
+      throw new ProviderError(
+        `Invalid provider: "${provider}". Must be one of: gcs, codesandbox, codespaces`,
+        { code: 'VPS_INVALID_PARAM', statusCode: 400 }
+      );
+    }
+    providerFilter = provider;
+  }
+
+  // --- sessionActive ---
+  let sessionActiveFilter = null;   // null = no filter
+  if (sessionActive !== undefined) {
+    const lower = String(sessionActive).toLowerCase();
+    if (lower === 'true')        sessionActiveFilter = true;
+    else if (lower === 'false')  sessionActiveFilter = false;
+    else throw new ProviderError(
+      `Invalid sessionActive: "${sessionActive}". Must be "true" or "false"`,
+      { code: 'VPS_INVALID_PARAM', statusCode: 400 }
+    );
+  }
+
+  // --- limit ---
+  let limitVal = 20;
+  if (limit !== undefined) {
+    const n = Number(limit);
+    if (!Number.isInteger(n) || n < 1 || n > 100) {
+      throw new ProviderError(
+        `Invalid limit: "${limit}". Must be an integer between 1 and 100`,
+        { code: 'VPS_INVALID_PARAM', statusCode: 400 }
+      );
+    }
+    limitVal = n;
+  }
+
+  // --- offset ---
+  let offsetVal = 0;
+  if (offset !== undefined) {
+    const n = Number(offset);
+    if (!Number.isInteger(n) || n < 0) {
+      throw new ProviderError(
+        `Invalid offset: "${offset}". Must be a non-negative integer`,
+        { code: 'VPS_INVALID_PARAM', statusCode: 400 }
+      );
+    }
+    offsetVal = n;
+  }
+
+  // --- sortBy --- case-insensitive, allowlist-resolved
+  const sortByKey = (sortBy || 'createdAt').toLowerCase();
+  const sortCol = SORT_FIELD_MAP[sortByKey];
+  if (!sortCol) {
+    throw new ProviderError(
+      `Invalid sortBy: "${sortBy}". Must be one of: name, provider, createdAt, updatedAt, status`,
+      { code: 'VPS_INVALID_PARAM', statusCode: 400 }
+    );
+  }
+
+  // --- sortOrder --- case-insensitive
+  const sortOrderKey = (sortOrder || 'desc').toLowerCase();
+  if (!VALID_SORT_ORDERS.has(sortOrderKey)) {
+    throw new ProviderError(
+      `Invalid sortOrder: "${sortOrder}". Must be "asc" or "desc"`,
+      { code: 'VPS_INVALID_PARAM', statusCode: 400 }
+    );
+  }
+  const sortDir = sortOrderKey.toUpperCase();   // 'ASC' or 'DESC'
+
+  // NULLS LAST for status (PG default for DESC is NULLS FIRST; always force LAST).
+  // Applied unconditionally for status in both directions.
+  const nullsClause = sortCol === 'status' ? ' NULLS LAST' : '';
+
+  return { providerFilter, sessionActiveFilter, limitVal, offsetVal, sortCol, sortDir, nullsClause };
+}
 
 // ---------------------------------------------------------------------------
 // POST /api/v1/vps — register a new VPS credential record
@@ -80,7 +196,7 @@ router.post('/', async (req, res) => {
     }
 
     const row = await db.get(
-      `SELECT ${VPS_SAFE_COLUMNS} FROM vps WHERE id = ?`,
+      `SELECT ${VPS_SAFE_COLUMNS} FROM vps v WHERE v.id = ?`,
       [id]
     );
 
@@ -91,40 +207,64 @@ router.post('/', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/vps — list all VPS records (optional ?provider= filter)
+// GET /api/v1/vps — list VPS records with filtering, sorting, and pagination
 // ---------------------------------------------------------------------------
 router.get('/', async (req, res) => {
   try {
-    const { provider } = req.query;
+    const { providerFilter, sessionActiveFilter, limitVal, offsetVal, sortCol, sortDir, nullsClause }
+      = parseListParams(req.query);
 
-    if (provider !== undefined) {
-      validateProvider(provider);
+    // Build WHERE clauses using only parameterized bindings.
+    // sortCol is allowlist-resolved; sortDir is 'ASC'/'DESC' from VALID_SORT_ORDERS.
+    // SESSION_ACTIVE_SUBQUERY contains no ? placeholders — safe to interpolate.
+    const whereClauses = [];
+    const filterParams = [];
+
+    if (providerFilter !== null) {
+      whereClauses.push('v.provider = ?');
+      filterParams.push(providerFilter);
     }
 
-    let sql = `SELECT ${VPS_SAFE_COLUMNS} FROM vps`;
-    const params = [];
-
-    if (provider) {
-      sql += ' WHERE provider = ?';
-      params.push(provider);
+    if (sessionActiveFilter === true) {
+      whereClauses.push(SESSION_ACTIVE_SUBQUERY);
+    } else if (sessionActiveFilter === false) {
+      whereClauses.push(`NOT ${SESSION_ACTIVE_SUBQUERY}`);
     }
 
-    sql += ' ORDER BY createdat DESC';
+    const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
 
-    const rows = await db.all(sql, params);
-    return res.json({ vps: rows });
+    // COUNT query — same WHERE, no LIMIT/OFFSET.
+    // pg returns COUNT(*) as a string (bigint); parseInt is required.
+    const countRow = await db.get(
+      `SELECT COUNT(*) AS total FROM vps v ${whereStr}`,
+      filterParams
+    );
+    const total = parseInt(countRow.total, 10);
+
+    // Data query — ORDER BY uses allowlist-resolved sortCol and sortDir literals.
+    // Tiebreaker v.id ASC ensures deterministic page boundaries.
+    const rows = await db.all(
+      `SELECT ${VPS_SAFE_COLUMNS}
+       FROM vps v
+       ${whereStr}
+       ORDER BY v.${sortCol} ${sortDir}${nullsClause}, v.id ASC
+       LIMIT ? OFFSET ?`,
+      [...filterParams, limitVal, offsetVal]
+    );
+
+    return res.json({ vps: rows, total, limit: limitVal, offset: offsetVal });
   } catch (error) {
     return mapErrorToHttp(res, error, 'Failed to list VPS records');
   }
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/vps/:id — retrieve a single VPS record
+// GET /api/v1/vps/:id — retrieve a single VPS record (includes sessionActive)
 // ---------------------------------------------------------------------------
 router.get('/:id', async (req, res) => {
   try {
     const row = await db.get(
-      `SELECT ${VPS_SAFE_COLUMNS} FROM vps WHERE id = ?`,
+      `SELECT ${VPS_SAFE_COLUMNS} FROM vps v WHERE v.id = ?`,
       [req.params.id]
     );
 
@@ -218,7 +358,7 @@ router.put('/:id', async (req, res) => {
     invalidateCache(current.provider, current.name);
 
     const updated = await db.get(
-      `SELECT ${VPS_SAFE_COLUMNS} FROM vps WHERE id = ?`,
+      `SELECT ${VPS_SAFE_COLUMNS} FROM vps v WHERE v.id = ?`,
       [req.params.id]
     );
 
