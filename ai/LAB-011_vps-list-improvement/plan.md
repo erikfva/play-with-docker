@@ -31,10 +31,10 @@ No new modules. No changes to provider loaders, sessions route, or DB schema bey
 Add one `ensureColumn` call inside `db.ready`, immediately after the existing `vps` table block (the `console.log('[DB] ✓ vps table ready')` line):
 
 ```js
-await ensureColumn('vps', 'status', 'ALTER TABLE vps ADD COLUMN status TEXT DEFAULT NULL');
+await ensureColumn('vps', 'status', 'ALTER TABLE vps ADD COLUMN status JSONB DEFAULT NULL');
 ```
 
-This is idempotent — safe against an existing deployed database. `ensureColumn` already checks `information_schema.columns` before running the DDL.
+This is idempotent — safe against an existing deployed database. `ensureColumn` already checks `information_schema.columns` before running the DDL. `JSONB` is used instead of `TEXT` so the column supports `->>`/`@>` operators and GIN indexing for future LAB-009 queries without a schema change.
 
 **No other changes to `db.js`.**
 
@@ -47,12 +47,14 @@ This is idempotent — safe against an existing deployed database. `ensureColumn
 ```js
 // Allowlist for sortBy — maps camelCase query param values to actual DB column names.
 // All lookups use the lowercased query value as the key.
+// status is excluded: the column is JSONB and PostgreSQL cannot sort by an entire
+// JSON object. Add sortBy=status.<field> in a future ticket once the LAB-009 shape
+// is stabilised.
 const SORT_FIELD_MAP = {
   name:       'name',
   provider:   'provider',
   createdat:  'createdat',
   updatedat:  'updatedat',
-  status:     'status',
 };
 const DEFAULT_SORT_BY    = 'createdat';
 const DEFAULT_SORT_ORDER = 'DESC';
@@ -163,7 +165,7 @@ function parseListParams(query) {
   const sortCol = SORT_FIELD_MAP[sortByKey];
   if (!sortCol) {
     throw new ProviderError(
-      `Invalid sortBy: "${sortBy}". Must be one of: name, provider, createdAt, updatedAt, status`,
+      `Invalid sortBy: "${sortBy}". Must be one of: name, provider, createdAt, updatedAt`,
       { code: 'VPS_INVALID_PARAM', statusCode: 400 }
     );
   }
@@ -225,8 +227,9 @@ router.get('/', async (req, res) => {
     const countRow = await db.get(countSql, params);
     const total = parseInt(countRow.total, 10);
 
-    // NULLS LAST for status regardless of direction (PG default for DESC is NULLS FIRST)
-    const nullsClause = sortCol === 'status' ? ' NULLS LAST' : '';
+    // status is JSONB — not in SORT_FIELD_MAP, so nullsClause is always ''.
+    // None of the sortable columns are nullable.
+    const nullsClause = '';
 
     // Data query — ORDER BY uses allowlist-resolved column name; sortDir is 'ASC'/'DESC' literal
     const dataSql = `
@@ -305,7 +308,7 @@ New test file. Uses the same stub-module pattern as `tests/codespaces-session-cr
 | T-17 | Combined: `?provider=gcs&sessionActive=false&sortBy=name&sortOrder=asc&limit=5&offset=0` |
 | T-18 | `GET /:id` response includes `sessionActive` and `status` fields |
 | T-19 | `total` reflects filtered count (provider filter reduces total) |
-| T-20 | `sortBy=status` with `null` status values — `NULLS LAST` respected |
+| T-20 | `sortBy=status` → `400 VPS_INVALID_PARAM` (`status` is JSONB, not directly sortable) |
 
 ### Stub shape for the VPS route test harness
 
@@ -348,7 +351,7 @@ stubModule(vpsUtilsPath, {
 ## Risk Notes
 
 - **`ORDER BY` injection:** `sortCol` must only ever come from `SORT_FIELD_MAP[lowercasedInput]`. If the key is absent, `parseListParams` throws a `400` before any SQL runs. Never use `req.query.sortBy` directly in a string template.
-- **`NULLS LAST` for DESC:** PostgreSQL defaults `NULLS FIRST` for `DESC` ordering. Only `status` can be `NULL`; the `nullsClause` is appended only when `sortCol === 'status'`. For all other fields, the clause is omitted (PostgreSQL default of `NULLS LAST` for `ASC` is correct; `NULLS FIRST` for `DESC` is acceptable for non-nullable fields).
+- **`NULLS LAST` for DESC:** Not applicable — `status` is `JSONB` and excluded from `sortBy`. All sortable columns (`name`, `provider`, `createdat`, `updatedat`) are `NOT NULL`, so PostgreSQL's default ordering behaviour is correct for all directions.
 - **`convertSql` and `?` placeholders:** The `EXISTS` sub-queries inside `whereClauses` contain no `?` placeholders — they reference only `v.credentialfingerprint` and `v.provider` (columns already bound to the outer query's `FROM vps v`). Only the outer `WHERE` clauses push to `params`. Do not accidentally introduce `?` inside the subquery strings.
 - **`VPS_SAFE_COLUMNS` and table alias:** All columns in the updated `VPS_SAFE_COLUMNS` are prefixed `v.`. Queries using this constant must use `FROM vps v` (or subquery with alias `v`). The bespoke SELECTs in `POST`/`PUT`/`DELETE` do not use `VPS_SAFE_COLUMNS` and are unaffected.
 - **`total` field type:** `COUNT(*)` in PostgreSQL returns a `bigint` which `pg` delivers as a string. Parse with `parseInt(countRow.total, 10)` before including in the response to avoid returning `"87"` instead of `87`.

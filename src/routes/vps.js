@@ -23,7 +23,6 @@ const SORT_FIELD_MAP = {
   provider:  'provider',
   createdat: 'createdat',
   updatedat: 'updatedat',
-  status:    'status',
 };
 const VALID_SORT_ORDERS = new Set(['asc', 'desc']);
 
@@ -124,7 +123,7 @@ function parseListParams(query) {
   const sortCol = SORT_FIELD_MAP[sortByKey];
   if (!sortCol) {
     throw new ProviderError(
-      `Invalid sortBy: "${sortBy}". Must be one of: name, provider, createdAt, updatedAt, status`,
+      `Invalid sortBy: "${sortBy}". Must be one of: name, provider, createdAt, updatedAt`,
       { code: 'VPS_INVALID_PARAM', statusCode: 400 }
     );
   }
@@ -139,9 +138,9 @@ function parseListParams(query) {
   }
   const sortDir = sortOrderKey.toUpperCase();   // 'ASC' or 'DESC'
 
-  // NULLS LAST for status (PG default for DESC is NULLS FIRST; always force LAST).
-  // Applied unconditionally for status in both directions.
-  const nullsClause = sortCol === 'status' ? ' NULLS LAST' : '';
+  // status is JSONB and not directly sortable — it is not in SORT_FIELD_MAP.
+  // nullsClause is unused now but kept as empty string for structural clarity.
+  const nullsClause = '';
 
   return { providerFilter, sessionActiveFilter, limitVal, offsetVal, sortCol, sortDir, nullsClause };
 }

@@ -361,16 +361,11 @@ test('T-19: total reflects filtered count (not global count)', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// T-20: sortBy=status — NULLS LAST present in ORDER BY
+// T-20: sortBy=status → 400 (status is JSONB, not directly sortable)
 // ---------------------------------------------------------------------------
-test('T-20: ?sortBy=status — SQL contains NULLS LAST', async () => {
-  const { get, calls } = await withVpsRouter({ countTotal: 0, rows: [] });
-  const res = await get('/api/v1/vps?sortBy=status&sortOrder=desc');
-  assert.equal(res.status, 200);
-
-  const dataSql = calls.all[0]?.sql || '';
-  assert.ok(
-    /ORDER BY v\.status DESC NULLS LAST/i.test(dataSql),
-    `Expected NULLS LAST in: ${dataSql}`
-  );
+test('T-20: ?sortBy=status returns 400 VPS_INVALID_PARAM (JSONB not sortable)', async () => {
+  const { get } = await withVpsRouter();
+  const res = await get('/api/v1/vps?sortBy=status');
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, 'VPS_INVALID_PARAM');
 });

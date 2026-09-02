@@ -64,12 +64,13 @@ The `GET /api/v1/vps` endpoint introduced in LAB-010 returns all registered VPS 
 **So that** I can present records ordered by name, recency, or provider without client-side sorting
 
 **Acceptance Criteria**:
-- Supported `sortBy` values: `name`, `provider`, `createdAt`, `updatedAt`, `status`. Default: `createdAt`.
+- Supported `sortBy` values: `name`, `provider`, `createdAt`, `updatedAt`. Default: `createdAt`.
 - Supported `sortOrder` values: `asc`, `desc`. Default: `desc`.
 - Unknown `sortBy` or `sortOrder` values return `400 Bad Request`, code `VPS_INVALID_PARAM`.
 - Sort is applied before pagination. Combined example: `GET /api/v1/vps?sortBy=name&sortOrder=asc&limit=10&offset=0`.
 - Sort field names in the query are **case-insensitive** (`CREATEDAT`, `createdat`, and `createdAt` are equivalent).
 - The `sortBy` field is mapped to the actual database column internally (e.g., `createdAt` → `createdat`, `updatedAt` → `updatedat`). This mapping is encapsulated in the route handler and not exposed to the caller.
+- `status` is intentionally **excluded** from `sortBy` because the column is `JSONB` — sorting by an entire JSON object is undefined in PostgreSQL. A future ticket may add `sortBy=status.<field>` once the LAB-009 status shape is stabilised.
 
 ---
 
@@ -129,14 +130,14 @@ The `GET /api/v1/vps` endpoint introduced in LAB-010 returns all registered VPS 
 
 **Acceptance Criteria**:
 - A new `status` column is added to the `vps` table via `ensureColumn` migration, so the schema change is safe to deploy against an existing database.
-- Column definition: `status TEXT DEFAULT NULL`. Absence of a status value is represented as `null` (not written until LAB-009 populates it).
-- `status` is included in `VPS_SAFE_COLUMNS` and returned in all read responses (`GET /api/v1/vps`, `GET /api/v1/vps/:id`).
+- Column definition: `status JSONB DEFAULT NULL`. Absence of a status value is represented as `null` (not written until LAB-009 populates it). Using JSONB allows future queries on individual fields (e.g., `WHERE status->>'availability' = 'available'`) and indexing on specific paths without a schema change.
+- `status` is included in `VPS_SAFE_COLUMNS` and returned in all read responses (`GET /api/v1/vps`, `GET /api/v1/vps/:id`). The value is serialised as a JSON object (or `null`) in the response body.
 - `status` is **not** writable through `POST /api/v1/vps` or `PUT /api/v1/vps/:id` in this ticket — it is reserved for internal update by the credential-status subsystem (LAB-009). Callers who include `status` in a create/update request body have the field silently ignored.
-- `sortBy=status` (US-2) sorts lexicographically by the stored status string, with `NULL` values sorted last regardless of direction.
+- `sortBy=status` is **not supported** — JSONB columns are not directly sortable by PostgreSQL. Sorting by a specific status path (e.g., `status->>'availability'`) may be added in a future ticket once the LAB-009 shape is finalised.
 
 **Schema addition**:
 ```sql
-ALTER TABLE vps ADD COLUMN status TEXT DEFAULT NULL;
+ALTER TABLE vps ADD COLUMN status JSONB DEFAULT NULL;
 ```
 
 ---
@@ -200,7 +201,7 @@ All camelCase field names in responses (e.g., `sessionActive`, `credentialFinger
 | `sessionActive` | boolean | — | `true` or `false` (case-insensitive); omit for no filter |
 | `limit` | integer | `20` | `1`–`100` |
 | `offset` | integer | `0` | `>= 0` |
-| `sortBy` | string | `createdAt` | `name`, `provider`, `createdAt`, `updatedAt`, `status` |
+| `sortBy` | string | `createdAt` | `name`, `provider`, `createdAt`, `updatedAt` |
 | `sortOrder` | string | `desc` | `asc`, `desc` |
 
 **Response `200 OK`**:
@@ -213,7 +214,7 @@ All camelCase field names in responses (e.g., `sessionActive`, `credentialFinger
       "name": "string",
       "credentialFileName": "string",
       "credentialFingerprint": "string",
-      "status": "string | null",
+      "status": "object | null",
       "sessionActive": true,
       "createdAt": "ISO 8601",
       "updatedAt": "ISO 8601"
@@ -250,10 +251,10 @@ No new query parameters. Response gains `status` and `sessionActive`:
 ### `vps` table — new column
 
 ```sql
-ALTER TABLE vps ADD COLUMN status TEXT DEFAULT NULL;
+ALTER TABLE vps ADD COLUMN status JSONB DEFAULT NULL;
 ```
 
-Added via `ensureColumn('vps', 'status', 'ALTER TABLE vps ADD COLUMN status TEXT DEFAULT NULL')` in `src/db/db.js`, consistent with the incremental migration pattern already used in the project.
+Added via `ensureColumn('vps', 'status', 'ALTER TABLE vps ADD COLUMN status JSONB DEFAULT NULL')` in `src/db/db.js`, consistent with the incremental migration pattern already used in the project. Using `JSONB` rather than `TEXT` allows PostgreSQL to validate JSON structure on write, supports `->>`/`@>` operators for future filtering, and enables GIN indexing on specific paths without a schema change.
 
 ---
 
@@ -261,7 +262,7 @@ Added via `ensureColumn('vps', 'status', 'ALTER TABLE vps ADD COLUMN status TEXT
 
 ### VPS list query (illustrative — exact parameterisation in implementation)
 
-> **`NULLS LAST` requirement:** PostgreSQL sorts `NULL` values *last* for `ASC` by default but *first* for `DESC`. Because `status` is nullable, `ORDER BY v.status DESC` would surface `NULL` rows at the top. The implementation **must** append `NULLS LAST` whenever `sortBy=status`, for both `ASC` and `DESC`.
+> **`NULLS LAST` requirement:** Not applicable for `status` — the column is `JSONB` and is excluded from `sortBy`. For the remaining sortable columns (`name`, `provider`, `createdAt`, `updatedAt`), none are nullable, so PostgreSQL's default `NULLS LAST` for `ASC` and `NULLS FIRST` for `DESC` is acceptable. No explicit `NULLS LAST` clause is required.
 >
 > **Tiebreaker:** Append `, v.id ASC` as a secondary sort to guarantee stable, deterministic page boundaries when multiple rows share the same primary sort value (e.g., identical `createdAt` timestamps).
 
@@ -303,10 +304,7 @@ WHERE
       )
     )
   )
-ORDER BY v.createdat DESC NULLS LAST, v.id ASC  -- sortCol/sortDir from allowlist; NULLS LAST always for status
-LIMIT $3 OFFSET $4;
-  )
-ORDER BY v.createdat DESC                      -- resolved from sortBy + sortOrder allowlist
+ORDER BY v.createdat DESC, v.id ASC  -- sortCol/sortDir from allowlist; v.id ASC tiebreaker
 LIMIT $3 OFFSET $4;
 ```
 
