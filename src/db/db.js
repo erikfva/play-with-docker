@@ -211,6 +211,8 @@ db.ready = (async () => {
       ON vps (provider, credentialfingerprint)
     `);
 
+    await ensureColumn('vps', 'status', 'ALTER TABLE vps ADD COLUMN status JSONB DEFAULT NULL');
+
     console.log('[DB] ✓ vps table ready');
 
     console.log('[DB] ✓ Schema initialized successfully');

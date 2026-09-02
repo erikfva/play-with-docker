@@ -1,0 +1,169 @@
+@baseUrl = http://localhost:3200/api/v1
+@serverToken = {{$dotenv SERVER_TOKEN}}
+
+###
+# ─────────────────────────────────────────────────────────────────────────────
+# LAB-011: VPS List Improvements — Pagination, Sorting, Filtering, sessionActive
+# Pre-condition: run LAB-010 tests first so VPS records exist.
+# The @vpsCodespacesId variable below must be set from LAB-010 §31 or
+# uncommented and set to a real ID.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#@vpsCodespacesId = 00000000-0000-0000-0000-000000000000
+@vpsCodespacesId = {{createVpsCodespaces.response.body.$.id}}
+
+###
+# ── Pagination ────────────────────────────────────────────────────────────────
+
+### 39. Default — envelope contains vps/total/limit/offset
+# Expected: 200 { vps: [...], total: N, limit: 20, offset: 0 }
+GET {{baseUrl}}/vps
+X-Server-Token: {{serverToken}}
+
+### 39.1. Custom Pagination — first page
+# Expected: 200, limit=2, offset=0 in envelope; vps.length ≤ 2
+GET {{baseUrl}}/vps?limit=2&offset=0
+X-Server-Token: {{serverToken}}
+
+### 39.2. Second Page
+# Expected: 200, offset=2 reflected; vps may be empty if fewer than 3 records exist
+GET {{baseUrl}}/vps?limit=2&offset=2
+X-Server-Token: {{serverToken}}
+
+### 39.3. limit=0
+# Expected: 400 VPS_INVALID_PARAM
+GET {{baseUrl}}/vps?limit=0
+X-Server-Token: {{serverToken}}
+
+### 39.4. limit=101
+# Expected: 400 VPS_INVALID_PARAM
+GET {{baseUrl}}/vps?limit=101
+X-Server-Token: {{serverToken}}
+
+### 39.5. limit=abc
+# Expected: 400 VPS_INVALID_PARAM
+GET {{baseUrl}}/vps?limit=abc
+X-Server-Token: {{serverToken}}
+
+### 39.6. offset=-1
+# Expected: 400 VPS_INVALID_PARAM
+GET {{baseUrl}}/vps?offset=-1
+X-Server-Token: {{serverToken}}
+
+###
+# ── Sorting ───────────────────────────────────────────────────────────────────
+
+### 40. Sort by name ascending
+# Expected: 200; vps ordered A→Z by name
+GET {{baseUrl}}/vps?sortBy=name&sortOrder=asc
+X-Server-Token: {{serverToken}}
+
+### 40.1. Sort by name descending
+# Expected: 200; vps ordered Z→A by name
+GET {{baseUrl}}/vps?sortBy=name&sortOrder=desc
+X-Server-Token: {{serverToken}}
+
+### 40.2. Sort by updatedAt ascending
+GET {{baseUrl}}/vps?sortBy=updatedAt&sortOrder=asc
+X-Server-Token: {{serverToken}}
+
+### 40.3. Sort by provider ascending
+GET {{baseUrl}}/vps?sortBy=provider&sortOrder=asc
+X-Server-Token: {{serverToken}}
+
+### 40.4. sortBy case-insensitive — CREATEDAT accepted
+# Expected: 200 (same as sortBy=createdAt)
+GET {{baseUrl}}/vps?sortBy=CREATEDAT
+X-Server-Token: {{serverToken}}
+
+### 40.5. Invalid sortBy
+# Expected: 400 VPS_INVALID_PARAM
+GET {{baseUrl}}/vps?sortBy=unknown
+X-Server-Token: {{serverToken}}
+
+### 40.6. sortBy=status — JSONB column, not sortable
+# Expected: 400 VPS_INVALID_PARAM
+GET {{baseUrl}}/vps?sortBy=status
+X-Server-Token: {{serverToken}}
+
+### 40.7. Invalid sortOrder
+# Expected: 400 VPS_INVALID_PARAM
+GET {{baseUrl}}/vps?sortOrder=sideways
+X-Server-Token: {{serverToken}}
+
+###
+# ── Provider Filter ───────────────────────────────────────────────────────────
+
+### 41. Filter by provider=codespaces
+# Expected: 200; all returned rows have provider=codespaces
+GET {{baseUrl}}/vps?provider=codespaces
+X-Server-Token: {{serverToken}}
+
+### 41.1. Filter by provider=gcs
+GET {{baseUrl}}/vps?provider=gcs
+X-Server-Token: {{serverToken}}
+
+### 41.2. Invalid provider filter
+# Expected: 400 VPS_INVALID_PARAM (not VPS_INVALID_PROVIDER — different code for GET)
+GET {{baseUrl}}/vps?provider=aws
+X-Server-Token: {{serverToken}}
+
+###
+# ── sessionActive Filter ──────────────────────────────────────────────────────
+
+### 42. sessionActive=false — idle credentials only
+# Expected: 200; all rows have no active non-terminal session
+GET {{baseUrl}}/vps?sessionActive=false
+X-Server-Token: {{serverToken}}
+
+### 42.1. sessionActive=true — credentials in use only
+# Expected: 200; all rows have ≥1 active non-terminal session
+# May return empty vps array when no sessions are running
+GET {{baseUrl}}/vps?sessionActive=true
+X-Server-Token: {{serverToken}}
+
+### 42.2. sessionActive=TRUE — case-insensitive
+# Expected: 200 (same as sessionActive=true)
+GET {{baseUrl}}/vps?sessionActive=TRUE
+X-Server-Token: {{serverToken}}
+
+### 42.3. sessionActive=1
+# Expected: 400 VPS_INVALID_PARAM
+GET {{baseUrl}}/vps?sessionActive=1
+X-Server-Token: {{serverToken}}
+
+### 42.4. sessionActive=yes
+# Expected: 400 VPS_INVALID_PARAM
+GET {{baseUrl}}/vps?sessionActive=yes
+X-Server-Token: {{serverToken}}
+
+###
+# ── Combined ──────────────────────────────────────────────────────────────────
+
+### 43. All filters composed: provider + sessionActive + sort + pagination
+# Expected: 200; codespaces-only, idle, sorted A→Z by name, first 5
+GET {{baseUrl}}/vps?provider=codespaces&sessionActive=false&sortBy=name&sortOrder=asc&limit=5&offset=0
+X-Server-Token: {{serverToken}}
+
+###
+# ── Single Record ─────────────────────────────────────────────────────────────
+
+### 44. GET /:id — response includes sessionActive (boolean) and status (object|null)
+# Expected: 200 with sessionActive and status fields present
+GET {{baseUrl}}/vps/{{vpsCodespacesId}}
+X-Server-Token: {{serverToken}}
+
+### 44.1. GET /:id after creating a session — sessionActive should be true
+# Pre-condition: create a real session with this VPS credential (see LAB-010 §36.2),
+# then re-run this request and verify sessionActive=true.
+# No separate HTTP request needed — re-use §44 after a session is running.
+
+### 44.2. GET /:id — Not Found (regression check)
+# Expected: 404 VPS_NOT_FOUND
+GET {{baseUrl}}/vps/00000000-0000-0000-0000-000000000000
+X-Server-Token: {{serverToken}}
+
+###
+# ── total consistency check ───────────────────────────────────────────────────
+# §41 (provider=codespaces) total must be ≤ §39 (no filter) total.
+# Verify by comparing the two responses above — no additional request needed.

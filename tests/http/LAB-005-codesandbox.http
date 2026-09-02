@@ -1,0 +1,158 @@
+@baseUrl = http://localhost:3200/api/v1
+@s3EndPoint = {{$dotenv CODE_S3_ENDPOINT}}
+@s3AccessKeyId = {{$dotenv CODE_AWS_ACCESS_KEY_ID}}
+@s3SecretAccessKey = {{$dotenv CODE_AWS_SECRET_ACCESS_KEY}}
+@s3Region = {{$dotenv CODE_S3_REGION}}
+@tokenNgrok = {{$dotenv CODE_TOKEN_NGROK}}
+@serverToken = {{$dotenv SERVER_TOKEN}}
+
+###
+# ─────────────────────────────────────────────────────────────────────────────
+# LAB-005: CodeSandbox Provider
+# Requires a CodeSandbox credential JSON file sent through
+# x-codesandbox-credentials or request body credentialRef.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@codeSandboxTitle = lab-codesandbox-smoke-test
+@codeSandboxCredentials = codesandbox/sistemamedical.json
+
+### 15. List Supported Providers — Should Include codesandbox
+GET {{baseUrl}}/sessions/providers/supported
+X-Server-Token: {{serverToken}}
+
+### 16. Create a CodeSandbox Session (default credentials from env)
+# @name createCodeSandboxSessionDefault
+POST {{baseUrl}}/sessions
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+X-CodeSandbox-Credentials: {{codeSandboxCredentials}}
+
+{
+    "provider": "codesandbox",
+    "title": "{{codeSandboxTitle}}",
+    "privacy": "public-hosts",
+    "vmTier": "Nano",
+    "hibernationTimeoutSeconds": 86400
+}
+
+### 16.1. Create a CodeSandbox Session with explicit Credentials Header
+# @name createCodeSandboxSession
+POST {{baseUrl}}/sessions
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+X-CodeSandbox-Credentials: {{codeSandboxCredentials}}
+
+{
+    "provider": "codesandbox",
+    "title": "{{codeSandboxTitle}}-with-credentials",
+    "privacy": "public-hosts",
+    "vmTier": "Nano",
+    "hibernationTimeoutSeconds": 86400
+}
+
+###
+@codeSandboxSessionId = {{createCodeSandboxSession.response.body.$.id}}
+#@codeSandboxSessionId = d169511c-0b81-4cc0-836e-0a8e36680179
+
+### 17. Get CodeSandbox Session Details
+GET {{baseUrl}}/sessions/{{codeSandboxSessionId}}
+X-Server-Token: {{serverToken}}
+
+### 18. Execute Command in CodeSandbox Session
+POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "pwd && echo codesandbox-command-ok"
+}
+
+### 19. Execute Basic Shell Command
+POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "docker ps"
+}
+
+### 19.1. System Info
+POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "free -h && lscpu"
+}
+
+### 19.2. Verify Docker Socket TCP Proxy from Host
+POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "echo DOCKER_HOST=$DOCKER_HOST && docker version"
+}
+
+### 19.3. Verify Docker Socket TCP Proxy from a Container
+POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "docker run --rm -e DOCKER_HOST docker:cli docker version"
+}
+
+### 19.4. Prepare workspace directory
+POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "mkdir -p /tmp/config"
+}
+
+### 19.5. Create Code Server Container in CodeSandbox Session
+POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "docker run -d --add-host dockerhost:192.168.241.2 -e HOME=/tmp/config -e DOCKER_HOST -e PUID=1000 -e PGID=1000 -e TZ=Etc/UTC -e PASSWORD=password -e HASHED_PASSWORD= -e SUDO_PASSWORD=password -e SUDO_PASSWORD_HASH= -e DEFAULT_WORKSPACE=/tmp/config/workspace -e S3_ACCESS_KEY_ID={{s3AccessKeyId}} -e S3_SECRET_ACCESS_KEY={{s3SecretAccessKey}} -e S3_BUCKET=code-server -e S3_ENDPOINT={{s3EndPoint}} -e S3_REGION={{s3Region}} -e INIT_FILE=init-code-server.sh -e GIT_USER_NAME=erikfva -e GIT_USER_EMAIL=erik.vargas@yandex.com -e TOKEN_NGROK={{tokenNgrok}} -e HTTPS_PORTS=8443,8081 -p 8443:8443 -p 8081:8081 -p 3000:3000 -v /tmp/config:/config -v /tmp/config:/tmp/config --restart unless-stopped --privileged --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined erikvargas/code-server:latest"
+}
+
+### 19.6. Read HTTPS URL File From Code Server Container
+POST {{baseUrl}}/sessions/{{codeSandboxSessionId}}/command
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "command": "docker exec $(docker ps -q --filter ancestor=erikvargas/code-server:latest) cat /config/workspace/https_url.txt"
+}
+
+### 20. Terminate CodeSandbox Session
+DELETE {{baseUrl}}/sessions/{{codeSandboxSessionId}}
+X-Server-Token: {{serverToken}}
+
+### 21. Reject Non-Docker CodeSandbox Template
+# Expected: 400 CODESANDBOX_TEMPLATE_UNSUPPORTED
+POST {{baseUrl}}/sessions
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "provider": "codesandbox",
+    "title": "non-docker-template-check",
+    "templateId": "node"
+}
+
+### 22. CodeSandbox Create Without Credential Reference
+# Expected: 400 CODESANDBOX_CREDENTIALS_MISSING
+POST {{baseUrl}}/sessions
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "provider": "codesandbox",
+    "title": "missing-config-check"
+}
