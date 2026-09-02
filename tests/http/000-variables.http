@@ -1,0 +1,11 @@
+# Shared variables — imported by all lab test files.
+# In VS Code REST Client / JetBrains HTTP Client, each file redeclares these
+# at the top so they are self-contained. This file is a reference only.
+
+@baseUrl = http://localhost:3200/api/v1
+@s3EndPoint = {{$dotenv CODE_S3_ENDPOINT}}
+@s3AccessKeyId = {{$dotenv CODE_AWS_ACCESS_KEY_ID}}
+@s3SecretAccessKey = {{$dotenv CODE_AWS_SECRET_ACCESS_KEY}}
+@s3Region = {{$dotenv CODE_S3_REGION}}
+@tokenNgrok = {{$dotenv CODE_TOKEN_NGROK}}
+@serverToken = {{$dotenv SERVER_TOKEN}}
