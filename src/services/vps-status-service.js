@@ -7,6 +7,8 @@ const { ProviderError } = require('./errors/provider-errors');
 const { mapWithConcurrency } = require('../utils/async-helpers');
 const { getOrCheckStatus, putCachedStatus, cacheKey } = require('./status-cache');
 
+const STATUS_TTL_MINUTES = parseInt(process.env.VPS_STATUS_TTL_MINUTES, 10) || 5;
+
 function limitation(field, reason) { return { field, reason }; }
 
 function buildUnknownEntryForVps(provider, name, fingerprint, error) {
@@ -114,13 +116,39 @@ async function persistVpsStatus(vpsId, entry) {
   return row;
 }
 
+function isWithinTtl(statusCheckedAt, ttlMinutes) {
+  if (!statusCheckedAt) return false;
+  const lastCheck = new Date(statusCheckedAt);
+  const now = new Date();
+  const elapsedMinutes = (now - lastCheck) / 60000;
+  return elapsedMinutes < ttlMinutes;
+}
+
 async function refreshVpsStatus(vpsId, { force = false } = {}) {
-  const vpsRow = await db.get('SELECT id, provider, name, credentialfingerprint AS "credentialFingerprint" FROM vps WHERE id = ?', [vpsId]);
+  const vpsRow = await db.get('SELECT id, provider, name, credentialfingerprint AS "credentialFingerprint", statuscheckedat AS "statusCheckedAt" FROM vps WHERE id = ?', [vpsId]);
   if (!vpsRow) {
     throw new ProviderError(`VPS not found: ${vpsId}`, { code: 'VPS_NOT_FOUND', statusCode: 404 });
   }
   const providerName = vpsRow.provider;
   const fingerprint = vpsRow['credentialFingerprint'];
+
+  // TTL check: if not forced and last status check is within TTL, return cached status without calling provider API
+  if (!force && isWithinTtl(vpsRow['statusCheckedAt'], STATUS_TTL_MINUTES)) {
+    // Re-fetch the stored status JSONB from the VPS row
+    const statusRow = await db.get('SELECT status FROM vps WHERE id = ?', [vpsId]);
+    return {
+      id: vpsId,
+      provider: providerName,
+      name: vpsRow.name,
+      credentialFileName: vpsRow.name,
+      credentialFingerprint: fingerprint,
+      status: statusRow?.status || null,
+      statusCheckedAt: vpsRow['statusCheckedAt'],
+      createdAt: null,
+      updatedAt: null,
+      sessionActive: false
+    };
+  }
 
   let loaded;
   let entry;
