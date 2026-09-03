@@ -7,6 +7,8 @@
 **Epic**: Multi-Provider VM Orchestration
 
 > **Reference PR**: https://github.com/erikfva/play-with-docker/pull/9 — Provider Credential Status and Availability (LAB-009). This story persists the normalized status contract introduced in that PR into the `vps` table so consumers can read availability without an extra provider round-trip, and adds a timestamp column that records when the persisted status was last refreshed from the provider API.
+>
+> **Prerequisite — PR #9 is design reference only, not merged code.** None of the LAB-009 runtime artifacts (`src/services/credential-status-service.js`, `src/services/status-cache.js`, `BaseProvider#getCredentialStatus`, provider checker implementations, `mapWithConcurrency`, `redactTokensFromMessage`/`buildUnknownEntry`) exist in the current codebase. This spec reuses PR #9's **design** (normalized status contract, quota model, per-provider error-to-status mapping, TTL cache rules, dispatcher precedence) but LAB-012 **implements the pieces it needs within its own scope** (see Dependencies & Preconditions and Affected Files). Do not assume any LAB-009 file is already present.
 
 ---
 
@@ -18,7 +20,7 @@ Concretely:
 
 1. **Persisted `status`** — the `vps.status JSONB` column added in LAB-011 becomes the durable store for the full normalized status entry (`status`, `checkedAt`, `expiresAt`, `quotas[]`, `details`). It is populated on demand by re-checking the provider API, not by clients writing arbitrary JSON.
 2. **New `statusCheckedAt`** — a `TIMESTAMP WITH TIME ZONE` column that records the wall-clock time of the last successful or unsuccessful provider check that wrote `status`. Cheap to sort/filter on, unlike the JSONB `status` column itself.
-3. **Refresh endpoints** — explicit API operations that fetch fresh status from the provider (`provider.getCredentialStatus` via the shared `credential-status-service` dispatcher), write `status` + `statusCheckedAt` back to the row, and return the updated VPS object. Reads (`GET /api/v1/vps`, `GET /api/v1/vps/:id`) serve the persisted values without re-hitting the provider by default.
+3. **Refresh endpoints** — explicit API operations that fetch fresh status from the provider (`provider.getCredentialStatus` via the `credential-status-service` dispatcher implemented by this story — or PR #9's if it has already merged), write `status` + `statusCheckedAt` back to the row, and return the updated VPS object. Reads (`GET /api/v1/vps`, `GET /api/v1/vps/:id`) serve the persisted values without re-hitting the provider by default.
 
 ---
 
@@ -41,6 +43,17 @@ ALTER TABLE vps ADD COLUMN status JSONB DEFAULT NULL;
 ```
 
 and exposed `status` + `sessionActive` in `GET /api/v1/vps` and `GET /api/v1/vps/:id` (still `null` until something writes it). Sorting by `status` is intentionally unsupported because JSONB has no meaningful total order.
+
+## Dependencies & Preconditions
+
+**Hard dependency on PR #9 design, not on PR #9 code.** LAB-009 (PR #9) has not merged; none of its runtime artifacts exist on `main` — `src/services/credential-status-service.js`, `src/services/status-cache.js`, `BaseProvider#getCredentialStatus`, per-provider checker implementations (`gcs`/`codesandbox`/`codespaces`), `mapWithConcurrency`, `redactTokensFromMessage`/`buildUnknownEntry`, and the `GET /api/v1/sessions/:provider/credentials/status` routes are absent (verified: `src/services/` contains neither `credential-status-service.js` nor `status-cache.js`; `src/utils/` contains no `mapWithConcurrency`; `base-provider.js` has no `getCredentialStatus` hook). This story **implements the pieces it needs within its own scope**, reusing PR #9 as the design reference for:
+
+- the normalized status contract (`status` enum, `quotas[]` shape, `checkedAt`/`expiresAt`/`details`);
+- per-provider error-to-status mapping and quota derivation (GCS `mapGoogleError` → `INVALID`/`EXPIRED`/`UNAVAILABLE`, CodeSandbox `rate_limits` → `QUOTA_EXHAUSTED`, Codespaces `validateToken`/`listCodespaces`/`getBillingUsageSummary` with null-billing fallback);
+- TTL cache discipline (configurable `CREDENTIAL_STATUS_CACHE_TTL_MS`, default 5 min; key `provider:credentialFingerprint`; only non-`UNKNOWN` checker results cached; `LIMITED` — derived from local DB state — never cached);
+- dispatcher precedence (`INVALID` > `EXPIRED` > `QUOTA_EXHAUSTED` > `UNAVAILABLE` > `LIMITED` > `AVAILABLE`) and local `countActiveSessions` semantics (partial index `NOT IN` sets).
+
+If LAB-009 merges before this story, the overlapping files (`credential-status-service.js`, `status-cache.js`, `base-provider.js`) must be reconciled rather than duplicated. Until then, **LAB-012 is the owner of those files** for the `vps` persist-on-refresh scope. No provider-specific billing/credit scraping beyond what PR #9 documents is required.
 
 This story completes the loop: **check → normalize → persist → serve**.
 
@@ -95,7 +108,7 @@ This story completes the loop: **check → normalize → persist → serve**.
   - `GET /api/v1/vps` — each element in `vps[]` carries `status` (object|null) and `statusCheckedAt` (ISO 8601 string|null).
   - `GET /api/v1/vps/:id` — same two fields on the single object, alongside the existing `sessionActive` / `createdAt` / `updatedAt`.
 - `status` and `statusCheckedAt` are **not writable** through `POST /api/v1/vps` or `PUT /api/v1/vps/:id`. If a caller includes either field in a create/update body, the field is silently ignored (same pattern LAB-011 already uses for `status`). Only the refresh endpoints (US-3/US-4) write them.
-- `updatedAt` is **not** bumped when `status`/`statusCheckedAt` are refreshed. The refresh is a telemetry update, not a mutation of the credential identity; bumping `updatedAt` would conflate "credential rotated" with "quota re-checked" and break `sortBy=updatedAt` expectations. If the team prefers `updatedAt` to track every write, document the choice explicitly and keep it consistent across single and bulk refresh.
+- `updatedAt` is **not** bumped when `status`/`statusCheckedAt` are refreshed — **decision: telemetry stays out of `updatedAt`.** The refresh is a telemetry update, not a mutation of the credential identity; bumping `updatedAt` would conflate "credential rotated" with "quota re-checked" and break `sortBy=updatedAt` expectations. This is the chosen behaviour for both single and bulk refresh; any future decision to track every write in `updatedAt` must be an explicit spec change applied consistently to both paths.
 
 **Example — VPS that has never been checked**:
 
@@ -161,41 +174,45 @@ This story completes the loop: **check → normalize → persist → serve**.
   // Refresh many VPS rows — used by the bulk endpoint.
   async function refreshAllVpsStatuses({ provider, concurrency } = {}) -> { total, succeeded, failed, results[] }
   ```
-- **Resolution** — credential material is resolved from the database row itself, not from filesystem/S3. For a given `vps` row the service uses `vps.provider` + `vps.name` (or the row's `credentialContent` directly) to build the `loadedCredential` object expected by `provider.getCredentialStatus`:
-  - `codesandbox` / `codespaces`: `{ token, credentialRef: vps.name, credentialFingerprint: vps.credentialFingerprint }` (token extracted from `credentialContent` using the same per-provider parsing as `vps-credential-utils.validateAndFingerprintContent` / `db-credentials-loader`).
-  - `gcs`: `{ credentialsPath, credentialRef: vps.name, credentialFingerprint: vps.credentialFingerprint }` (content is written to a temp file as `db-credentials-loader` already does for GCS; reuse that helper rather than re-implementing).
+- **Resolution** — credential material is resolved from the database row itself, not from filesystem/S3. The service obtains the `loadedCredential` object by calling `db-credentials-loader.loadCredentialByRef(provider, name)` and using its return value directly — no field renaming or re-parsing:
+  - `codesandbox` / `codespaces`: `loadCredentialByRef` returns `{ token, credentialRef, credentialFingerprint }` (token extracted from `credentialContent` via `vps-credential-utils.validateAndFingerprintContent`; the returned `credentialFingerprint` is the authoritative value from the `vps` row).
+  - `gcs`: `loadCredentialByRef` returns `{ keyFilePath, credentialRef, credentialFingerprint }` — note the field is `keyFilePath` (not `credentialsPath`; the latter is the internal name `gcs-service.js`/`gcs-provider.js` use after calling `initGoogleCredentialsFromS3IfNeeded`, but `db-credentials-loader._parseContent` returns `keyFilePath`). The refresh service passes the loader's output through as `loadedCredential` unchanged; the provider checker consumes `loaded.keyFilePath`.
   - If the row's `credentialContent` is malformed or the token cannot be extracted, the refresh still persists an `UNKNOWN` entry with a limitation explaining the parse failure, rather than throwing a 500.
-- **Checking** — the service delegates to the existing dispatcher:
-  ```js
-  const provider = getProvider(vps.provider);
-  const checkerResult = await provider.getCredentialStatus(loaded);
-  // or via credential-status-service.getCredentialStatus(vps.provider, { credentialRef: vps.name })
-  // which already handles localActiveSessions counting + LIMITED precedence + token redaction.
-  ```
-  The service **reuses** the existing error-to-status mapping inside each provider's `getCredentialStatus` (GCS `mapGoogleError`, CodeSandbox `rate_limits` handling + `INVALID`/`QUOTA_EXHAUSTED`, Codespaces `validateToken` + `listCodespaces` + `getBillingUsageSummary` with `null` billing fallback). No new mapping logic is introduced.
-- **Caching** — the refresh path respects the shared `status-cache.js` TTL by default (a recently-cached checker result is returned without re-hitting the provider). A `force: true` / `nocache` option bypasses the cache for operator-initiated refreshes that must see the current provider state. The cache key remains `provider:credentialFingerprint` as in PR #9; `LIMITED` (derived from local `countActiveSessions`) is never cached, and `UNKNOWN` is never cached.
-- **Persistence** — after the dispatcher returns a finalized entry `entry`, the service executes a single parameterized update:
+- **Checking** — the service delegates to `provider.getCredentialStatus(loaded)` (or equivalently through the dispatcher `credential-status-service.getCredentialStatus(vps.provider, { credentialRef: vps.name })` once that dispatcher exists in LAB-012's scope — see Dependencies & Preconditions). The dispatcher handles `localActiveSessions` counting + `LIMITED` precedence + token redaction. The service **reuses** the per-provider error-to-status mapping (GCS `mapGoogleError`, CodeSandbox `rate_limits` handling + `INVALID`/`QUOTA_EXHAUSTED`, Codespaces `validateToken` + `listCodespaces` + `getBillingUsageSummary` with `null` billing fallback) — either from the LAB-012 implementations of `provider.getCredentialStatus` (this ticket's scope) or from PR #9's if it has merged and been reconciled. No new mapping logic is introduced in the refresh service itself.
+- **Caching** — the refresh path respects the TTL cache by default (a recently-cached checker result is returned without re-hitting the provider). A `force: true` / `nocache` option bypasses the cache for operator-initiated refreshes. The cache key remains `provider:credentialFingerprint` (PR #9 design); `LIMITED` (derived from local `countActiveSessions`) is never cached, and `UNKNOWN` is never cached. In LAB-012's scope the cache is `src/services/status-cache.js` — implemented by this story if PR #9 has not yet merged (see Affected Files).
+- **Persistence** — after the dispatcher returns a finalized entry `entry`, the service executes a single parameterized update. Because `UPDATE … RETURNING` cannot reference a table alias and cannot include a correlated `EXISTS` sub-query on the target alias directly, the persist is implemented as a CTE — update first, then select with the `sessionActive` join:
   ```sql
-  UPDATE vps
-  SET status = $1::jsonb,
-      statusCheckedAt = CURRENT_TIMESTAMP
-  WHERE id = $2
-  RETURNING
-    id,
-    provider,
-    name,
-    credentialfilename    AS "credentialFileName",
-    credentialfingerprint AS "credentialFingerprint",
-    status,
-    statuscheckedat       AS "statusCheckedAt",
-    createdat             AS "createdAt",
-    updatedat             AS "updatedAt"
+  WITH updated AS (
+    UPDATE vps
+    SET status = $1::jsonb,
+        statuscheckedat = CURRENT_TIMESTAMP
+    WHERE id = $2
+    RETURNING id, provider, name, credentialfilename, credentialfingerprint,
+              status, statuscheckedat, createdat, updatedat
+  )
+  SELECT
+    u.id,
+    u.provider,
+    u.name,
+    u.credentialfilename    AS "credentialFileName",
+    u.credentialfingerprint AS "credentialFingerprint",
+    u.status,
+    u.statuscheckedat       AS "statusCheckedAt",
+    u.createdat             AS "createdAt",
+    u.updatedat             AS "updatedAt",
+    EXISTS (
+      SELECT 1 FROM sessions s
+      WHERE s.credentialfingerprint = u.credentialfingerprint
+        AND s.provider = u.provider
+        AND COALESCE(s.status, '') NOT IN ('TERMINATED', 'DELETED', 'FAILED')
+    ) AS "sessionActive"
+  FROM updated u;
   ```
-  `status` is `JSON.stringify(entry)` (or `JSON.stringify(entry)::jsonb`). `statusCheckedAt` is set to the server's current time in the same statement (no two-step read-then-write). The returned row is the API response for single-refresh.
-- **Precedence with local state** — the `LIMITED` status that PR #9 adds when `localActiveSessions > 0` for `codesandbox` / `codespaces` (one-session-per-token constraint via the partial unique indexes `idx_sessions_*_active_token`) is preserved in the persisted `status`. GCS never contributes a `LIMITED` candidate because its session rows lack a canonical fingerprint and the index does not exist.
+  `$1` is `JSON.stringify(entry)` where `entry` is the dispatcher-finalized normalized status entry (including `checkedAt`, `quotas`, `details`). `$2` is the `vps.id`. `statusCheckedAt` is set to the server's current time in the same statement (no two-step read-then-write). The returned row is the API response for single-refresh. The CTE is required — a plain `UPDATE … RETURNING v.id, …` or `UPDATE … RETURNING EXISTS (SELECT … WHERE s.credentialfingerprint = v.credentialfingerprint …)` fails with `invalid reference to FROM-clause entry for table "v"` because the target table has no alias in a `RETURNING` clause.
+- **Precedence with local state** — the `LIMITED` status added when `localActiveSessions > 0` for `codesandbox` / `codespaces` (one-session-per-token constraint via the partial unique indexes `idx_sessions_*_active_token`) is preserved in the persisted `status`. `LIMITED`, `INVALID`, `QUOTA_EXHAUSTED`, and `EXPIRED` all represent a definitive check result (the provider was contacted and a clear availability verdict was produced), not a failure to determine state — this distinction matters for the `succeeded`/`failed` counts in US-4. GCS never contributes a `LIMITED` candidate because its session rows lack a canonical fingerprint and the index does not exist.
 - **Error handling** — any error thrown by `provider.getCredentialStatus` that the dispatcher would normally convert to a `buildUnknownEntry` is **persisted** as an `UNKNOWN` entry (with `details.errorCode` / `details.limitations`) and a fresh `statusCheckedAt`, rather than bubbling as a 500. Only truly unexpected errors (DB write failure, missing `vpsId` → 404 `VPS_NOT_FOUND`) surface as HTTP errors.
-- **Concurrency** — bulk refresh fans out with the same `mapWithConcurrency(4)` helper used by `listCredentialStatuses` in PR #9. Each item's provider call is isolated; one credential's failure does not abort the batch.
-- **Secrets** — at no point is `credentialContent`, `token`, or `privateKey` written into `status`, logs, or error responses. Log lines redact token-like runs (`/[A-Za-z0-9_\-]{20,}/ → [REDACTED]`) as the existing services already do.
+- **Concurrency** — bulk refresh fans out with `mapWithConcurrency(4)` — a small async helper with concurrency-limited fan-out (≈10 lines) implemented in `src/utils/async-helpers.js` (or `src/utils/helpers.js`) by this story, or reused from `credential-status-service.js` / `status-cache.js` if PR #9 has already merged. Each item's provider call is isolated; one credential's failure does not abort the batch.
+- **Secrets** — at no point is `credentialContent`, `token`, or `privateKey` written into `status`, logs, or error responses. Log lines redact token-like runs (`/[A-Za-z0-9_\-]{20,}/ → [REDACTED]`). In LAB-012's scope the redaction helper is `redactTokensFromMessage` and the `UNKNOWN` envelope builder is `buildUnknownEntry`, both implemented by this story (in `src/services/credential-status-service.js` or a shared helper) if PR #9 has not yet merged — see Affected Files. The helpers follow PR #9's design: `buildUnknownEntry` exposes only a stable `errorMessage` ("Credential status could not be determined.") and never the raw loader/SDK message that may contain absolute paths, S3 locations, or request URLs.
 
 ---
 
@@ -289,8 +306,8 @@ This story completes the loop: **check → normalize → persist → serve**.
       ]
     }
     ```
-    - `succeeded` counts items whose persisted `status.status !== "UNKNOWN"`; `failed` counts `UNKNOWN`. Both counts advance `statusCheckedAt` — the distinction is only for operator visibility.
-    - `results` order matches the `SELECT id FROM vps WHERE … ORDER BY createdat DESC, id ASC` enumeration order, so callers can correlate with `GET /api/v1/vps`.
+    - `succeeded` counts items whose persisted `status.status !== "UNKNOWN"`; `failed` counts `UNKNOWN`. This is intentional: `LIMITED`, `INVALID`, `QUOTA_EXHAUSTED`, and `EXPIRED` all count as **succeeded** because the provider check completed and produced a definitive availability verdict — `failed` means "we could not determine status" (`UNKNOWN`), not "the credential is unusable". Both counts advance `statusCheckedAt` — the distinction is only for operator visibility.
+    - `results` order matches the `SELECT id FROM vps WHERE … ORDER BY createdat DESC, id ASC` enumeration order. This fixed order matches `GET /api/v1/vps` only when the caller uses the default sort (`sortBy=createdAt&sortOrder=desc`); a caller who listed with `sortBy=name` must not assume the two orders align.
     - Each `results[]` element includes at minimum `id`, `provider`, persisted `status.status` (the top-level enum string), `statusCheckedAt`, and an `error` object (or `null`) when the underlying check produced `UNKNOWN`.
   - If the filtered set is empty (no VPS rows match), returns `200` with `{ summary: { total: 0, succeeded: 0, failed: 0 }, results: [] }`.
 - **Performance**: bulk refresh completes with at most `ceil(N / 4)` concurrent upstream calls. The endpoint does not create VM sessions or run arbitrary commands. A large inventory (50+ VPS) completes within the existing pool `statement_timeout` (60 s) per row; the HTTP response timeout should be set generously (e.g., 120 s) or the route should stream progress if the inventory grows significantly — document the expected latency.
@@ -335,7 +352,7 @@ This story completes the loop: **check → normalize → persist → serve**.
 
 ### NFR-4: Secrets hygiene
 
-- `credentialContent` / `token` / `privateKey` never appear in API responses, `status` JSON, logs, or error messages. The existing `redactTokensFromMessage` helper and `buildUnknownEntry` stable message ("Credential status could not be determined.") are reused.
+- `credentialContent` / `token` / `privateKey` never appear in API responses, `status` JSON, logs, or error messages. The `redactTokensFromMessage` helper (token-like runs → `[REDACTED]`) and `buildUnknownEntry` stable message ("Credential status could not be determined." — never the raw loader/SDK message that may contain absolute paths or S3 locations) are implemented by this story if PR #9 has not yet merged, or reused from PR #9 if it has (see Affected Files).
 - `status` persists only the normalized dispatcher output, which already excludes raw credentials. `credentialFingerprint` (`sha256:<hex>`) is safe to persist and return.
 
 ### NFR-5: Resilience to partial failures
@@ -440,7 +457,7 @@ Provider-side failures that map to `UNKNOWN` still return `200` with `status.sta
 
 **Response `200` with `total: 0`** — when the filter matches no rows.
 
-> **Route ordering note**: `POST /api/v1/vps/status/refresh` must be registered **before** `POST /api/v1/vps/:id/status/refresh` (and before `GET /:id`) in the Express router, otherwise `status` would be captured as `:id`. The same ordering concern already exists for `GET /` vs `GET /:id` and the LAB-011 pagination routes.
+> **Route ordering note**: `POST /api/v1/vps/status/refresh` (bulk) must be registered **before** `POST /api/v1/vps/:id/status/refresh` (single) and before `GET /:id` in the Express router, otherwise the literal segment `status` in the bulk path would be captured as `:id` (the request `POST /vps/status/refresh` would route to the single handler with `req.params.id === "status"`). The verb `POST` does not affect path matching, so the same ordering concern already exists for `GET /` vs `GET /:id` and the LAB-011 pagination routes.
 
 ---
 
@@ -519,30 +536,37 @@ LIMIT $3 OFFSET $4;
 
 ### Single refresh — persist
 
+A plain `UPDATE vps SET … RETURNING v.id, …` cannot reference the alias `v` and cannot include a correlated `EXISTS` on that alias — `UPDATE … RETURNING` has no `FROM` clause, so `v.id` / `v.credentialfingerprint` fail with `invalid reference to FROM-clause entry for table "v"`. The persist is therefore implemented as a CTE — update first, then select with the `sessionActive` join:
+
 ```sql
-UPDATE vps
-SET status            = $1::jsonb,
-    statusCheckedAt   = CURRENT_TIMESTAMP
-WHERE id = $2
-RETURNING
-  v.id,
-  v.provider,
-  v.name,
-  v.credentialfilename    AS "credentialFileName",
-  v.credentialfingerprint AS "credentialFingerprint",
-  v.status,
-  v.statuscheckedat       AS "statusCheckedAt",
-  v.createdat             AS "createdAt",
-  v.updatedat             AS "updatedAt",
+WITH updated AS (
+  UPDATE vps
+  SET status = $1::jsonb,
+      statuscheckedat = CURRENT_TIMESTAMP
+  WHERE id = $2
+  RETURNING id, provider, name, credentialfilename, credentialfingerprint,
+            status, statuscheckedat, createdat, updatedat
+)
+SELECT
+  u.id,
+  u.provider,
+  u.name,
+  u.credentialfilename    AS "credentialFileName",
+  u.credentialfingerprint AS "credentialFingerprint",
+  u.status,
+  u.statuscheckedat       AS "statusCheckedAt",
+  u.createdat             AS "createdAt",
+  u.updatedat             AS "updatedAt",
   EXISTS (
     SELECT 1 FROM sessions s
-    WHERE s.credentialfingerprint = v.credentialfingerprint
-      AND s.provider              = v.provider
+    WHERE s.credentialfingerprint = u.credentialfingerprint
+      AND s.provider = u.provider
       AND COALESCE(s.status, '') NOT IN ('TERMINATED', 'DELETED', 'FAILED')
-  ) AS "sessionActive";
+  ) AS "sessionActive"
+FROM updated u;
 ```
 
-`$1` is `JSON.stringify(entry)` where `entry` is the dispatcher-finalized normalized status entry (including `checkedAt`, `quotas`, `details`). `$2` is the `vps.id`. The `RETURNING` clause avoids a second `SELECT`.
+`$1` is `JSON.stringify(entry)` where `entry` is the dispatcher-finalized normalized status entry (including `checkedAt`, `quotas`, `details`). `$2` is the `vps.id`. The CTE avoids a second round-trip `SELECT` while still being able to compute `sessionActive` on the freshly-updated row. Copying a plain `UPDATE … RETURNING v.…` from an earlier draft of this spec will fail at runtime — use the CTE pattern above.
 
 ### Bulk refresh — enumeration
 
@@ -560,18 +584,20 @@ ORDER BY createdat DESC, id ASC;
 
 | File | Change |
 |:---|:---|
-| `src/db/db.js` | Add `ensureColumn('vps', 'statusCheckedAt', ...)` migration call after the existing `status` column migration |
-| `src/services/vps-status-service.js` | **New** — `refreshVpsStatus` / `refreshAllVpsStatuses` service (or extend `src/services/credential-status-service.js` with the same two functions; either location is acceptable — document the choice) |
-| `src/services/credential-status-service.js` | **Reuse** — single and bulk refresh call through the existing `getCredentialStatus` dispatcher and `status-cache.js` (`force` bypasses `getOrCheckStatus` when true); no change to the normalized entry shape or per-provider `getCredentialStatus` implementations |
-| `src/services/providers/base-provider.js` | No change — `getCredentialStatus` hook from PR #9 is reused as-is |
-| `src/services/providers/gcs-provider.js` | No change — `getCredentialStatus` from PR #9 is reused |
-| `src/services/providers/codesandbox-provider.js` | No change — `getCredentialStatus` from PR #9 is reused |
-| `src/services/providers/codespaces-provider.js` | No change — `getCredentialStatus` from PR #9 is reused |
-| `src/services/db-credentials-loader.js` | **Reuse** — single-refresh resolves the row's credential via the DB-first loader path (or direct `credentialContent` parsing) to build `loadedCredential` for the provider checker |
-| `src/routes/vps.js` | Extend `VPS_SAFE_COLUMNS` to include `v.statuscheckedat AS "statusCheckedAt"`; register `POST /status/refresh` (bulk) and `POST /:id/status/refresh` (single) handlers; keep existing list/detail/create/update/delete handlers serving the persisted values |
-| `src/services/status-cache.js` | No change — `force` refresh bypasses `getOrCheckStatus` at the call site; cache implementation is untouched |
+| `src/db/db.js` | Add `ensureColumn('vps', 'statusCheckedAt', 'ALTER TABLE vps ADD COLUMN statusCheckedAt TIMESTAMP WITH TIME ZONE DEFAULT NULL')` after the existing `status` column migration |
+| `src/services/vps-status-service.js` | **New** — `refreshVpsStatus` / `refreshAllVpsStatuses` service as the single writer of `vps.status` + `vps.statuscheckedat` (CTE persist pattern). Internally calls `loadCredentialByRef` → `provider.getCredentialStatus` (or the dispatcher) → `UPDATE` CTE. Implements or imports `UNKNOWN` envelope helpers for the persist path. |
+| `src/services/credential-status-service.js` | **New in this story's scope** — implements the dispatcher this spec depends on (`getCredentialStatus`, `listCredentialStatuses`, `buildEntry`/`buildUnknownEntry`, `resolveStatus`, `countActiveSessions`, `limitation`/`quotaEntry`, `redactTokensFromMessage`) following PR #9's design (status enum, `quotas[]` shape, `LIMITED` precedence via DB partial indexes `idx_sessions_*_active_token`, `ENFORCES_TOKEN_UNIQUENESS = {codesandbox, codespaces}`). If PR #9 has already merged, reconcile with its version instead of duplicating. |
+| `src/services/status-cache.js` | **New in this story's scope** — in-process TTL cache (`cacheKey = provider:fingerprint`, `getOrCheckStatus`, `inFlight` dedup; only non-`UNKNOWN` checker results cached, `LIMITED` never cached; `DEFAULT_TTL_MS` from `CREDENTIAL_STATUS_CACHE_TTL_MS` env, default 5 min). If PR #9 has already merged, reconcile with its version. `force` refresh bypasses `getOrCheckStatus` at the call site. |
+| `src/utils/async-helpers.js` | **New** — `mapWithConcurrency(items, limit, mapper)` small helper for concurrency-limited fan-out (used by bulk refresh with `limit=4`, and by the dispatcher list path). Alternatively `src/utils/helpers.js` — Modified — if the team prefers a single helpers file. |
+| `src/services/providers/base-provider.js` | **Modified** — add optional `getCredentialStatus(loadedCredential)` hook (default throws `getCredentialStatus must be implemented by provider`). LAB-012 owns this hook for the `vps` persist-on-refresh scope if PR #9 has not merged. |
+| `src/services/providers/gcs-provider.js` | **Modified** — add `getCredentialStatus` implementation (GCS `mapGoogleError` → `INVALID`/`EXPIRED`/`UNAVAILABLE`/`UNKNOWN`, static `hours`/`week` quota with `usage: null` + limitation, `referenceLimits`). LAB-012 owns this implementation if PR #9 has not merged; otherwise reconcile. |
+| `src/services/providers/codesandbox-provider.js` | **Modified** — add `getCredentialStatus` implementation (`API.getMetaInfo()` → `rate_limits` `hourly-window`/`null` `count` entries, `credits`/`billing-cycle` with `null` unless scraper enabled, `INVALID`/`QUOTA_EXHAUSTED` handling, `referencePricing`). Also extend `src/services/providers/codesandbox/client.js` with `getApiClient(token)` + `clearCache` for `apiInstances` if not already present. LAB-012 owns these if PR #9 has not merged; otherwise reconcile. |
+| `src/services/providers/codespaces-provider.js` | **Modified** — add `getCredentialStatus` implementation (`validateToken` → `listCodespaces` adoptable count → `getBillingUsageSummary` with null-billing fallback, `core-hours`/`month` + `GB-month`/`month` quotas, `UNAVAILABLE` when `adoptable === 0`). LAB-012 owns this if PR #9 has not merged; otherwise reconcile. |
+| `src/services/db-credentials-loader.js` | **Reuse** — single-refresh resolves the row's credential via `loadCredentialByRef(provider, name)` and passes its output (`{ token, credentialRef, credentialFingerprint }` for `codesandbox`/`codespaces`; `{ keyFilePath, credentialRef, credentialFingerprint }` for `gcs`) through as `loadedCredential`. No field renaming (`keyFilePath` stays `keyFilePath`). |
+| `src/routes/vps.js` | **Modified** — extend `VPS_SAFE_COLUMNS` to include `v.statuscheckedat AS "statusCheckedAt"` (only `statusCheckedAt` is new; `v.status` is already present from LAB-011). Register `POST /status/refresh` (bulk) **before** `POST /:id/status/refresh` (single) and before `GET /:id`, so the literal path segment `status` is not captured as `:id` (Express matches `/:id` before `/:id/status/refresh`; without ordering, `POST /vps/status/refresh` would route to the single handler with `req.params.id === "status"`). Keep existing list/detail/create/update/delete handlers serving the persisted values with no implicit provider calls. |
+| `src/services/gcs-service.js` | **Modified if needed** — ensure `getEnvironmentAccess({ credentialsPath })` exists for the GCS checker (LAB-012 owns this if PR #9 has not merged). |
 
-> **No new provider-specific code** is required. The entire `hours` / `core-hours` / `credits` / `count` quota model, the `referencePricing` / `referenceLimits` details, and the `UNKNOWN` mapping for missing billing permissions are all inherited from PR #9 unchanged.
+> No additional provider-specific billing/credit scraping beyond what PR #9 documents is required. The entire `hours` / `core-hours` / `credits` / `count` quota model, the `referencePricing` / `referenceLimits` details, and the `UNKNOWN` mapping for missing billing permissions are inherited from PR #9's design. The "New in this story's scope" rows above are the prerequisite status subsystem that PR #9 designed but has not yet landed on `main` — LAB-012 implements them so persist-on-refresh can ship without waiting for PR #9.
 
 ---
 
