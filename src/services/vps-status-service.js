@@ -191,13 +191,13 @@ async function refreshVpsStatus(vpsId, { force = false } = {}) {
 
 async function refreshAllVpsStatuses({ provider, force = false } = {}) {
   const rows = await db.all(
-    'SELECT id FROM vps WHERE (? IS NULL OR provider = ?) ORDER BY createdat DESC, id ASC',
+    'SELECT id FROM vps WHERE (?::text IS NULL OR provider = ?::text) ORDER BY createdat DESC, id ASC',
     [provider || null, provider || null]
   );
   const ids = rows.map(r => r.id);
   const total = ids.length;
   if (total === 0) {
-    return { total: 0, succeeded: 0, failed: 0, results: [] };
+    return { summary: { total: 0, succeeded: 0, failed: 0 }, results: [] };
   }
 
   const settled = await mapWithConcurrency(ids, 4, async (id) => {
@@ -243,7 +243,7 @@ async function refreshAllVpsStatuses({ provider, force = false } = {}) {
     }
   }
 
-  return { total, succeeded, failed, results };
+  return { summary: { total, succeeded, failed }, results };
 }
 
 module.exports = { refreshVpsStatus, refreshAllVpsStatuses };

@@ -194,9 +194,7 @@ async function withVpsRouter(options = {}) {
       refreshAllVpsStatuses: async (opts) => {
         calls.all.push({ method: 'refreshAllVpsStatuses', opts });
         return {
-          total: 3,
-          succeeded: 3,
-          failed: 0,
+          summary: { total: 3, succeeded: 3, failed: 0 },
           results: [
             { id: 1, provider: 'codesandbox', status: 'AVAILABLE', statusCheckedAt: new Date().toISOString(), error: null },
             { id: 2, provider: 'codesandbox', status: 'AVAILABLE', statusCheckedAt: new Date().toISOString(), error: null },
@@ -239,13 +237,13 @@ test('POST /vps/status/refresh (bulk) returns succeeded/failed summary', async (
   const { post } = await withVpsRouter();
   const res = await post('/vps/status/refresh');
   assert.strictEqual(res.status, 200);
-  assert.ok(typeof res.body.total === 'number');
-  assert.ok(typeof res.body.succeeded === 'number');
-  assert.ok(typeof res.body.failed === 'number');
+  assert.ok(typeof res.body.summary.total === 'number');
+  assert.ok(typeof res.body.summary.succeeded === 'number');
+  assert.ok(typeof res.body.summary.failed === 'number');
   assert.ok(Array.isArray(res.body.results));
-  assert.strictEqual(res.body.total, 3);
-  assert.strictEqual(res.body.succeeded, 3);
-  assert.strictEqual(res.body.failed, 0);
+  assert.strictEqual(res.body.summary.total, 3);
+  assert.strictEqual(res.body.summary.succeeded, 3);
+  assert.strictEqual(res.body.summary.failed, 0);
 });
 
 test('POST /vps/status/refresh (bulk) validates provider parameter', async () => {
@@ -264,7 +262,7 @@ test('POST /vps/status/refresh (bulk) accepts valid provider filter', async () =
     query: { provider: 'gcs' }
   });
   assert.strictEqual(res.status, 200);
-  assert.ok(typeof res.body.total === 'number');
+  assert.ok(typeof res.body.summary.total === 'number');
 });
 
 test('POST /vps/:id/status/refresh returns updated VPS row', async () => {
