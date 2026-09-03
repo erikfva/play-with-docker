@@ -132,22 +132,29 @@ async function refreshVpsStatus(vpsId, { force = false } = {}) {
   const providerName = vpsRow.provider;
   const fingerprint = vpsRow['credentialFingerprint'];
 
-  // TTL check: if not forced and last status check is within TTL, return cached status without calling provider API
+  // TTL check: if not forced and last status check is within TTL, return persisted row as-is without calling provider API
   if (!force && isWithinTtl(vpsRow['statusCheckedAt'], STATUS_TTL_MINUTES)) {
-    // Re-fetch the stored status JSONB from the VPS row
-    const statusRow = await db.get('SELECT status FROM vps WHERE id = ?', [vpsId]);
-    return {
-      id: vpsId,
-      provider: providerName,
-      name: vpsRow.name,
-      credentialFileName: vpsRow.name,
-      credentialFingerprint: fingerprint,
-      status: statusRow?.status || null,
-      statusCheckedAt: vpsRow['statusCheckedAt'],
-      createdAt: null,
-      updatedAt: null,
-      sessionActive: false
-    };
+    const row = await db.get(
+      `SELECT
+        v.id,
+        v.provider,
+        v.name,
+        v.credentialfilename    AS "credentialFileName",
+        v.credentialfingerprint AS "credentialFingerprint",
+        v.status,
+        v.statuscheckedat       AS "statusCheckedAt",
+        v.createdat             AS "createdAt",
+        v.updatedat             AS "updatedAt",
+        EXISTS (
+          SELECT 1 FROM sessions s
+          WHERE s.credentialfingerprint = v.credentialfingerprint
+            AND s.provider = v.provider
+            AND COALESCE(s.status, '') NOT IN ('TERMINATED', 'DELETED', 'FAILED')
+        ) AS "sessionActive"
+      FROM vps v WHERE v.id = ?`,
+      [vpsId]
+    );
+    return row;
   }
 
   let loaded;

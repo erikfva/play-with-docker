@@ -109,7 +109,11 @@ async function withVpsRouter(options = {}) {
           name: 'test-cred',
           credentialFingerprint: 'fp123',
           statusCheckedAt: fiveMinAgo,
-          status: { status: 'AVAILABLE', provider: 'codesandbox', credential: 'test-cred', credentialFingerprint: 'fp123' }
+          credentialFileName: 'test-cred.json',
+          status: { status: 'AVAILABLE', provider: 'codesandbox', credential: 'test-cred', credentialFingerprint: 'fp123' },
+          createdAt: '2025-01-01T00:00:00Z',
+          updatedAt: '2025-01-02T00:00:00Z',
+          sessionActive: false
         }
       : null,
     async get(sql, params) {
@@ -118,9 +122,9 @@ async function withVpsRouter(options = {}) {
       if (ttlMode && sql.includes('SELECT id, provider, name, credentialfingerprint') && sql.includes('statuscheckedat')) {
         return this._vpsRow;
       }
-      // TTL-mode status-only lookup (returns cached status without provider call)
-      if (ttlMode && sql.includes('SELECT status FROM vps WHERE id = ?')) {
-        return { status: this._vpsRow.status };
+      // TTL-mode full-row re-read (TTL shortcut now re-selects the whole persisted row, not just status)
+      if (ttlMode && sql.includes('FROM vps v WHERE v.id = ?')) {
+        return this._vpsRow;
       }
       // Normal mode: VPS not found for id=999
       if (String(params?.[0]) === '999') return null;
