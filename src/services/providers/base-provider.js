@@ -52,6 +52,10 @@ class BaseProvider {
   async isSessionActive(sessionRow) {
     throw new Error('isSessionActive must be implemented by provider');
   }
+
+  async getCredentialStatus(loadedCredential) {
+    throw new Error('getCredentialStatus must be implemented by provider');
+  }
 }
 
 module.exports = BaseProvider;

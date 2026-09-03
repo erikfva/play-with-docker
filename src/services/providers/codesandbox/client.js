@@ -1,4 +1,4 @@
-const { CodeSandbox } = require('@codesandbox/sdk');
+const { CodeSandbox, API } = require('@codesandbox/sdk');
 const crypto = require('crypto');
 
 /**
@@ -11,6 +11,7 @@ const crypto = require('crypto');
 class CodeSandboxClient {
   constructor() {
     this.instances = new Map();
+    this.apiInstances = new Map();
   }
 
   /**
@@ -36,11 +37,25 @@ class CodeSandboxClient {
     return this.instances.get(cacheKey);
   }
 
+  getApiClient(token) {
+    if (!token || typeof token !== 'string' || !token.trim()) {
+      throw new Error('CodeSandbox token is required');
+    }
+    const trimmedToken = token.trim();
+    const cacheKey = crypto.createHash('sha256').update(trimmedToken).digest('hex');
+    if (!this.apiInstances.has(cacheKey)) {
+      const api = new API({ apiKey: trimmedToken });
+      this.apiInstances.set(cacheKey, api);
+    }
+    return this.apiInstances.get(cacheKey);
+  }
+
   /**
    * Clear all cached instances (useful for tests)
    */
   clearCache() {
     this.instances.clear();
+    this.apiInstances.clear();
   }
 }
 

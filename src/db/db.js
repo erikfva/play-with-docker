@@ -212,6 +212,7 @@ db.ready = (async () => {
     `);
 
     await ensureColumn('vps', 'status', 'ALTER TABLE vps ADD COLUMN status JSONB DEFAULT NULL');
+    await ensureColumn('vps', 'statusCheckedAt', 'ALTER TABLE vps ADD COLUMN statusCheckedAt TIMESTAMP WITH TIME ZONE DEFAULT NULL');
 
     console.log('[DB] ✓ vps table ready');
 
