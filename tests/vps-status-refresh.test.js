@@ -321,10 +321,13 @@ test('POST /vps/:id/status/refresh respects TTL — returns cached status withou
   assert.strictEqual(res.status, 200);
   assert.ok(res.body.statusCheckedAt);
   assert.strictEqual(res.body.status.status, 'AVAILABLE');
-  // Verify the TTL check short-circuited: the second db.get for status should
-  // have been called, but the provider was never invoked (no credential load)
-  const statusCalls = dbMock._calls.filter(c => c.sql.includes('SELECT status FROM vps'));
-  assert.ok(statusCalls.length > 0, 'TTL mode should read cached status from DB');
+  // TTL shortcut now re-reads the full persisted row (includes createdAt/updatedAt/sessionActive), not just `status`
+  assert.strictEqual(res.body.createdAt, '2025-01-01T00:00:00Z');
+  assert.strictEqual(res.body.updatedAt, '2025-01-02T00:00:00Z');
+  assert.strictEqual(res.body.credentialFileName, 'test-cred.json');
+  // Verify the TTL check short-circuited: the second db.get for the full row should have been called
+  const fullRowCalls = dbMock._calls.filter(c => c.sql.includes('FROM vps v WHERE v.id = ?'));
+  assert.ok(fullRowCalls.length > 0, 'TTL mode should re-read the full persisted row without hitting the provider');
 });
 
 test('POST /vps/:id/status/refresh with force=true bypasses TTL and calls provider', async () => {

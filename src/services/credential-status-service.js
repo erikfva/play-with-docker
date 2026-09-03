@@ -31,8 +31,8 @@ const LOADERS = {
 
 function limitation(field, reason) { return { field, reason }; }
 
-function quotaEntry({ quotaUnit, quotaPeriod, usage = null, limit = null, remaining = null, extra = {} }) {
-  return { quotaUnit, quotaPeriod, usage, limit, remaining, ...extra };
+function quotaEntry({ name = null, quotaUnit, quotaPeriod, usage = null, limit = null, remaining = null, extra = {} }) {
+  return { ...(name ? { name } : {}), quotaUnit, quotaPeriod, usage, limit, remaining, ...extra };
 }
 
 function redactTokensFromMessage(msg) {

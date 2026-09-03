@@ -105,7 +105,7 @@ function isTerminalAuthError(error) { return ( error?.code === 'CODESPACES_TOKEN
 function numOrNull(n) { return typeof n === 'number' && Number.isFinite(n) ? n : null; }
 function round1(n) { return Math.round(n * 10) / 10; }
 function limitation(field, reason) { return { field, reason }; }
-function quotaEntry({ quotaUnit, quotaPeriod, usage = null, limit = null, remaining = null, extra = {} }) { return { quotaUnit, quotaPeriod, usage, limit, remaining, ...extra }; }
+function quotaEntry({ name = null, quotaUnit, quotaPeriod, usage = null, limit = null, remaining = null, extra = {} }) { return { ...(name ? { name } : {}), quotaUnit, quotaPeriod, usage, limit, remaining, ...extra }; }
 function extractCodespacesUsage(body) {
   const items = Array.isArray(body?.usageItems) ? body.usageItems : Array.isArray(body) ? body : [];
   const rows = items.filter((i) => String(i?.product || '').toLowerCase() === 'codespaces');
@@ -177,12 +177,12 @@ class CodespacesProvider extends BaseProvider {
     const computeUsage = usage?.computeHours ?? null;
     const computeLimit = refLimits.computeCoreHoursPerMonth;
     const computeRemain = computeUsage != null ? Math.max(0, computeLimit - computeUsage) : null;
-    quotas.push(quotaEntry({ quotaUnit: 'core-hours', quotaPeriod: 'month', usage: numOrNull(computeUsage), limit: computeLimit, remaining: numOrNull(computeRemain) }));
+    quotas.push(quotaEntry({ name: 'Codespaces compute (core-hours)', quotaUnit: 'core-hours', quotaPeriod: 'month', usage: numOrNull(computeUsage), limit: computeLimit, remaining: numOrNull(computeRemain) }));
     limitations.push(limitation('quotas[0]', 'Included compute is metered in core-hours, not clock hours: consumption accrues at the codespace machine\'s core-count multiplier (a 4-core machine depletes the allowance twice as fast as a 2-core machine). Remaining core-hours overstate possible clock runtime unless divided by core count.'));
     const storageUsage = usage?.storageGbMonths ?? null;
     const storageLimit = refLimits.storageGbMonth;
     const storageRemain = storageUsage != null ? Math.max(0, storageLimit - storageUsage) : null;
-    quotas.push(quotaEntry({ quotaUnit: 'GB-month', quotaPeriod: 'month', usage: numOrNull(storageUsage), limit: storageLimit, remaining: numOrNull(storageRemain) }));
+    quotas.push(quotaEntry({ name: 'Codespaces storage (GB-month)', quotaUnit: 'GB-month', quotaPeriod: 'month', usage: numOrNull(storageUsage), limit: storageLimit, remaining: numOrNull(storageRemain) }));
     if (adoptable === 0) {
       return { status: 'UNAVAILABLE', validated: true, quotas, limitations, expiresAt: null, details: { referenceLimits: refLimits, plan, adoptable: 0, reason: "This orchestrator uses adopt-don\'t-create flow. The GitHub account must already have at least one codespace before a session can be created." } };
     }

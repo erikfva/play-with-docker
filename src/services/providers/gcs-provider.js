@@ -39,8 +39,8 @@ function parseMetadata(metadata) {
 const KEEP_ALIVE_INTERVAL_MINUTES = 10
 
 function limitation(field, reason) { return { field, reason }; }
-function quotaEntry({ quotaUnit, quotaPeriod, usage = null, limit = null, remaining = null, extra = {} }) {
-  return { quotaUnit, quotaPeriod, usage, limit, remaining, ...extra };
+function quotaEntry({ name = null, quotaUnit, quotaPeriod, usage = null, limit = null, remaining = null, extra = {} }) {
+  return { ...(name ? { name } : {}), quotaUnit, quotaPeriod, usage, limit, remaining, ...extra };
 }
 function redactTokensFromMessage(msg) {
   return String(msg || '').replace(/\b[A-Za-z0-9_\-]{20,}\b/g, '[REDACTED]');
@@ -240,7 +240,7 @@ class GcsProvider extends BaseProvider {
 
   async getCredentialStatus(loaded) {
     const limitations = [];
-    const quotas = [quotaEntry({ quotaUnit: 'hours', quotaPeriod: 'week', usage: null, limit: 50, remaining: null })];
+    const quotas = [quotaEntry({ name: 'Cloud Shell weekly hours', quotaUnit: 'hours', quotaPeriod: 'week', usage: null, limit: 50, remaining: null })];
     limitations.push(limitation('quotas[0].usage', 'Cloud Shell documents the 50-hour weekly quota in the UI only. The Cloud Shell REST API (users.environments resource) contains no used-hours or remaining-hours field; this value cannot be determined programmatically.'));
     let accessResult;
     try {

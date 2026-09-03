@@ -27,7 +27,7 @@ const KEEP_ALIVE_COMMAND = 'printf "%s\\n" "$(date -u +%FT%TZ)" > /tmp/play-with
 const REFERENCE_PRICING = { Pico: { creditsPerHour: 5 }, Nano: { creditsPerHour: 10 }, Micro: { creditsPerHour: 20 }, Small: { creditsPerHour: 40 }, Medium: { creditsPerHour: 80 }, Large: { creditsPerHour: 160 }, XLarge: { creditsPerHour: 320 } };
 function numOrNull(n) { return typeof n === 'number' && Number.isFinite(n) ? n : null; }
 function limitation(field, reason) { return { field, reason }; }
-function quotaEntry({ quotaUnit, quotaPeriod, usage = null, limit = null, remaining = null, extra = {} }) { return { quotaUnit, quotaPeriod, usage, limit, remaining, ...extra }; }
+function quotaEntry({ name = null, quotaUnit, quotaPeriod, usage = null, limit = null, remaining = null, extra = {} }) { return { ...(name ? { name } : {}), quotaUnit, quotaPeriod, usage, limit, remaining, ...extra }; }
 
 function parseMetadata(metadata) {
   if (!metadata) {
@@ -151,9 +151,9 @@ class CodeSandboxProvider extends BaseProvider {
     const hourly = rl.sandboxes_hourly || {};
     const conc = rl.concurrent_vms || {};
     const hourlyUsage = hourly.limit != null && hourly.remaining != null ? numOrNull(hourly.limit - hourly.remaining) : null;
-    quotas.push(quotaEntry({ quotaUnit: 'count', quotaPeriod: 'hourly-window', usage: hourlyUsage, limit: numOrNull(hourly.limit), remaining: numOrNull(hourly.remaining), extra: { resetAt: hourly.reset ?? null } }));
+    quotas.push(quotaEntry({ name: 'Sandbox creations (hourly window)', quotaUnit: 'count', quotaPeriod: 'hourly-window', usage: hourlyUsage, limit: numOrNull(hourly.limit), remaining: numOrNull(hourly.remaining), extra: { resetAt: hourly.reset ?? null } }));
     const concUsage = conc.limit != null && conc.remaining != null ? numOrNull(conc.limit - conc.remaining) : null;
-    quotas.push(quotaEntry({ quotaUnit: 'count', quotaPeriod: null, usage: concUsage, limit: numOrNull(conc.limit), remaining: numOrNull(conc.remaining) }));
+    quotas.push(quotaEntry({ name: 'Concurrent VMs', quotaUnit: 'count', quotaPeriod: null, usage: concUsage, limit: numOrNull(conc.limit), remaining: numOrNull(conc.remaining) }));
     let creditUsage = null; let creditLimit = null; let creditRemaining = null; let creditSource = null; let creditBillingPeriod = null;
     const teamId = meta.auth?.team;
     const scraperEnabled = process.env.CODESANDBOX_CREDITS_SCRAPER_ENABLED === '1' || process.env.CODESANDBOX_SCRAPER_ENABLED === '1';
@@ -166,9 +166,9 @@ class CodeSandboxProvider extends BaseProvider {
       } catch (scrapeErr) { console.warn(`[CodeSandbox] scrapeCreditsForTeam failed: ${scrapeErr.message}`); }
     }
     if (creditUsage != null || creditLimit != null) {
-      quotas.push(quotaEntry({ quotaUnit: 'credits', quotaPeriod: 'billing-cycle', usage: numOrNull(creditUsage), limit: numOrNull(creditLimit), remaining: numOrNull(creditRemaining), extra: { ...(creditSource ? { source: creditSource } : {}), ...(creditBillingPeriod ? { billingPeriod: creditBillingPeriod } : {}) } }));
+      quotas.push(quotaEntry({ name: 'Credits (billing cycle)', quotaUnit: 'credits', quotaPeriod: 'billing-cycle', usage: numOrNull(creditUsage), limit: numOrNull(creditLimit), remaining: numOrNull(creditRemaining), extra: { ...(creditSource ? { source: creditSource } : {}), ...(creditBillingPeriod ? { billingPeriod: creditBillingPeriod } : {}) } }));
     } else {
-      quotas.push(quotaEntry({ quotaUnit: 'credits', quotaPeriod: 'billing-cycle', usage: null, limit: null, remaining: null }));
+      quotas.push(quotaEntry({ name: 'Credits (billing cycle)', quotaUnit: 'credits', quotaPeriod: 'billing-cycle', usage: null, limit: null, remaining: null }));
       limitations.push(limitation('quotas[2].usage', 'The CodeSandbox API does not expose credit balance. Credits are available only via the dashboard at ' + (teamId ? `https://codesandbox.io/t/usage?workspace=${teamId}` : 'https://codesandbox.io/dashboard') + '. ' + (scraperEnabled ? 'Scraping was enabled but no matching web credential file was found for this workspace. Ensure a codesandbox-web session file exists in CODESANDBOX_WEB_CREDENTIALS_DIR.' : 'Set CODESANDBOX_CREDITS_SCRAPER_ENABLED=1 and provide web session files in CODESANDBOX_WEB_CREDENTIALS_DIR to retrieve live credit balance.')));
     }
     const rateLimitExhausted = conc.remaining === 0 || hourly.remaining === 0;
