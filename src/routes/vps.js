@@ -11,7 +11,7 @@ const {
   validateAndFingerprintContent
 } = require('../services/vps-credential-utils');
 const { ProviderError } = require('../services/errors/provider-errors');
-const { refreshVpsStatus, refreshAllVpsStatuses } = require('../services/vps-status-service');
+const { refreshVpsStatus, refreshAllVpsStatuses, mergeCodesandboxBilling } = require('../services/vps-status-service');
 
 const router = express.Router();
 
@@ -312,6 +312,27 @@ router.post('/:id/status/refresh', async (req, res) => {
     return res.json(updated);
   } catch (error) {
     return mapErrorToHttp(res, error, 'Failed to refresh VPS status');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PATCH /api/v1/vps/:id/status/billing — merge CodeSandbox dashboard billing
+// into the persisted VPS status (called by scripts/get-codesandbox-credits.js).
+// ---------------------------------------------------------------------------
+router.patch('/:id/status/billing', async (req, res) => {
+  try {
+    const { billing } = req.body || {};
+    if (!billing || typeof billing !== 'object') {
+      return res.status(400).json({ error: 'billing object is required', code: 'VPS_INVALID_PARAM' });
+    }
+    const hasAny = billing.includedCredits != null || billing.usedCredits != null || billing.remainingCredits != null;
+    if (!hasAny) {
+      return res.status(400).json({ error: 'billing must include at least one of includedCredits, usedCredits, remainingCredits', code: 'VPS_INVALID_PARAM' });
+    }
+    const updated = await mergeCodesandboxBilling(req.params.id, billing);
+    return res.json(updated);
+  } catch (error) {
+    return mapErrorToHttp(res, error, 'Failed to merge billing into VPS status');
   }
 });
 

@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 
 function parseArgs(argv) {
-  const args = { workspace: null, json: true, headless: false, googleCredentials: null, codesandboxCredentials: null, saveState: null };
+  const args = { workspace: null, json: true, headless: false, googleCredentials: null, codesandboxCredentials: null, saveState: null, vpsId: null, vpsName: null, apiUrl: null, serverToken: null, noUpdate: false, updateVps: null };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--help' || a === '-h') args.help = true;
@@ -45,6 +45,35 @@ function parseArgs(argv) {
     } else if (a.startsWith('--save-state=')) args.saveState = a.slice('--save-state='.length);
     else if (a.startsWith('--save-codesandbox-state=')) args.saveState = a.slice('--save-codesandbox-state='.length);
     else if (a.startsWith('--save-auth=')) args.saveState = a.slice('--save-auth='.length);
+    else if (a === '--vps-id' || a === '--vps') {
+      const v = argv[++i];
+      if (!v || v.startsWith('--')) throw new Error(`${a} requires a value`);
+      args.vpsId = v;
+    } else if (a.startsWith('--vps-id=')) args.vpsId = a.slice('--vps-id='.length);
+    else if (a.startsWith('--vps=')) args.vpsId = a.slice('--vps='.length);
+    else if (a === '--vps-name' || a === '--name' || a === '--credential-name' || a === '--credential') {
+      const v = argv[++i];
+      if (!v || v.startsWith('--')) throw new Error(`${a} requires a value`);
+      args.vpsName = v;
+    } else if (a.startsWith('--vps-name=')) args.vpsName = a.slice('--vps-name='.length);
+    else if (a.startsWith('--name=')) args.vpsName = a.slice('--name='.length);
+    else if (a.startsWith('--credential-name=')) args.vpsName = a.slice('--credential-name='.length);
+    else if (a.startsWith('--credential=')) args.vpsName = a.slice('--credential='.length);
+    else if (a === '--api-url' || a === '--url' || a === '--base-url') {
+      const v = argv[++i];
+      if (!v) throw new Error(`${a} requires a value`);
+      args.apiUrl = v;
+    } else if (a.startsWith('--api-url=')) args.apiUrl = a.slice('--api-url='.length);
+    else if (a.startsWith('--url=')) args.apiUrl = a.slice('--url='.length);
+    else if (a.startsWith('--base-url=')) args.apiUrl = a.slice('--base-url='.length);
+    else if (a === '--server-token' || a === '--token') {
+      const v = argv[++i];
+      if (!v) throw new Error(`${a} requires a value`);
+      args.serverToken = v;
+    } else if (a.startsWith('--server-token=')) args.serverToken = a.slice('--server-token='.length);
+    else if (a.startsWith('--token=')) args.serverToken = a.slice('--token='.length);
+    else if (a === '--no-update' || a === '--skip-update' || a === '--no-vps-update') { args.noUpdate = true; }
+    else if (a === '--update-vps' || a === '--update') { args.updateVps = true; args.noUpdate = false; }
     else throw new Error(`Unknown argument: ${a}`);
   }
   return args;
@@ -52,7 +81,7 @@ function parseArgs(argv) {
 
 function printUsage() {
   console.log(`Usage:
-  node scripts/get-codesandbox-credits.js [--credentials <github.json>] [--google-credentials <google.json>] [--codesandbox-credentials <csb.json>] [--workspace <ws_...>] [--save-state <out.json>]
+  node scripts/get-codesandbox-credits.js [--credentials <github.json>] [--google-credentials <google.json>] [--codesandbox-credentials <csb.json>] [--workspace <ws_...>] [--save-state <out.json>] --vps-id <id> | --vps-name <name> [--api-url <url>] [--server-token <tok>] [--no-update]
 
 Defaults: --json, --headful (auto xvfb-run on headless VPS).
 
@@ -63,16 +92,22 @@ Options:
   --save-state <path>       After successful browser login, save CodeSandbox storageState to <path> for reuse (like github-auth.js --output).
                             Example: --google-credentials /mnt/s3/google/simca.scz/google.json --save-state /mnt/s3/codesandbox-web/simca.scz.json
   --workspace <id>          CodeSandbox workspace/team id (e.g. ws_Eha5JM84UeHdXshrooLDTA). If omitted, auto-detected from dashboard.
+  --vps-id <id>             VPS id to update (required unless --vps-name given). Also honors CODESANDBOX_VPS_ID env.
+  --vps-name <name>         VPS / credential name to update, e.g. vm-manager232 (required unless --vps-id given).
+                            Also honors CODESANDBOX_VPS_NAME env. Takes precedence lookup by exact name match.
+  --api-url <url>           API base URL for VPS update (default: PWD_API_URL → http://localhost:$PORT → http://localhost:3000)
+  --server-token <tok>      x-server-token for the API (default: SERVER_TOKEN env)
+  --no-update               Skip updating vps.status (scrape only)
   --no-json                 Output human-readable text instead of JSON
   --headless                Force headless (no xvfb-run)
 
 Examples:
-  node scripts/get-codesandbox-credits.js --credentials /mnt/s3/github/vm-manager123/github.json
-  node scripts/get-codesandbox-credits.js --google-credentials /mnt/s3/google/etecnologysys/google.json
+  node scripts/get-codesandbox-credits.js --credentials /mnt/s3/github/vm-manager123/github.json --vps-name vm-manager123
+  node scripts/get-codesandbox-credits.js --google-credentials /mnt/s3/google/etecnologysys/google.json --vps-name etecnologysys
   # Save CodeSandbox session for reuse (like github-auth.js):
   node scripts/get-codesandbox-credits.js --google-credentials /mnt/s3/google/simca.scz/google.json --save-state /mnt/s3/codesandbox-web/simca.scz.json
   # Reuse without re-OAuth:
-  node scripts/get-codesandbox-credits.js --codesandbox-credentials /mnt/s3/codesandbox-web/simca.scz.json
+  node scripts/get-codesandbox-credits.js --codesandbox-credentials /mnt/s3/codesandbox-web/simca.scz.json --vps-name simca-scz
 
 Flow (--credentials):
   1. Launch Playwright with GitHub session (via --credentials or GITHUB_PROFILE_DIR)
@@ -684,6 +719,24 @@ async function main() {
     printUsage();
     process.exit(1);
   }
+
+  // VPS target is mandatory (unless --no-update skips the billing merge).
+  // Provide --vps-id <id> or --vps-name <name> (or CODESANDBOX_VPS_ID /
+  // CODESANDBOX_VPS_NAME env). The browser auth file basename also counts as
+  // the credential name, e.g. CODESANDBOX_AUTH_FILE=.../vm-manager232.json.
+  const browserFileForVps = args.codesandboxCredentials || args.credentials || args.googleCredentials
+    || process.env.CODESANDBOX_AUTH_FILE || process.env.GITHUB_AUTH_FILE || process.env.GOOGLE_AUTH_FILE || null;
+  const browserBaseForVps = browserFileForVps ? path.basename(browserFileForVps).replace(/\.json$/, '') : null;
+  const hasVpsTarget = !!(args.vpsId || args.vpsName || process.env.CODESANDBOX_VPS_ID || process.env.CODESANDBOX_VPS_NAME || browserBaseForVps);
+  if (!args.noUpdate && !hasVpsTarget) {
+    console.error('Error: VPS target required. Provide one of:');
+    console.error('  --vps-id <id>       (VPS row id)');
+    console.error('  --vps-name <name>   (VPS / credential name, e.g. vm-manager232)');
+    console.error('Or set env: CODESANDBOX_VPS_ID / CODESANDBOX_VPS_NAME');
+    console.error('Or pass --no-update to scrape only without updating vps.status.');
+    printUsage();
+    process.exit(2);
+  }
   if (!process.env.DISPLAY && !process.env._XVFB_REEXEC) {
     const xvfb = '/usr/bin/xvfb-run';
     if (fs.existsSync(xvfb)) {
@@ -928,9 +981,132 @@ async function main() {
       // Exit 0 when we have partial data (API-only also returns ok:true with _note)
       process.exit(0);
     }
+
+    // ---- Update vps.status via HTTP (merge billing into Credits quota) ----
+    if (!args.noUpdate) {
+      try {
+        await updateVpsBilling(output, args);
+      } catch (e) {
+        // Non-fatal — scraping already succeeded; surface the error but don't
+        // fail the run. The billing output above is still useful on its own.
+        console.warn(`[vps-status] billing merge skipped: ${e.message}`);
+      }
+    }
   } finally {
     await lib.closeBrowser(context);
   }
+}
+
+async function updateVpsBilling(output, args) {
+  const baseUrl = (args.apiUrl || process.env.PWD_API_URL || process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, '');
+  const token = args.serverToken || process.env.SERVER_TOKEN || '';
+  if (!token) {
+    console.warn('[vps-status] SERVER_TOKEN not set (--server-token / $SERVER_TOKEN) — skipping vps.status update.');
+    return;
+  }
+
+  // Resolve VPS id: explicit --vps-id / CODESANDBOX_VPS_ID wins,
+  // otherwise --vps-name / CODESANDBOX_VPS_NAME, otherwise the browser auth
+  // file basename as credential name (e.g. .../vm-manager232.json).
+  // No other auto-detect — one of these is mandatory (validated in main).
+  let vpsId = args.vpsId || process.env.CODESANDBOX_VPS_ID || null;
+  const browserFile = args.codesandboxCredentials || args.credentials || args.googleCredentials
+    || process.env.CODESANDBOX_AUTH_FILE || process.env.GITHUB_AUTH_FILE || process.env.GOOGLE_AUTH_FILE || null;
+  const browserBase = browserFile ? path.basename(browserFile).replace(/\.json$/, '') : null;
+  const vpsName = args.vpsName || process.env.CODESANDBOX_VPS_NAME || browserBase || null;
+  let vpsApiToken = null;
+
+  if (!vpsId) {
+    const resolved = await resolveVpsIdByName(baseUrl, token, vpsName);
+    if (!resolved) {
+      throw new Error(`VPS not found for name "${vpsName}". Check --vps-name / CODESANDBOX_VPS_NAME.`);
+    }
+    vpsId = resolved.id;
+    vpsApiToken = resolved.apiToken || null;
+  } else if (vpsName) {
+    // Both given: enrich with the correlated API token when names match.
+    vpsApiToken = readApiTokenByBasename(vpsName);
+  }
+
+  const billing = {
+    includedCredits: output.includedCredits,
+    usedCredits: output.usedCredits,
+    remainingCredits: output.remainingCredits,
+    billingPeriod: output.billingPeriod,
+    url: output.url,
+    sandboxes: output.sandboxes,
+    vmsActive: output.vmsActive,
+    freeCreditsUsed: output.freeCreditsUsed,
+    fetchedAt: output.fetchedAt,
+    team: output.team,
+    workspace: output.workspace,
+  };
+  // Include the API token when we discovered it via the VPS row so the
+  // server can optionally validate the session belongs to the right account.
+  if (vpsApiToken) billing.apiToken = vpsApiToken;
+
+  const res = await fetch(`${baseUrl}/api/v1/vps/${encodeURIComponent(vpsId)}/status/billing`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'x-server-token': token },
+    body: JSON.stringify({ billing })
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = body.error || body.code || `HTTP ${res.status}`;
+    console.warn(`[vps-status] PATCH /vps/${vpsId}/status/billing failed: ${msg}`);
+    return;
+  }
+  const quota = body.status?.quotas?.find(q => (q.name && /credits/i.test(q.name)) || (q.quotaUnit === 'credits' && q.quotaPeriod === 'billing-cycle'));
+  if (quota) console.log(`[vps-status] ✓ vps ${vpsId} status updated — Credits ${quota.usage ?? '?'}/${quota.limit ?? '?'} (remaining ${quota.remaining ?? '?'}) [${body.status?.status}]`);
+  else console.log(`[vps-status] ✓ vps ${vpsId} status updated [${body.status?.status}]`);
+}
+
+/**
+ * Read the API-token file ({ token: "..." }) with the given basename from the
+ * known credential dirs. Returns the token string or null.
+ * StorageState files ({ cookies, origins }) are ignored (no .token).
+ */
+function readApiTokenByBasename(base) {
+  const dirs = [
+    path.join(path.dirname(__dirname), 'credentials/codesandbox'),
+    '/config/workspace/play-with-docker/credentials/codesandbox',
+    '/mnt/s3/codesandbox',
+  ];
+  const seen = new Set();
+  for (const d of dirs) {
+    if (seen.has(d)) continue;
+    seen.add(d);
+    const p = path.join(d, `${base}.json`);
+    try {
+      if (!fs.existsSync(p)) continue;
+      const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+      if (parsed && typeof parsed.token === 'string' && parsed.token.trim()) return parsed.token.trim();
+    } catch {}
+  }
+  return null;
+}
+
+/**
+ * Resolve a VPS row id by exact VPS / credential name.
+ * Mandatory-input resolver: no guessing, no fingerprint/workspace fallback.
+ * Returns { id, apiToken } or null when no exact name match exists.
+ */
+async function resolveVpsIdByName(baseUrl, token, vpsName) {
+  if (!vpsName) return null;
+  let list;
+  try {
+    const r = await fetch(`${baseUrl}/api/v1/vps?provider=codesandbox&limit=100`, {
+      headers: { 'x-server-token': token }
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    list = j.vps || j.rows || [];
+  } catch { return null; }
+  const hit = (list || []).find(v => v.name === vpsName);
+  if (!hit) return null;
+  // Enrich with the correlated API token file when present.
+  const apiToken = readApiTokenByBasename(vpsName);
+  return { id: hit.id, apiToken };
 }
 
 main().catch(err => {

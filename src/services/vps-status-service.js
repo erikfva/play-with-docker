@@ -246,4 +246,91 @@ async function refreshAllVpsStatuses({ provider, force = false } = {}) {
   return { summary: { total, succeeded, failed }, results };
 }
 
-module.exports = { refreshVpsStatus, refreshAllVpsStatuses };
+function numOrNullBilling(n) { return typeof n === 'number' && Number.isFinite(n) ? n : null; }
+
+/**
+ * Merge CodeSandbox dashboard billing (scraped by get-codesandbox-credits.js)
+ * into the persisted vps.status JSONB.
+ * - Preserves the existing envelope (other quotas, details, status enum).
+ * - Replaces or appends the "Credits (billing cycle)" quota entry.
+ * - Updates checkedAt / statusCheckedAt and details.creditSource/Period.
+ * - Adjusts top-level status AVAILABLE <-> QUOTA_EXHAUSTED without clobbering
+ *   INVALID / EXPIRED / LIMITED (LIMITED is local-state derived).
+ */
+async function mergeCodesandboxBilling(vpsId, billing) {
+  const row = await db.get(
+    'SELECT id, provider, name, credentialfingerprint AS "credentialFingerprint", status FROM vps WHERE id = ?',
+    [vpsId]
+  );
+  if (!row) throw new ProviderError(`VPS not found: ${vpsId}`, { code: 'VPS_NOT_FOUND', statusCode: 404 });
+  if (row.provider !== 'codesandbox') {
+    throw new ProviderError(`VPS ${vpsId} is provider "${row.provider}", not "codesandbox"`, { code: 'VPS_INVALID_PARAM', statusCode: 400 });
+  }
+
+  const fetchedAt = billing.fetchedAt || new Date().toISOString();
+  let entry = row.status;
+  const hasEnvelope = entry && typeof entry === 'object' && !Array.isArray(entry);
+
+  if (!hasEnvelope) {
+    const rem = billing.remainingCredits != null ? billing.remainingCredits
+      : (billing.includedCredits != null && billing.usedCredits != null ? Math.max(0, billing.includedCredits - billing.usedCredits) : null);
+    entry = {
+      provider: 'codesandbox',
+      credential: row.name,
+      credentialFingerprint: row['credentialFingerprint'] || null,
+      status: rem === 0 ? 'QUOTA_EXHAUSTED' : 'AVAILABLE',
+      checkedAt: fetchedAt,
+      expiresAt: null,
+      quotas: [],
+      details: { validated: true, limitations: [], localActiveSessions: 0 }
+    };
+  }
+
+  if (!Array.isArray(entry.quotas)) entry.quotas = [];
+  if (!entry.details || typeof entry.details !== 'object') entry.details = {};
+
+  const creditsQuota = {
+    name: 'Credits (billing cycle)',
+    quotaUnit: 'credits',
+    quotaPeriod: 'billing-cycle',
+    usage: numOrNullBilling(billing.usedCredits),
+    limit: numOrNullBilling(billing.includedCredits),
+    remaining: numOrNullBilling(
+      billing.remainingCredits != null ? billing.remainingCredits
+        : (billing.includedCredits != null && billing.usedCredits != null ? Math.max(0, billing.includedCredits - billing.usedCredits) : null)
+    ),
+    ...(billing.url ? { source: billing.url } : {}),
+    ...(billing.billingPeriod ? { billingPeriod: billing.billingPeriod } : {}),
+    fetchedAt,
+    ...(billing.sandboxes ? { sandboxes: billing.sandboxes } : {}),
+    ...(billing.vmsActive != null ? { vmsActive: billing.vmsActive } : {}),
+    ...(billing.freeCreditsUsed != null ? { freeCreditsUsed: billing.freeCreditsUsed } : {}),
+  };
+
+  const idx = entry.quotas.findIndex(q => {
+    if (!q || typeof q !== 'object') return false;
+    if (q.name && String(q.name).toLowerCase().includes('credits')) return true;
+    return q.quotaUnit === 'credits' && q.quotaPeriod === 'billing-cycle';
+  });
+  if (idx >= 0) entry.quotas[idx] = { ...entry.quotas[idx], ...creditsQuota };
+  else entry.quotas.push(creditsQuota);
+
+  if (creditsQuota.remaining === 0) {
+    if (entry.status === 'AVAILABLE') entry.status = 'QUOTA_EXHAUSTED';
+  } else if (creditsQuota.remaining != null && creditsQuota.remaining > 0) {
+    if (entry.status === 'QUOTA_EXHAUSTED') {
+      const stillExhausted = entry.quotas.some(q => q !== creditsQuota && q.remaining === 0 && q.limit != null);
+      if (!stillExhausted) entry.status = 'AVAILABLE';
+    }
+  }
+
+  entry.checkedAt = fetchedAt;
+  if (billing.billingPeriod) entry.details.creditBillingPeriod = billing.billingPeriod;
+  if (billing.url) entry.details.creditSource = billing.url;
+  entry.credentialFingerprint = row['credentialFingerprint'] || entry.credentialFingerprint || null;
+  entry.provider = 'codesandbox';
+
+  return persistVpsStatus(vpsId, entry);
+}
+
+module.exports = { refreshVpsStatus, refreshAllVpsStatuses, mergeCodesandboxBilling, persistVpsStatus };
