@@ -80,13 +80,13 @@ async function finalizeWithLocalState(providerName, rawLoaded, checkerResult) {
   return entry;
 }
 
-async function persistVpsStatus(vpsId, entry) {
+async function persistVpsStatus(vpsId, entry, { touchCheckedAt = true } = {}) {
   const json = JSON.stringify(entry);
+  const touch = touchCheckedAt ? ',\n          statuscheckedat = CURRENT_TIMESTAMP' : '';
   const row = await db.get(
     `WITH updated AS (
       UPDATE vps
-      SET status = ?::jsonb,
-          statuscheckedat = CURRENT_TIMESTAMP
+      SET status = ?::jsonb${touch}
       WHERE id = ?
       RETURNING id, provider, name, credentialfilename, credentialfingerprint,
                 status, statuscheckedat, createdat, updatedat
@@ -330,7 +330,10 @@ async function mergeCodesandboxBilling(vpsId, billing) {
   entry.credentialFingerprint = row['credentialFingerprint'] || entry.credentialFingerprint || null;
   entry.provider = 'codesandbox';
 
-  return persistVpsStatus(vpsId, entry);
+  // Billing merge must not bump the statuscheckedat column — that timestamp
+  // tracks provider credential checks (refresh), not dashboard scrapes.
+  // The scrape time is recorded inside the envelope (checkedAt / fetchedAt).
+  return persistVpsStatus(vpsId, entry, { touchCheckedAt: false });
 }
 
 module.exports = { refreshVpsStatus, refreshAllVpsStatuses, mergeCodesandboxBilling, persistVpsStatus };
