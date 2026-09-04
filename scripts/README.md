@@ -9,6 +9,7 @@ Helper scripts for local development, credential seeding, and provider diagnosti
 | [`check-codespaces-create.sh`](#check-codespaces-createsh) | Validate a GitHub PAT and whether the account can adopt / create a Codespace |
 | [`test-codesandbox-api.sh`](#test-codesandbox-apish) | Smoke-test a CodeSandbox API token with the official SDK |
 | [`get-codesandbox-credits.js`](#get-codesandbox-creditsjs) | Fetch CodeSandbox workspace credits via browser webscraping (standalone) |
+| [`refresh-codesandbox-credits.js`](#refresh-codesandbox-creditsjs) | Run the credits scraper once per codesandbox credential (batch) |
 | [`codesandbox-auth.js`](#codesandbox-authjs) | Save a CodeSandbox Playwright storageState for reuse by the scraper |
 | [`auth-browser.js`](#auth-browserjs) | Shared `playwright-core` wrapper (Chromium launcher + stealth + storageState) |
 
@@ -216,15 +217,35 @@ On a server with no `$DISPLAY`, the script auto re-executes under `xvfb-run` (he
 | `--codesandbox-credentials <path>` | Playwright `storageState` for CodeSandbox directly (`$CODESANDBOX_AUTH_FILE` also honored) — created via `--save-state` / `codesandbox-auth.js --output` |
 | `--save-state <path>` | Aliases `--save-codesandbox-state`, `--save-auth` — save CodeSandbox `storageState` for reuse |
 | `--workspace <id>` | CodeSandbox workspace/team id (`ws_…`) |
+| `--vps-id <id>` | VPS row to update — mandatory unless `--vps-name` given (`$CODESANDBOX_VPS_ID` also honored) |
+| `--vps-name <name>` | VPS / credential name to update, e.g. `vm-manager232` — mandatory unless `--vps-id` given (`$CODESANDBOX_VPS_NAME` also honored; browser auth file basename counts too) |
 | `--no-json` | Human-readable output (default is JSON) |
 | `--headless` | Force headless, skip auto `xvfb-run` |
 | `DEBUG=1` | Save `debug-codesandbox-credits.html` + screenshot on failure |
 
-Browser credentials are required — without them the script exits with an error. Output example:
+Browser credentials are required — without them the script exits with an error. A VPS target (`--vps-id` or `--vps-name`) is likewise mandatory unless `--no-update` is passed. Output example:
 
 ```json
 { "ok": true, "team": "ws_Sh4V5DwQDYJDBRgDKhm79X", "url": "https://codesandbox.io/t/usage?workspace=ws_Sh4V5DwQDYJDBRgDKhm79X", "billingPeriod": "8 August – 8 September 2026", "includedCredits": 400, "usedCredits": 403, "remainingCredits": 0, "freeCreditsUsed": 403, "sandboxes": { "used": 0, "limit": 5 } }
 ```
+
+The scrape merges a `Credits (billing cycle)` quota via `PATCH /api/v1/vps/:id/status/billing` without touching `statusCheckedAt` (that column tracks provider credential checks, not scrapes).
+
+---
+
+## refresh-codesandbox-credits.js
+
+Batch runner for `get-codesandbox-credits.js` — lists all `codesandbox` VPS rows, matches each to its browser session file `<vps-name>.json` (`$CODESANDBOX_WEB_CREDENTIALS_DIR`, `/mnt/s3/codesandbox-web`, or `credentials/codesandbox-web`), and spawns the scraper sequentially with `--vps-id`. Rows without a matching session file are skipped (reported, not failed). Fresh billing per `CODESANDBOX_SCRAPER_TTL` is skipped by the child itself.
+
+```bash
+node scripts/refresh-codesandbox-credits.js
+node scripts/refresh-codesandbox-credits.js --name vm-manager232
+node scripts/refresh-codesandbox-credits.js --id df0cb683-1396-4006-a74b-56d12292ae52
+node scripts/refresh-codesandbox-credits.js --dry-run
+node scripts/refresh-codesandbox-credits.js --timeout-minutes 15 --url http://localhost:3200
+```
+
+Options: `--url`, `--token`, `--id`, `--name <substr>`, `--timeout-minutes` (default 10), `--no-update` / `--headless` (passed through), `--dry-run`, `--help`. Exits `1` when any credential run fails.
 
 ---
 
@@ -267,4 +288,7 @@ Common variables (see `scripts/.env.example`):
 - `CODESPACES_DEFAULT_REPOSITORY_ID` — repo id probed by `check-codespaces-create.sh` when testing creation throttle.
 - `ENV_FILE` — custom env file for `test-codesandbox-api.sh` (default `<repo>/.env`).
 - `CODESANDBOX_WORKSPACE` / `GITHUB_AUTH_FILE` / `GOOGLE_AUTH_FILE` / `CODESANDBOX_AUTH_FILE` / `CODESANDBOX_SAVE_STATE` — honored by `get-codesandbox-credits.js` / `auth-browser.js`.
+- `CODESANDBOX_VPS_ID` / `CODESANDBOX_VPS_NAME` — default VPS target for `get-codesandbox-credits.js` (`--vps-id` / `--vps-name` flags win; the browser auth file basename also counts as credential name).
+- `CODESANDBOX_SCRAPER_TTL` (minutes, default `60`) — minimal billing freshness; the scraper skips the browser run while the stored Credits quota `fetchedAt + TTL` is still in the future (`0` = always scrape).
+- `CODESANDBOX_WEB_CREDENTIALS_DIR` — session-file lookup dir for `refresh-codesandbox-credits.js` (default `/mnt/s3/codesandbox-web`, fallback `credentials/codesandbox-web`).
 - `VPS_STATUS_TTL_MINUTES` — TTL for `refresh-vps-status.js` cache bypass (`--force` ignores it) — server env (root `.env.example`).
