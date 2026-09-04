@@ -251,7 +251,7 @@ Options: `--url`, `--token`, `--id`, `--name <substr>`, `--timeout-minutes` (def
 
 ## codesandbox-auth.js
 
-Thin wrapper around `get-codesandbox-credits.js --save-state` with `github-auth.js`-style `--output`. Priority: `--codesandbox-credentials` > `--google-credentials` > `--credentials`. Honors `$CODESANDBOX_AUTH_FILE`/`$GOOGLE_AUTH_FILE`/`$GITHUB_AUTH_FILE`.
+Thin wrapper around `get-codesandbox-credits.js --save-state` with `github-auth.js`-style `--output`. Priority: `--codesandbox-credentials` > `--google-credentials` > `--credentials`. Honors `$CODESANDBOX_AUTH_FILE`/`$GOOGLE_AUTH_FILE`/`$GITHUB_AUTH_FILE`. Always passes `--save-only` (sign in + save, no credits scrape — ~25s per credential vs ~5min).
 
 ```bash
 node scripts/codesandbox-auth.js --google-credentials /mnt/s3/google/simca.scz/google.json --output ./playwright/.auth/codesandbox.json
