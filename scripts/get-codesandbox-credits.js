@@ -101,6 +101,10 @@ Options:
   --no-json                 Output human-readable text instead of JSON
   --headless                Force headless (no xvfb-run)
 
+  The scrape is skipped when the stored billing is still fresh: the Credits
+  quota fetchedAt + CODESANDBOX_SCRAPER_TTL (minutes, default 60) is still in
+  the future. Set CODESANDBOX_SCRAPER_TTL=0 to always scrape.
+
 Examples:
   node scripts/get-codesandbox-credits.js --credentials /mnt/s3/github/vm-manager123/github.json --vps-name vm-manager123
   node scripts/get-codesandbox-credits.js --google-credentials /mnt/s3/google/etecnologysys/google.json --vps-name etecnologysys
@@ -694,7 +698,48 @@ async function extractCredits(page) {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Main
+// Scraper TTL (CODESANDBOX_SCRAPER_TTL, minutes, default 60)
+// ---------------------------------------------------------------------------
+
+function scraperTtlMinutes() {
+  const raw = process.env.CODESANDBOX_SCRAPER_TTL;
+  if (raw == null || raw === '') return 60;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) {
+    console.warn(`[vps-status] Invalid CODESANDBOX_SCRAPER_TTL="${raw}" — using default 60 minutes.`);
+    return 60;
+  }
+  return n;
+}
+
+function storedBillingFetchedAt(status) {
+  const quotas = status && typeof status === 'object' && Array.isArray(status.quotas) ? status.quotas : [];
+  const q = quotas.find(q => q && typeof q === 'object'
+    && ((q.name && String(q.name).toLowerCase().includes('credits'))
+      || (q.quotaUnit === 'credits' && q.quotaPeriod === 'billing-cycle')));
+  return (q && q.fetchedAt) || null;
+}
+
+// Pre-scrape freshness check: true when the stored Credits billing is still
+// fresh (fetchedAt + TTL in the future) and the browser scrape can be skipped.
+// Fail-open (false) when the API is unreachable or no billing was ever stored.
+async function isStoredBillingFresh(baseUrl, token, vpsId, ttlMinutes) {
+  try {
+    const r = await fetch(`${baseUrl}/api/v1/vps/${encodeURIComponent(vpsId)}`, {
+      headers: { 'x-server-token': token }
+    });
+    if (!r.ok) return false;
+    const row = await r.json();
+    const fetchedAt = storedBillingFetchedAt(row.status);
+    if (!fetchedAt) return false;
+    const t = new Date(fetchedAt).getTime();
+    if (Number.isNaN(t)) return false;
+    return t + ttlMinutes * 60000 > Date.now();
+  } catch { return false; }
+}
+
+// ---------------------------------------------------------------------------
+// Main — browser-only (webscraping)
 // ---------------------------------------------------------------------------
 
 async function main() {
@@ -736,6 +781,31 @@ async function main() {
     console.error('Or pass --no-update to scrape only without updating vps.status.');
     printUsage();
     process.exit(2);
+  }
+
+  // Scraper TTL: skip the expensive browser scrape when the stored billing is
+  // still fresh (Credits quota fetchedAt + CODESANDBOX_SCRAPER_TTL minutes is
+  // in the future). Fail-open: scrape anyway when the API can't be reached.
+  if (!args.noUpdate) {
+    const ttl = scraperTtlMinutes();
+    if (ttl > 0) {
+      const baseUrl = (args.apiUrl || process.env.PWD_API_URL || process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, '');
+      const token = args.serverToken || process.env.SERVER_TOKEN || '';
+      if (!token) {
+        console.warn('[vps-status] SERVER_TOKEN not set — cannot check billing freshness, scraping anyway.');
+      } else {
+        let checkId = args.vpsId || process.env.CODESANDBOX_VPS_ID || null;
+        const checkName = args.vpsName || process.env.CODESANDBOX_VPS_NAME || browserBaseForVps || null;
+        if (!checkId && checkName) {
+          const resolved = await resolveVpsIdByName(baseUrl, token, checkName);
+          checkId = resolved ? resolved.id : null;
+        }
+        if (checkId && await isStoredBillingFresh(baseUrl, token, checkId, ttl)) {
+          console.log(`[vps-status] billing for "${checkName || checkId}" is fresh (fetchedAt + ${ttl}min TTL still valid) — skipping scrape.`);
+          return;
+        }
+      }
+    }
   }
   if (!process.env.DISPLAY && !process.env._XVFB_REEXEC) {
     const xvfb = '/usr/bin/xvfb-run';
