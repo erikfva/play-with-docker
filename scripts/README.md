@@ -8,6 +8,9 @@ Helper scripts for local development, credential seeding, and provider diagnosti
 | [`seed-credentials.js`](#seed-credentialsjs) | Bulk-import credential files from a local directory into `vps` |
 | [`check-codespaces-create.sh`](#check-codespaces-createsh) | Validate a GitHub PAT and whether the account can adopt / create a Codespace |
 | [`test-codesandbox-api.sh`](#test-codesandbox-apish) | Smoke-test a CodeSandbox API token with the official SDK |
+| [`get-codesandbox-credits.js`](#get-codesandbox-creditsjs) | Fetch CodeSandbox workspace credits via browser webscraping (standalone) |
+| [`codesandbox-auth.js`](#codesandbox-authjs) | Save a CodeSandbox Playwright storageState for reuse by the scraper |
+| [`auth-browser.js`](#auth-browserjs) | Shared `playwright-core` wrapper (Chromium launcher + stealth + storageState) |
 
 All scripts load env via `dotenv` when `NODE_ENV !== production`: first the repo root `.env`, then `scripts/.env` if present (per-scripts overrides win). CLI flags `--url` / `--token` win over both. Template: `scripts/.env.example` (also documented in the root `.env.example`).
 The base URL precedence for `refresh-vps-status.js` / `seed-credentials.js` is: `--url` flag → `$PWD_API_URL` env var → `http://localhost:$PORT` → `http://localhost:3000`.
@@ -163,15 +166,105 @@ Requires `.env` with `CSB_API_KEY` or `CODESANDBOX_API_KEY`. Uses a temp directo
 
 ---
 
+## get-codesandbox-credits.js
+
+Fetch CodeSandbox workspace credit usage via browser webscraping — supports three modes: **GitHub OAuth / Google OAuth / CodeSandbox direct `storageState` (fastest, no re-OAuth)**. Scrapes `https://codesandbox.io/dashboard` (`Included credits` / `Credits used` / billing period). Defaults to JSON output, headful via `xvfb-run` on headless VPS. Ported from PR #9 — see `ai/LAB-009_provider-credential-status/plan-codesandbox.md`.
+
+### GitHub / Google OAuth (browser — generates `codesandbox-web` session for reuse)
+
+```bash
+node scripts/get-codesandbox-credits.js --credentials /mnt/s3/github/vm-manager123/github.json
+node scripts/get-codesandbox-credits.js --credentials /mnt/s3/github/vm-manager123/github.json --workspace ws_Sh4V5DwQDYJDBRgDKhm79X
+node scripts/get-codesandbox-credits.js --google-credentials /mnt/s3/google/etecnologysys/google.json
+node scripts/get-codesandbox-credits.js --google-credentials /mnt/s3/google/simca.scz/google.json --save-state /mnt/s3/codesandbox-web/simca.scz.json --json
+```
+
+### CodeSandbox direct mode (reuse saved session — fastest, no GitHub/Google re-OAuth)
+
+```bash
+node scripts/get-codesandbox-credits.js --codesandbox-credentials /mnt/s3/codesandbox-web/simcascz-svg.json --json
+CODESANDBOX_AUTH_FILE=/mnt/s3/codesandbox-web/simca.scz.json node scripts/get-codesandbox-credits.js --json
+```
+
+### Saving a session for reuse (mirrors `github-auth.js --output`)
+
+```bash
+node scripts/get-codesandbox-credits.js --google-credentials /mnt/s3/google/simca.scz/google.json --save-state /mnt/s3/codesandbox-web/simca.scz.json --json
+node scripts/codesandbox-auth.js --google-credentials /mnt/s3/google/simca.scz/google.json --output /mnt/s3/codesandbox-web/simca.scz.json
+```
+
+Saved files are Playwright `storageState` JSON (`{cookies, origins}`) stored in `credentials/codesandbox-web/` (mounted as `/mnt/s3/codesandbox-web` inside the container via `docker-compose.yml` `./credentials:/mnt/s3`). `--save-state` only writes on `ok:true`; on `ok:false` the script auto-retries once and warns instead of overwriting — if no file existed it saves a small failure state for debugging (delete before retry).
+
+### Batch generation for all GitHub credentials
+
+```bash
+mkdir -p /mnt/s3/codesandbox-web
+for d in /mnt/s3/github/*; do [ -d "$d" ] || continue; name=$(basename "$d"); [ -f "/mnt/s3/codesandbox-web/$name.json" ] && echo "SKIP $name" && continue; timeout 240 node scripts/codesandbox-auth.js --credentials "$d/github.json" --output "/mnt/s3/codesandbox-web/$name.json" || echo "FAILED $name"; done
+ls -lh /mnt/s3/codesandbox-web
+```
+
+### Headless VPS / Cloudflare
+
+On a server with no `$DISPLAY`, the script auto re-executes under `xvfb-run` (headed Chromium) to pass Cloudflare's `Just a moment` challenge. Requires `playwright-core` + Chromium (`npx playwright install chromium`) once per host — or run inside the `mcr.microsoft.com/playwright` image which already ships both. On a local host `xvfb-run` is required for headed mode (`apt-get install xvfb`).
+
+### All options
+
+| Flag | Description |
+|---|---|
+| `--credentials <path>` | Playwright `storageState` for GitHub (`$GITHUB_AUTH_FILE` also honored) |
+| `--google-credentials <path>` | Playwright `storageState` for Google (`$GOOGLE_AUTH_FILE` also honored) |
+| `--codesandbox-credentials <path>` | Playwright `storageState` for CodeSandbox directly (`$CODESANDBOX_AUTH_FILE` also honored) — created via `--save-state` / `codesandbox-auth.js --output` |
+| `--save-state <path>` | Aliases `--save-codesandbox-state`, `--save-auth` — save CodeSandbox `storageState` for reuse |
+| `--workspace <id>` | CodeSandbox workspace/team id (`ws_…`) |
+| `--no-json` | Human-readable output (default is JSON) |
+| `--headless` | Force headless, skip auto `xvfb-run` |
+| `DEBUG=1` | Save `debug-codesandbox-credits.html` + screenshot on failure |
+
+Browser credentials are required — without them the script exits with an error. Output example:
+
+```json
+{ "ok": true, "team": "ws_Sh4V5DwQDYJDBRgDKhm79X", "url": "https://codesandbox.io/t/usage?workspace=ws_Sh4V5DwQDYJDBRgDKhm79X", "billingPeriod": "8 August – 8 September 2026", "includedCredits": 400, "usedCredits": 403, "remainingCredits": 0, "freeCreditsUsed": 403, "sandboxes": { "used": 0, "limit": 5 } }
+```
+
+---
+
+## codesandbox-auth.js
+
+Thin wrapper around `get-codesandbox-credits.js --save-state` with `github-auth.js`-style `--output`. Priority: `--codesandbox-credentials` > `--google-credentials` > `--credentials`. Honors `$CODESANDBOX_AUTH_FILE`/`$GOOGLE_AUTH_FILE`/`$GITHUB_AUTH_FILE`.
+
+```bash
+node scripts/codesandbox-auth.js --google-credentials /mnt/s3/google/simca.scz/google.json --output ./playwright/.auth/codesandbox.json
+node scripts/codesandbox-auth.js --credentials /mnt/s3/github/vm-manager123/github.json --output ./playwright/.auth/codesandbox.json
+node scripts/codesandbox-auth.js --codesandbox-credentials ./playwright/.auth/codesandbox.json --output ./playwright/.auth/codesandbox.json  # refresh
+node scripts/codesandbox-auth.js --help  # full usage + examples (priority, env fallbacks)
+```
+
+Inside Docker:
+```bash
+docker exec play-with-docker-app-1 bash -c "timeout 180 node scripts/codesandbox-auth.js --google-credentials /mnt/s3/google/etecnologysys/google.json --output /tmp/etecnologysys.json && ls -lh /tmp/etecnologysys.json"
+docker cp play-with-docker-app-1:/tmp/etecnologysys.json credentials/codesandbox-web/etecnologysys.json
+```
+
+---
+
+## auth-browser.js
+
+Shared `playwright-core` wrapper used by all browser-based scripts (`get-codesandbox-credits.js`, `codesandbox-auth.js`). Exports `launchBrowserWithStorageState`, `launchGitHubBrowser`, `ensureSignedIn`, `STEALTH_SCRIPT`, `closeBrowser`. Auto-discovers any installed Chromium binary regardless of Playwright revision, so `npx playwright install chromium` is only needed once.
+
+Required by `get-codesandbox-credits.js` for both Cloudflare bypass and OAuth flows — see `scripts/auth-browser.js:1` for the full API.
+
+---
+
 ## Environment
 
-Common variables (see `scripts/.env.example` and the root `.env.example`):
+Common variables (see `scripts/.env.example`):
 
 - `SERVER_TOKEN` — required by `refresh-vps-status.js` / `seed-credentials.js` (`x-server-token` header).
 - `PWD_API_URL` — base URL for `refresh-vps-status.js` / `seed-credentials.js` (default `http://localhost:$PORT` → `http://localhost:3000`; `--url` flag wins).
 - `PORT` — fallback for `PWD_API_URL` when it is not set (`http://localhost:$PORT`).
-- `VPS_STATUS_TTL_MINUTES` — TTL for `refresh-vps-status.js` cache bypass (`--force` ignores it). Server env (root `.env.example`).
 - `CSB_API_KEY` / `CODESANDBOX_API_KEY` — for `test-codesandbox-api.sh`.
 - `GH_BIN` — `gh` binary path for `check-codespaces-create.sh`.
 - `CODESPACES_DEFAULT_REPOSITORY_ID` — repo id probed by `check-codespaces-create.sh` when testing creation throttle.
 - `ENV_FILE` — custom env file for `test-codesandbox-api.sh` (default `<repo>/.env`).
+- `CODESANDBOX_WORKSPACE` / `GITHUB_AUTH_FILE` / `GOOGLE_AUTH_FILE` / `CODESANDBOX_AUTH_FILE` / `CODESANDBOX_SAVE_STATE` — honored by `get-codesandbox-credits.js` / `auth-browser.js`.
+- `VPS_STATUS_TTL_MINUTES` — TTL for `refresh-vps-status.js` cache bypass (`--force` ignores it) — server env (root `.env.example`).
