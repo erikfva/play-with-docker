@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 
 function parseArgs(argv) {
-  const args = { workspace: null, json: true, headless: false, googleCredentials: null, codesandboxCredentials: null, saveState: null, vpsId: null, vpsName: null, apiUrl: null, serverToken: null, noUpdate: false, updateVps: null };
+  const args = { workspace: null, json: true, headless: false, googleCredentials: null, codesandboxCredentials: null, saveState: null, saveOnly: false, vpsId: null, vpsName: null, apiUrl: null, serverToken: null, noUpdate: false, updateVps: null };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--help' || a === '-h') args.help = true;
@@ -45,6 +45,7 @@ function parseArgs(argv) {
     } else if (a.startsWith('--save-state=')) args.saveState = a.slice('--save-state='.length);
     else if (a.startsWith('--save-codesandbox-state=')) args.saveState = a.slice('--save-codesandbox-state='.length);
     else if (a.startsWith('--save-auth=')) args.saveState = a.slice('--save-auth='.length);
+    else if (a === '--save-only') args.saveOnly = true;
     else if (a === '--vps-id' || a === '--vps') {
       const v = argv[++i];
       if (!v || v.startsWith('--')) throw new Error(`${a} requires a value`);
@@ -91,6 +92,7 @@ Options:
   --codesandbox-credentials <p>  Playwright storageState for CodeSandbox directly (avoids GitHub/Google OAuth). Also honors CODESANDBOX_AUTH_FILE env.
   --save-state <path>       After successful browser login, save CodeSandbox storageState to <path> for reuse (like github-auth.js --output).
                             Example: --google-credentials /mnt/s3/google/simca.scz/google.json --save-state /mnt/s3/codesandbox-web/simca.scz.json
+  --save-only               Sign in and save --save-state, then exit: skips credits scraping and vps.status update (fast session generation)
   --workspace <id>          CodeSandbox workspace/team id (e.g. ws_Eha5JM84UeHdXshrooLDTA). If omitted, auto-detected from dashboard.
   --vps-id <id>             VPS id to update (required unless --vps-name given). Also honors CODESANDBOX_VPS_ID env.
   --vps-name <name>         VPS / credential name to update, e.g. vm-manager232 (required unless --vps-id given).
@@ -773,7 +775,7 @@ async function main() {
     || process.env.CODESANDBOX_AUTH_FILE || process.env.GITHUB_AUTH_FILE || process.env.GOOGLE_AUTH_FILE || null;
   const browserBaseForVps = browserFileForVps ? path.basename(browserFileForVps).replace(/\.json$/, '') : null;
   const hasVpsTarget = !!(args.vpsId || args.vpsName || process.env.CODESANDBOX_VPS_ID || process.env.CODESANDBOX_VPS_NAME || browserBaseForVps);
-  if (!args.noUpdate && !hasVpsTarget) {
+  if (!args.noUpdate && !args.saveOnly && !hasVpsTarget) {
     console.error('Error: VPS target required. Provide one of:');
     console.error('  --vps-id <id>       (VPS row id)');
     console.error('  --vps-name <name>   (VPS / credential name, e.g. vm-manager232)');
@@ -920,6 +922,24 @@ async function main() {
   }
 
   try {
+
+    // Fast path: only sign in + save the session, skip credits scraping
+    // and the vps.status update entirely.
+    if (args.saveOnly) {
+      const saveOnlyPath = process.env.CODESANDBOX_SAVE_STATE || args.saveState;
+      if (!saveOnlyPath) throw new Error('--save-only requires --save-state <path>');
+      await page.goto('https://codesandbox.io/dashboard', { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.waitForTimeout(3000);
+      if (/\/signin/i.test(page.url())) {
+        throw new Error('CodeSandbox sign-in failed — landed on /signin, not saving.');
+      }
+      const abs = path.resolve(saveOnlyPath);
+      await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+      await context.storageState({ path: abs });
+      console.log(`CodeSandbox session saved to ${abs}`);
+      if (args.json) console.log(JSON.stringify({ ok: true, saved: abs, fetchedAt: new Date().toISOString() }, null, 2));
+      return;
+    }
 
     let credits = await extractCredits(page);
 

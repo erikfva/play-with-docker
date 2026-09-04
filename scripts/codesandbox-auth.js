@@ -121,11 +121,11 @@ async function main() {
     throw new Error('No credentials supplied. Provide --google-credentials, --credentials, or --codesandbox-credentials (or set GOOGLE_AUTH_FILE/GITHUB_AUTH_FILE/CODESANDBOX_AUTH_FILE).');
   }
 
-  // Re-exec via get-codesandbox-credits.js with --save-state
-  // We need to handle xvfb-run ourselves if no DISPLAY, or let the callee do it.
+  // Re-exec via get-codesandbox-credits.js with --save-state.
+  // --save-only skips the credits scrape: we only need the session file.
   const { spawnSync } = require('child_process');
   const script = path.join(__dirname, 'get-codesandbox-credits.js');
-  const nodeArgs = [script, ...extra, '--save-state', outputPath, '--json'];
+  const nodeArgs = [script, ...extra, '--save-state', outputPath, '--save-only', '--json'];
   if (args.headless === true) nodeArgs.push('--headless');
   if (args.headless === false) nodeArgs.push('--headful');
 
