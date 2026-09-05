@@ -1,0 +1,441 @@
+@baseUrl = http://localhost:3200/api/v1
+@serverToken = {{$dotenv SERVER_TOKEN}}
+
+###
+# ─────────────────────────────────────────────────────────────────────────────
+# LAB-012: VPS Credential Status Persistence — status + statusCheckedAt + refresh
+# Spec: ai/LAB-012_vps-status/spec.md (US-1 … US-5)
+# Pre-condition: server running on localhost:3200 with a fresh or existing DB.
+# Run LAB-010 first if you want an isolated DB; this file creates its own
+# isolated fixtures (vm-lab012-*) so it can also run standalone.
+# Env: SERVER_TOKEN must be set (see 000-variables.http / .env).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Fixture names (unique per lab to avoid collisions with LAB-010/011) ──────
+@vpsLab012CspName = vm-lab012-csp
+@vpsLab012CsbName = vm-lab012-csb
+@vpsLab012GcsName = vm-lab012-gcs
+
+###
+# ── 45. Create fixtures (isolated to this lab) ──────────────────────────────
+
+### 45.0. Baseline list — captures total before creates (for delta checks)
+GET {{baseUrl}}/vps
+X-Server-Token: {{serverToken}}
+
+### 45.1. Create Codespaces VPS — JSON token form
+# @name createVpsLab012Csp
+POST {{baseUrl}}/vps
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "provider": "codespaces",
+    "name": "{{vpsLab012CspName}}",
+    "credentialFileName": "{{vpsLab012CspName}}.json",
+    "credentialContent": "{\"token\":\"ghp_lab012_smoke_placeholder_csp\"}"
+}
+
+###
+@vpsLab012CspId = {{createVpsLab012Csp.response.body.$.id}}
+
+### 45.2. Create CodeSandbox VPS — JSON token form
+# @name createVpsLab012Csb
+POST {{baseUrl}}/vps
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "provider": "codesandbox",
+    "name": "{{vpsLab012CsbName}}",
+    "credentialFileName": "{{vpsLab012CsbName}}.json",
+    "credentialContent": "{\"token\":\"csb_lab012_smoke_placeholder_csb\"}"
+}
+
+###
+@vpsLab012CsbId = {{createVpsLab012Csb.response.body.$.id}}
+
+### 45.3. Create GCS VPS — service-account JSON (synthetic; never hits Google on create)
+# @name createVpsLab012Gcs
+POST {{baseUrl}}/vps
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "provider": "gcs",
+    "name": "{{vpsLab012GcsName}}",
+    "credentialFileName": "{{vpsLab012GcsName}}.json",
+    "credentialContent": "{\"type\":\"service_account\",\"project_id\":\"lab012-smoke\",\"private_key_id\":\"lab012\",\"private_key\":\"-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEA0Z3VS5JJcds3xHn/ygWep4PAtEsHAEOGGXQqFMuoxsT0JJLZ\\n-----END RSA PRIVATE KEY-----\\n\",\"client_email\":\"lab012@lab012-smoke.iam.gserviceaccount.com\",\"client_id\":\"999\",\"auth_uri\":\"https://accounts.google.com/o/oauth2/auth\",\"token_uri\":\"https://oauth2.googleapis.com/token\"}"
+}
+
+###
+@vpsLab012GcsId = {{createVpsLab012Gcs.response.body.$.id}}
+
+###
+# ── 46. Read path — US-1 / US-5: persisted status + statusCheckedAt (no provider call) ──
+
+### 46.0. GET /vps — each element carries status (object|null) + statusCheckedAt (ISO|null) + sessionActive (bool)
+# Expected: 200 { vps: [...], total, limit, offset }
+# For the 3 fixtures just created, status and statusCheckedAt must be null (never refreshed).
+# credentialContent must never appear in the response.
+GET {{baseUrl}}/vps
+X-Server-Token: {{serverToken}}
+
+### 46.1. GET /vps filtered to codespaces — still exposes status fields
+# Expected: 200; only rows with provider=codespaces; each row has status/statusCheckedAt/sessionActive
+GET {{baseUrl}}/vps?provider=codesandbox
+X-Server-Token: {{serverToken}}
+
+### 46.2. GET /vps/:id — single row includes status/statusCheckedAt/sessionActive/createdAt/updatedAt
+# Expected: 200; status=null, statusCheckedAt=null before any refresh
+GET {{baseUrl}}/vps/df0cb683-1396-4006-a74b-56d12292ae52
+X-Server-Token: {{serverToken}}
+
+### 46.3. GET /vps/:id for CodeSandbox fixture — same shape
+GET {{baseUrl}}/vps/{{vpsLab012CsbId}}
+X-Server-Token: {{serverToken}}
+
+### 46.4. GET /vps/:id for GCS fixture
+GET {{baseUrl}}/vps/{{vpsLab012GcsId}}
+X-Server-Token: {{serverToken}}
+
+### 46.5. List still supports LAB-011 pagination/sorting/filtering (regression guard)
+# Expected: 200; limit/offset/sort still work and rows still carry status fields
+GET {{baseUrl}}/vps?provider=codespaces&sessionActive=false&sortBy=name&sortOrder=asc&limit=5&offset=0
+X-Server-Token: {{serverToken}}
+
+### 46.6. sortBy=statusCheckedAt — not supported in this ticket
+# Expected: 400 VPS_INVALID_PARAM (column excluded from sort allowlist intentionally)
+GET {{baseUrl}}/vps?sortBy=statusCheckedAt
+X-Server-Token: {{serverToken}}
+
+### 46.7. sortBy=status — still unsupported (JSONB, no total order)
+# Expected: 400 VPS_INVALID_PARAM
+GET {{baseUrl}}/vps?sortBy=status
+X-Server-Token: {{serverToken}}
+
+###
+# ── 47. Write guard — US-1: status / statusCheckedAt not writable via POST/PUT ─
+
+### 47.0. POST /vps with status/statusCheckedAt in body — silently ignored
+# Expected: 201; response status=null, statusCheckedAt=null (server ignores client-supplied values)
+# @name createVpsLab012IgnoreBody
+POST {{baseUrl}}/vps
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "provider": "codespaces",
+    "name": "vm-lab012-ignore-body",
+    "credentialFileName": "vm-lab012-ignore-body.json",
+    "credentialContent": "{\"token\":\"ghp_lab012_ignore_body_placeholder\"}",
+    "status": {"status": "AVAILABLE", "checkedAt": "2099-01-01T00:00:00.000Z"},
+    "statusCheckedAt": "2099-01-01T00:00:00.000Z"
+}
+
+###
+@vpsLab012IgnoreId = {{createVpsLab012IgnoreBody.response.body.$.id}}
+
+### 47.1. Verify ignored — GET must still show null
+GET {{baseUrl}}/vps/{{vpsLab012IgnoreId}}
+X-Server-Token: {{serverToken}}
+
+### 47.2. PUT /vps/:id with status/statusCheckedAt in body — silently ignored
+# Expected: 200; status/statusCheckedAt unchanged (still null before refresh)
+PUT {{baseUrl}}/vps/{{vpsLab012CspId}}
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "credentialFileName": "{{vpsLab012CspName}}-renamed.json",
+    "status": {"status": "AVAILABLE"},
+    "statusCheckedAt": "2099-01-01T00:00:00.000Z"
+}
+
+### 47.3. Verify PUT rename persisted but status fields untouched
+GET {{baseUrl}}/vps/{{vpsLab012CspId}}
+X-Server-Token: {{serverToken}}
+
+### 47.4. Restore credentialFileName so later tests use the original name
+PUT {{baseUrl}}/vps/{{vpsLab012CspId}}
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "credentialFileName": "{{vpsLab012CspName}}.json"
+}
+
+###
+# ── 48. Single VPS status refresh — US-2 / US-3 ─────────────────────────────
+
+### 48.0. Snapshot before refresh — capture updatedAt to verify it is NOT bumped (US-1)
+# Compare this updatedAt with the one returned by §48.1 and §48.1-B; they must match.
+GET {{baseUrl}}/vps/407712dd-8953-4346-9c3c-a85e4047c537
+X-Server-Token: {{serverToken}}
+
+### 48.1. POST /vps/:id/status/refresh — explicit provider check, persists status + statusCheckedAt
+# Expected: 200 updated VPS object (same shape as GET /:id, now with fresh status + statusCheckedAt + sessionActive)
+# Placeholder token → provider returns INVALID/UNKNOWN mapped entry; still 200 with status.status = UNKNOWN/INVALID
+# and a fresh statusCheckedAt. Raw token/credentialContent must never appear in status/details/logs.
+POST {{baseUrl}}/vps/ef4c598a-ae70-4cfa-93e7-5332ed5863e5/status/refresh
+X-Server-Token: {{serverToken}}
+
+### 48.1-B. GET after single refresh — persisted values must match the POST response (US-5)
+# Expected: 200; status and statusCheckedAt equal to what §48.1 returned; updatedAt == snapshot from §48.0
+GET {{baseUrl}}/vps/{{vpsLab012CspId}}
+X-Server-Token: {{serverToken}}
+
+### 48.2. Single refresh for CodeSandbox fixture
+POST {{baseUrl}}/vps/{{vpsLab012CsbId}}/status/refresh
+X-Server-Token: {{serverToken}}
+
+### 48.3. Single refresh for GCS fixture (exercises GCS mapGoogleError path)
+POST {{baseUrl}}/vps/{{vpsLab012GcsId}}/status/refresh
+X-Server-Token: {{serverToken}}
+
+### 48.4. Immediate re-refresh without force — within VPS_STATUS_TTL_MINUTES should serve cached/DB value
+# Expected: 200; statusCheckedAt is the same second (or very close) as §48.1; no extra provider call
+POST {{baseUrl}}/vps/{{vpsLab012CspId}}/status/refresh
+X-Server-Token: {{serverToken}}
+
+### 48.5. Same with explicit ?force=false — cache still applies
+POST {{baseUrl}}/vps/{{vpsLab012CspId}}/status/refresh?force=false
+X-Server-Token: {{serverToken}}
+
+### 48.6. Force bypass — ?force=true must re-hit provider (new timestamp even within TTL)
+POST {{baseUrl}}/vps/{{vpsLab012CspId}}/status/refresh?force=true
+X-Server-Token: {{serverToken}}
+
+### 48.7. force is case-insensitive — Force=TRUE accepted
+POST {{baseUrl}}/vps/{{vpsLab012CspId}}/status/refresh?force=TRUE
+X-Server-Token: {{serverToken}}
+
+### 48.8. Invalid force value → 400 VPS_INVALID_PARAM
+POST {{baseUrl}}/vps/{{vpsLab012CspId}}/status/refresh?force=banana
+X-Server-Token: {{serverToken}}
+
+### 48.9. Invalid force value "1" (truthy but not allowed) → 400 VPS_INVALID_PARAM
+POST {{baseUrl}}/vps/{{vpsLab012CspId}}/status/refresh?force=1
+X-Server-Token: {{serverToken}}
+
+### 48.10. Body is ignored — status/statusCheckedAt in body must not affect result
+POST {{baseUrl}}/vps/{{vpsLab012CspId}}/status/refresh
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "status": {"status": "AVAILABLE"},
+    "statusCheckedAt": "2099-01-01T00:00:00.000Z"
+}
+
+### 48.11. Unknown VPS id → 404 VPS_NOT_FOUND
+POST {{baseUrl}}/vps/00000000-0000-0000-0000-000000000000/status/refresh
+X-Server-Token: {{serverToken}}
+
+###
+# ── 49. Bulk VPS status refresh — US-4 ────────────────────────────────────
+
+### 49.0. POST /vps/status/refresh — refresh all VPS in one call
+# Expected: 200 { summary: { total, succeeded, failed }, results: [{ id, provider, status, statusCheckedAt, error }] }
+# total == number of vps rows; succeeded counts status != UNKNOWN; failed counts UNKNOWN; every item has fresh statusCheckedAt
+# results order is ORDER BY createdat DESC, id ASC (matches default GET /vps order)
+POST {{baseUrl}}/vps/status/refresh
+X-Server-Token: {{serverToken}}
+
+### 49.1. Bulk filtered to codespaces only
+# Expected: 200; every results[].provider === "codespaces"; total == count of codespaces VPS
+POST {{baseUrl}}/vps/status/refresh?provider=codespaces
+X-Server-Token: {{serverToken}}
+
+### 49.2. Bulk filtered to gcs only
+POST {{baseUrl}}/vps/status/refresh?provider=gcs
+X-Server-Token: {{serverToken}}
+
+### 49.3. Bulk filtered to codesandbox only
+POST {{baseUrl}}/vps/status/refresh?provider=codesandbox
+X-Server-Token: {{serverToken}}
+
+### 49.4. Bulk with ?force=true — bypasses cache for every item in the batch
+POST {{baseUrl}}/vps/status/refresh?force=true
+X-Server-Token: {{serverToken}}
+
+### 49.5. Bulk with provider + force composed
+POST {{baseUrl}}/vps/status/refresh?provider=codespaces&force=true
+X-Server-Token: {{serverToken}}
+
+### 49.6. Bulk with force=FALSE (case-insensitive) — still valid
+POST {{baseUrl}}/vps/status/refresh?force=FALSE
+X-Server-Token: {{serverToken}}
+
+### 49.7. Invalid provider → 400 VPS_INVALID_PARAM
+POST {{baseUrl}}/vps/status/refresh?provider=aws
+X-Server-Token: {{serverToken}}
+
+### 49.8. Invalid provider empty string → 400
+POST {{baseUrl}}/vps/status/refresh?provider=
+X-Server-Token: {{serverToken}}
+
+### 49.9. Invalid force on bulk → 400 VPS_INVALID_PARAM
+POST {{baseUrl}}/vps/status/refresh?force=banana
+X-Server-Token: {{serverToken}}
+
+### 49.10. Invalid provider + valid force — provider validation still fails first
+POST {{baseUrl}}/vps/status/refresh?provider=unknown&force=true
+X-Server-Token: {{serverToken}}
+
+###
+# ── 50. Read still cheap after bulk — US-5: GET serves persisted values only ─
+
+### 50.0. GET /vps after bulk refresh — all rows now have non-null status/statusCheckedAt
+# Expected: 200; the 3 fixtures + ignore-body fixture all have status != null and statusCheckedAt != null
+GET {{baseUrl}}/vps
+X-Server-Token: {{serverToken}}
+
+### 50.1. GET /vps/:id for each fixture — persisted values survive across reads
+GET {{baseUrl}}/vps/{{vpsLab012CsbId}}
+X-Server-Token: {{serverToken}}
+
+###
+GET {{baseUrl}}/vps/{{vpsLab012GcsId}}
+X-Server-Token: {{serverToken}}
+
+###
+# ── 51. Route ordering regression — bulk path must not be captured as :id ─────
+
+### 51.0. POST /vps/status/refresh must route to bulk handler, not single (id="status")
+# Expected: 200 bulk summary, NOT 404 VPS_NOT_FOUND (which is what single-handler would return for id "status")
+POST {{baseUrl}}/vps/status/refresh?provider=codespaces
+X-Server-Token: {{serverToken}}
+
+###
+# ── 53. CodeSandbox billing merge — PATCH /vps/:id/status/billing ───────────
+
+### 53.0. Merge billing into CodeSandbox VPS — basic happy path
+# Expected: 200; status.quotas has "Credits (billing cycle)" entry with usage/limit/remaining; statusCheckedAt updated
+# @name patchVpsLab012CsbBilling
+PATCH {{baseUrl}}/vps/{{vpsLab012CsbId}}/status/billing
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "billing": {
+        "includedCredits": 400,
+        "usedCredits": 125,
+        "remainingCredits": 275,
+        "billingPeriod": "8 August – 8 September 2026",
+        "url": "https://codesandbox.io/t/usage?workspace=ws_test123",
+        "fetchedAt": "2026-09-04T12:00:00.000Z"
+    }
+}
+
+###
+@vpsLab012CsbStatusAfterBilling = {{patchVpsLab012CsbBilling.response.body.$.status}}
+
+### 53.1. Verify merged quota exists and has correct values
+# Expected: 200; quotas[].name == "Credits (billing cycle)" with usage=125, limit=400, remaining=275
+GET {{baseUrl}}/vps/{{vpsLab012CsbId}}
+X-Server-Token: {{serverToken}}
+
+### 53.2. Merge again with exhausted credits — should escalate status to QUOTA_EXHAUSTED
+# Expected: 200; status == "QUOTA_EXHAUSTED" (from AVAILABLE); remaining=0
+PATCH {{baseUrl}}/vps/{{vpsLab012CsbId}}/status/billing
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "billing": {
+        "includedCredits": 400,
+        "usedCredits": 400,
+        "remainingCredits": 0,
+        "billingPeriod": "8 August – 8 September 2026",
+        "url": "https://codesandbox.io/t/usage?workspace=ws_test123",
+        "fetchedAt": "2026-09-04T13:00:00.000Z"
+    }
+}
+
+### 53.3. Merge again with credits available — should demote back to AVAILABLE
+# Expected: 200; status == "AVAILABLE"; remaining=150
+PATCH {{baseUrl}}/vps/{{vpsLab012CsbId}}/status/billing
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "billing": {
+        "includedCredits": 400,
+        "usedCredits": 250,
+        "remainingCredits": 150,
+        "billingPeriod": "8 August – 8 September 2026",
+        "url": "https://codesandbox.io/t/usage?workspace=ws_test123",
+        "fetchedAt": "2026-09-04T14:00:00.000Z"
+    }
+}
+
+### 53.4. Invalid VPS id → 404 VPS_NOT_FOUND
+PATCH {{baseUrl}}/vps/00000000-0000-0000-0000-000000000000/status/billing
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "billing": { "includedCredits": 400, "usedCredits": 100 }
+}
+
+### 53.5. Non-codesandbox provider (GCS) → 400 VPS_INVALID_PARAM
+PATCH {{baseUrl}}/vps/{{vpsLab012GcsId}}/status/billing
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "billing": { "includedCredits": 400, "usedCredits": 100 }
+}
+
+### 53.6. Missing billing fields → 400 VPS_INVALID_PARAM
+PATCH {{baseUrl}}/vps/{{vpsLab012CsbId}}/status/billing
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "billing": { "randomField": "value" }
+}
+
+### 53.7. Body ignored — extra fields in billing should be preserved in quota extras
+# Expected: 200; quota has extra.sandboxes, extra.vmsActive, extra.freeCreditsUsed
+PATCH {{baseUrl}}/vps/{{vpsLab012CsbId}}/status/billing
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{
+    "billing": {
+        "includedCredits": 400,
+        "usedCredits": 200,
+        "remainingCredits": 200,
+        "billingPeriod": "8 August – 8 September 2026",
+        "url": "https://codesandbox.io/t/usage?workspace=ws_test123",
+        "sandboxes": { "used": 2, "limit": 10 },
+        "vmsActive": 1,
+        "freeCreditsUsed": 200,
+        "fetchedAt": "2026-09-04T15:00:00.000Z"
+    }
+}
+
+###
+# ── 52. Cleanup — remove fixtures created by this lab ──────────────────────
+
+### 52.0. Delete ignore-body fixture
+DELETE {{baseUrl}}/vps/{{vpsLab012IgnoreId}}
+X-Server-Token: {{serverToken}}
+
+### 52.1. Delete CodeSandbox fixture
+DELETE {{baseUrl}}/vps/{{vpsLab012CsbId}}
+X-Server-Token: {{serverToken}}
+
+### 52.2. Delete GCS fixture
+DELETE {{baseUrl}}/vps/{{vpsLab012GcsId}}
+X-Server-Token: {{serverToken}}
+
+### 52.3. Delete Codespaces fixture
+DELETE {{baseUrl}}/vps/{{vpsLab012CspId}}
+X-Server-Token: {{serverToken}}
+
+### 52.4. Final list — should be back to pre-lab total (± concurrent runs)
+GET {{baseUrl}}/vps
+X-Server-Token: {{serverToken}}

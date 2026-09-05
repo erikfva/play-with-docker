@@ -11,6 +11,7 @@ const {
   validateAndFingerprintContent
 } = require('../services/vps-credential-utils');
 const { ProviderError } = require('../services/errors/provider-errors');
+const { refreshVpsStatus, refreshAllVpsStatuses, mergeCodesandboxBilling } = require('../services/vps-status-service');
 
 const router = express.Router();
 
@@ -51,6 +52,7 @@ const VPS_SAFE_COLUMNS = `
   v.credentialfilename    AS "credentialFileName",
   v.credentialfingerprint AS "credentialFingerprint",
   v.status,
+  v.statuscheckedat       AS "statusCheckedAt",
   v.createdat             AS "createdAt",
   v.updatedat             AS "updatedAt",
   ${SESSION_ACTIVE_SUBQUERY} AS "sessionActive"
@@ -254,6 +256,83 @@ router.get('/', async (req, res) => {
     return res.json({ vps: rows, total, limit: limitVal, offset: offsetVal });
   } catch (error) {
     return mapErrorToHttp(res, error, 'Failed to list VPS records');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/vps/status/refresh — bulk refresh (must be before /:id routes)
+// ---------------------------------------------------------------------------
+router.post('/status/refresh', async (req, res) => {
+  try {
+    const { provider, force } = req.query;
+
+    let forceVal = false;
+    if (force !== undefined) {
+      const lower = String(force).toLowerCase();
+      if (lower === 'true') forceVal = true;
+      else if (lower === 'false') forceVal = false;
+      else throw new ProviderError(`Invalid force: "${force}". Must be "true" or "false"`, { code: 'VPS_INVALID_PARAM', statusCode: 400 });
+    }
+
+    let providerFilter = null;
+    if (provider !== undefined) {
+      try {
+        validateProvider(provider);
+      } catch {
+        throw new ProviderError(`Invalid provider: "${provider}". Must be one of: gcs, codesandbox, codespaces`, { code: 'VPS_INVALID_PARAM', statusCode: 400 });
+      }
+      providerFilter = provider;
+    }
+
+    const result = await refreshAllVpsStatuses({ provider: providerFilter, force: forceVal });
+    return res.json(result);
+  } catch (error) {
+    return mapErrorToHttp(res, error, 'Failed to refresh VPS statuses');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/vps/:id/status/refresh — single VPS refresh
+// ---------------------------------------------------------------------------
+router.post('/:id/status/refresh', async (req, res) => {
+  try {
+    const { force } = req.query;
+    let forceVal = false;
+    if (force !== undefined) {
+      const lower = String(force).toLowerCase();
+      if (lower === 'true') forceVal = true;
+      else if (lower === 'false') forceVal = false;
+      else throw new ProviderError(`Invalid force: "${force}". Must be "true" or "false"`, { code: 'VPS_INVALID_PARAM', statusCode: 400 });
+    }
+
+    const updated = await refreshVpsStatus(req.params.id, { force: forceVal });
+    if (!updated) {
+      return res.status(404).json({ error: 'VPS not found', code: 'VPS_NOT_FOUND' });
+    }
+    return res.json(updated);
+  } catch (error) {
+    return mapErrorToHttp(res, error, 'Failed to refresh VPS status');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PATCH /api/v1/vps/:id/status/billing — merge CodeSandbox dashboard billing
+// into the persisted VPS status (called by scripts/get-codesandbox-credits.js).
+// ---------------------------------------------------------------------------
+router.patch('/:id/status/billing', async (req, res) => {
+  try {
+    const { billing } = req.body || {};
+    if (!billing || typeof billing !== 'object') {
+      return res.status(400).json({ error: 'billing object is required', code: 'VPS_INVALID_PARAM' });
+    }
+    const hasAny = billing.includedCredits != null || billing.usedCredits != null || billing.remainingCredits != null;
+    if (!hasAny) {
+      return res.status(400).json({ error: 'billing must include at least one of includedCredits, usedCredits, remainingCredits', code: 'VPS_INVALID_PARAM' });
+    }
+    const updated = await mergeCodesandboxBilling(req.params.id, billing);
+    return res.json(updated);
+  } catch (error) {
+    return mapErrorToHttp(res, error, 'Failed to merge billing into VPS status');
   }
 });
 

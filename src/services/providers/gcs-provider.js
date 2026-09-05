@@ -38,6 +38,40 @@ function parseMetadata(metadata) {
 
 const KEEP_ALIVE_INTERVAL_MINUTES = 10
 
+function limitation(field, reason) { return { field, reason }; }
+function quotaEntry({ name = null, quotaUnit, quotaPeriod, usage = null, limit = null, remaining = null, extra = {} }) {
+  return { ...(name ? { name } : {}), quotaUnit, quotaPeriod, usage, limit, remaining, ...extra };
+}
+function redactTokensFromMessage(msg) {
+  return String(msg || '').replace(/\b[A-Za-z0-9_\-]{20,}\b/g, '[REDACTED]');
+}
+
+function mapGoogleError(error) {
+  const msg = (error.message || '').toLowerCase();
+  const status = error.response?.status;
+  const errData = error.response?.data;
+  const errCode = (errData?.error?.status || errData?.error || '').toString().toLowerCase();
+  if (msg.includes('invalid_grant') || msg.includes('invalid jwt') || msg.includes('token has been expired or revoked')) {
+    return { status: 'EXPIRED', validated: false, expiresAt: null, quotas: [], limitations: [{ field: 'status', reason: 'Google auth token or service-account key is expired or revoked and cannot be refreshed automatically.' }], details: {} };
+  }
+  if (status === 401 || msg.includes('invalid_credentials') || errCode.includes('unauthenticated')) {
+    return { status: 'INVALID', validated: false, expiresAt: null, quotas: [], limitations: [{ field: 'status', reason: 'Google API returned 401: credential is malformed, revoked, or uses wrong key material.' }], details: {} };
+  }
+  if (msg.includes('unexpected token') || (msg.includes('json') && msg.includes('parse'))) {
+    return { status: 'INVALID', validated: false, expiresAt: null, quotas: [], limitations: [{ field: 'status', reason: 'Credential file could not be parsed as valid JSON.' }], details: {} };
+  }
+  if (status === 403 || errCode.includes('permission_denied')) {
+    return { status: 'UNAVAILABLE', validated: false, expiresAt: null, quotas: [], limitations: [{ field: 'status', reason: 'Google API returned 403: Cloud Shell API may be disabled for this project, or the service account lacks the cloudshell.environments.get permission.' }], details: {} };
+  }
+  if (status === 404 || errCode.includes('not_found')) {
+    return { status: 'AVAILABLE', validated: true, expiresAt: null, quotas: [], limitations: [], details: { providerState: 'no-environment-yet', note: 'No Cloud Shell environment exists for this account yet. One will be created automatically on first use.' } };
+  }
+  if (!status || status >= 500) {
+    return { status: 'UNKNOWN', validated: false, expiresAt: null, quotas: [], limitations: [{ field: 'status', reason: `Transient Google API error (${status || 'network'}): ${redactTokensFromMessage(error.message || 'unknown error')}` }], details: {} };
+  }
+  return { status: 'UNKNOWN', validated: false, expiresAt: null, quotas: [], limitations: [{ field: 'status', reason: `Unexpected Google API response (${status}): ${redactTokensFromMessage(error.message || 'unknown error')}` }], details: {} };
+}
+
 class MissingGoogleCredentialRefError extends Error {
   constructor() {
     super('Google credential reference is missing for this session');
@@ -202,6 +236,21 @@ class GcsProvider extends BaseProvider {
         updates: {}
       };
     }
+  }
+
+  async getCredentialStatus(loaded) {
+    const limitations = [];
+    const quotas = [quotaEntry({ name: 'Cloud Shell weekly hours', quotaUnit: 'hours', quotaPeriod: 'week', usage: null, limit: 50, remaining: null })];
+    limitations.push(limitation('quotas[0].usage', 'Cloud Shell documents the 50-hour weekly quota in the UI only. The Cloud Shell REST API (users.environments resource) contains no used-hours or remaining-hours field; this value cannot be determined programmatically.'));
+    let accessResult;
+    try {
+      const credPath = loaded.keyFilePath || loaded.credentialsPath;
+      accessResult = await gcsService.getEnvironmentAccess({ credentialsPath: credPath });
+    } catch (error) {
+      const mapped = mapGoogleError(error);
+      return { ...mapped, quotas, limitations: [...limitations, ...(mapped.limitations || [])], details: mapped.details || {} };
+    }
+    return { status: 'AVAILABLE', validated: true, quotas, limitations, expiresAt: null, details: { referenceLimits: { weeklyHoursDefault: 50, storageLimitGb: 5, sessionCapHours: 12, nonInteractiveCapMins: 40 }, providerState: accessResult.state } };
   }
 
   async createSession(options = {}) {

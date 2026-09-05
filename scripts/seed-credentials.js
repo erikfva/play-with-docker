@@ -29,6 +29,16 @@
 const fs = require('fs');
 const path = require('path');
 
+if (process.env.NODE_ENV !== 'production') {
+  try {
+    require('dotenv').config({ override: true });
+    const scriptsEnv = path.join(__dirname, '.env');
+    if (fs.existsSync(scriptsEnv)) {
+      require('dotenv').config({ path: scriptsEnv, override: true });
+    }
+  } catch (_) {}
+}
+
 // ---------------------------------------------------------------------------
 // Parse CLI args
 // ---------------------------------------------------------------------------
@@ -41,7 +51,7 @@ function getArg(flag, defaultValue) {
 }
 
 const baseDir = path.resolve(getArg('--base-dir', './credentials'));
-const baseUrl = (getArg('--url', 'http://localhost:3000')).replace(/\/$/, '');
+const baseUrl = (getArg('--url', process.env.PWD_API_URL || process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 3000}`)).replace(/\/$/, '');
 const serverToken = getArg('--token', process.env.SERVER_TOKEN || '');
 
 if (!serverToken) {

@@ -98,6 +98,27 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function redactTokensFromMessage(msg) { return String(msg || '').replace(/\b[A-Za-z0-9_\-]{20,}\b/g, '[REDACTED]'); }
+function safeReason(error) { const msg = error?.message || 'unknown error'; return redactTokensFromMessage(msg); }
+function safeErrorCode(error) { return error?.code || (error?.statusCode ? `HTTP_${error.statusCode}` : null) || (error?.status ? `HTTP_${error.status}` : null) || 'UNKNOWN_ERROR'; }
+function isTerminalAuthError(error) { return ( error?.code === 'CODESPACES_TOKEN_INVALID' || error?.code === 'CODESPACES_TOKEN_INSUFFICIENT_SCOPE' || error?.code === 'CODESPACES_ACCOUNT_SUSPENDED' ); }
+function numOrNull(n) { return typeof n === 'number' && Number.isFinite(n) ? n : null; }
+function round1(n) { return Math.round(n * 10) / 10; }
+function limitation(field, reason) { return { field, reason }; }
+function quotaEntry({ name = null, quotaUnit, quotaPeriod, usage = null, limit = null, remaining = null, extra = {} }) { return { ...(name ? { name } : {}), quotaUnit, quotaPeriod, usage, limit, remaining, ...extra }; }
+function extractCodespacesUsage(body) {
+  const items = Array.isArray(body?.usageItems) ? body.usageItems : Array.isArray(body) ? body : [];
+  const rows = items.filter((i) => String(i?.product || '').toLowerCase() === 'codespaces');
+  let computeHours = null; let storageGbMonths = null;
+  for (const row of rows) {
+    const qty = numOrNull(row.grossQuantity ?? row.usageQuantity ?? row.quantity);
+    const unit = String(row.unitType || row.unit || '').toLowerCase();
+    if (qty == null) continue;
+    if (unit.includes('hour') || unit.includes('core')) { computeHours = round1((computeHours ?? 0) + qty); } else if (unit.includes('gb') || unit.includes('storage')) { storageGbMonths = round1((storageGbMonths ?? 0) + qty); }
+  }
+  return { computeHours, storageGbMonths };
+}
+
 class CodespacesProvider extends BaseProvider {
   constructor() {
     super('codespaces');
@@ -140,6 +161,32 @@ class CodespacesProvider extends BaseProvider {
       strategy: 'gh-cli-command',
       runOnStart: false
     };
+  }
+
+  async getCredentialStatus(loaded) {
+    const limitations = [];
+    const quotas = [];
+    let login, plan;
+    try { const user = await githubClient.validateToken(loaded.token); login = user.login; plan = user.plan?.name ?? null; } catch (error) { if (isTerminalAuthError(error)) { return { status: 'INVALID', validated: false, quotas: [], expiresAt: null, limitations: [limitation('status', safeReason(error))] }; } throw error; }
+    let refLimits;
+    if (plan === 'pro') { refLimits = { computeCoreHoursPerMonth: 180, storageGbMonth: 20 }; } else { refLimits = { computeCoreHoursPerMonth: 120, storageGbMonth: 15 }; if (plan !== 'free') { limitations.push(limitation('details.referenceLimits', `Account plan is '${plan ?? 'unknown'}'. Reference limits shown are for GitHub Free personal accounts. Organization/enterprise accounts have no included Codespaces quota by default.`)); } }
+    const spaces = await githubClient.listCodespaces(loaded.token);
+    const adoptable = Array.isArray(spaces) ? spaces.length : 0;
+    let usage = null;
+    try { const body = await githubClient.getBillingUsageSummary(loaded.token, login); usage = extractCodespacesUsage(body); } catch (error) { limitations.push(limitation('quotas[0].usage', `Billing usage summary unavailable (${safeErrorCode(error)}). Requires "Plan" user read permission on the token and a personal account context.`)); }
+    const computeUsage = usage?.computeHours ?? null;
+    const computeLimit = refLimits.computeCoreHoursPerMonth;
+    const computeRemain = computeUsage != null ? Math.max(0, computeLimit - computeUsage) : null;
+    quotas.push(quotaEntry({ name: 'Codespaces compute (core-hours)', quotaUnit: 'core-hours', quotaPeriod: 'month', usage: numOrNull(computeUsage), limit: computeLimit, remaining: numOrNull(computeRemain) }));
+    limitations.push(limitation('quotas[0]', 'Included compute is metered in core-hours, not clock hours: consumption accrues at the codespace machine\'s core-count multiplier (a 4-core machine depletes the allowance twice as fast as a 2-core machine). Remaining core-hours overstate possible clock runtime unless divided by core count.'));
+    const storageUsage = usage?.storageGbMonths ?? null;
+    const storageLimit = refLimits.storageGbMonth;
+    const storageRemain = storageUsage != null ? Math.max(0, storageLimit - storageUsage) : null;
+    quotas.push(quotaEntry({ name: 'Codespaces storage (GB-month)', quotaUnit: 'GB-month', quotaPeriod: 'month', usage: numOrNull(storageUsage), limit: storageLimit, remaining: numOrNull(storageRemain) }));
+    if (adoptable === 0) {
+      return { status: 'UNAVAILABLE', validated: true, quotas, limitations, expiresAt: null, details: { referenceLimits: refLimits, plan, adoptable: 0, reason: "This orchestrator uses adopt-don\'t-create flow. The GitHub account must already have at least one codespace before a session can be created." } };
+    }
+    return { status: 'AVAILABLE', validated: true, quotas, limitations, expiresAt: null, details: { referenceLimits: refLimits, plan, adoptable, adoptedCodespaceState: spaces[0]?.state ?? null } };
   }
 
   /**

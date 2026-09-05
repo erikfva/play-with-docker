@@ -1,0 +1,412 @@
+'use strict';
+
+const db = require('../db/db');
+const { loadCredentialByRef } = require('./db-credentials-loader');
+const { getProvider } = require('./provider-factory');
+const { ProviderError } = require('./errors/provider-errors');
+const { mapWithConcurrency } = require('../utils/async-helpers');
+const { getOrCheckStatus, putCachedStatus, cacheKey } = require('./status-cache');
+
+const STATUS_TTL_MINUTES = parseInt(process.env.VPS_STATUS_TTL_MINUTES, 10) || 5;
+
+function limitation(field, reason) { return { field, reason }; }
+
+/** Matches the "Credits (billing cycle)" quota written by mergeCodesandboxBilling. */
+function isCreditsQuota(q) {
+  if (!q || typeof q !== 'object') return false;
+  if (q.name && String(q.name).toLowerCase().includes('credits')) return true;
+  return q.quotaUnit === 'credits' && q.quotaPeriod === 'billing-cycle';
+}
+
+/** True when the checker produced a placeholder (API exposes no credit balance). */
+function isEmptyCreditsQuota(q) {
+  return q.usage == null && q.limit == null && q.remaining == null;
+}
+
+function asStatusObject(status) {
+  if (!status) return null;
+  if (typeof status === 'object' && !Array.isArray(status)) return status;
+  if (typeof status === 'string') {
+    try { return JSON.parse(status); } catch (_) { return null; }
+  }
+  return null;
+}
+
+/**
+ * Preserve dashboard billing previously merged via mergeCodesandboxBilling.
+ * The CodeSandbox API does not expose credit balance, so getCredentialStatus
+ * returns a null placeholder unless the inline scraper succeeds. Without this,
+ * every refresh would wipe the scraped Credits quota (usage/limit/remaining,
+ * source, billingPeriod, fetchedAt) and revert a QUOTA_EXHAUSTED verdict that
+ * was derived from billing.
+ * - Only replaces the placeholder with the stored entry; fresh scraped data wins.
+ * - Re-applies AVAILABLE/LIMITED → QUOTA_EXHAUSTED escalation when the stored
+ *   billing shows remaining === 0 (never demotes: a fresh QUOTA_EXHAUSTED may
+ *   come from rate limits the billing cannot override).
+ */
+function preserveCodesandboxBilling(entry, priorStatus) {
+  const prior = asStatusObject(priorStatus);
+  if (!prior) return entry;
+  const priorQuotas = Array.isArray(prior.quotas) ? prior.quotas : [];
+  const priorCredits = priorQuotas.find(isCreditsQuota);
+  if (!priorCredits || isEmptyCreditsQuota(priorCredits)) return entry;
+  // Copy: entry.quotas may alias the cached checker result's array — never mutate it in place.
+  entry.quotas = Array.isArray(entry.quotas) ? entry.quotas.slice() : [];
+  const idx = entry.quotas.findIndex(isCreditsQuota);
+  const priorCopy = { ...priorCredits };
+  if (idx === -1) {
+    entry.quotas.push(priorCopy);
+  } else if (isEmptyCreditsQuota(entry.quotas[idx])) {
+    entry.quotas[idx] = priorCopy;
+  } else {
+    return entry;
+  }
+  if (!entry.details || typeof entry.details !== 'object') entry.details = {};
+  const priorDetails = prior.details && typeof prior.details === 'object' ? prior.details : {};
+  if (entry.details.creditSource == null && priorDetails.creditSource != null) {
+    entry.details.creditSource = priorDetails.creditSource;
+  }
+  if (entry.details.creditBillingPeriod == null && priorDetails.creditBillingPeriod != null) {
+    entry.details.creditBillingPeriod = priorDetails.creditBillingPeriod;
+  }
+  if (priorCredits.remaining === 0 && (entry.status === 'AVAILABLE' || entry.status === 'LIMITED')) {
+    entry.status = 'QUOTA_EXHAUSTED';
+  }
+  return entry;
+}
+
+function buildUnknownEntryForVps(provider, name, fingerprint, error) {
+  const fp = fingerprint || null;
+  return {
+    provider,
+    credential: name,
+    credentialFingerprint: fp,
+    status: 'UNKNOWN',
+    checkedAt: new Date().toISOString(),
+    expiresAt: null,
+    quotas: [],
+    details: {
+      validated: false,
+      limitations: [{ field: 'status', reason: 'Credential status could not be determined.' }],
+      errorCode: error?.code || null,
+      errorMessage: 'Credential status could not be determined.'
+    }
+  };
+}
+
+async function countActiveSessionsForVps(provider, fingerprint) {
+  if (provider === 'gcs') return null;
+  if (!fingerprint) return 0;
+  const TERMINAL_SETS = {
+    codesandbox: ['TERMINATED', 'DELETED', 'FAILED'],
+    codespaces: ['TERMINATED', 'FAILED']
+  };
+  const terminalStatuses = TERMINAL_SETS[provider] || ['TERMINATED', 'DELETED', 'FAILED'];
+  const placeholders = terminalStatuses.map(() => '?').join(', ');
+  const sql = `SELECT COUNT(*)::int AS count FROM sessions WHERE provider = ? AND credentialFingerprint = ? AND COALESCE(status, '') NOT IN (${placeholders})`;
+  const row = await db.get(sql, [provider, fingerprint, ...terminalStatuses]);
+  return row?.count ?? 0;
+}
+
+async function buildLoadedCredential(vpsRow) {
+  // Use db-credentials-loader which handles parsing + temp file for gcs
+  return loadCredentialByRef(vpsRow.provider, vpsRow.name);
+}
+
+async function resolveCheckerResult(providerName, loaded) {
+  const provider = getProvider(providerName);
+  return provider.getCredentialStatus(loaded);
+}
+
+async function finalizeWithLocalState(providerName, rawLoaded, checkerResult) {
+  const ENFORCES = new Set(['codesandbox', 'codespaces']);
+  const fp = rawLoaded.credentialFingerprint || null;
+  const PRECEDENCE = ['INVALID', 'EXPIRED', 'QUOTA_EXHAUSTED', 'UNAVAILABLE', 'LIMITED', 'AVAILABLE'];
+  function resolveStatus(cands) { return PRECEDENCE.find(s => cands.includes(s)) || 'UNKNOWN'; }
+
+  const localCount = await countActiveSessionsForVps(providerName, fp);
+  const candidates = [checkerResult.status];
+  if (localCount > 0 && ENFORCES.has(providerName)) candidates.push('LIMITED');
+  const limitations = [...(checkerResult.limitations ?? [])];
+  if (providerName === 'gcs') {
+    limitations.push(limitation('details.localActiveSessions', 'Local active-session count is unavailable for GCS because existing session rows do not persist a canonical credential identity. GCS has no credential uniqueness constraint, so this does not affect availability.'));
+  }
+  const entry = {
+    provider: providerName,
+    credential: rawLoaded.credentialRef || rawLoaded.name || null,
+    credentialFingerprint: fp,
+    status: resolveStatus(candidates),
+    checkedAt: new Date().toISOString(),
+    expiresAt: checkerResult.expiresAt ?? null,
+    quotas: checkerResult.quotas ?? [],
+    details: { ...(checkerResult.details ?? {}), validated: checkerResult.validated ?? false, limitations, localActiveSessions: localCount }
+  };
+  return entry;
+}
+
+async function persistVpsStatus(vpsId, entry, { touchCheckedAt = true } = {}) {
+  const json = JSON.stringify(entry);
+  const touch = touchCheckedAt ? ',\n          statuscheckedat = CURRENT_TIMESTAMP' : '';
+  const row = await db.get(
+    `WITH updated AS (
+      UPDATE vps
+      SET status = ?::jsonb${touch}
+      WHERE id = ?
+      RETURNING id, provider, name, credentialfilename, credentialfingerprint,
+                status, statuscheckedat, createdat, updatedat
+    )
+    SELECT
+      u.id,
+      u.provider,
+      u.name,
+      u.credentialfilename    AS "credentialFileName",
+      u.credentialfingerprint AS "credentialFingerprint",
+      u.status,
+      u.statuscheckedat       AS "statusCheckedAt",
+      u.createdat             AS "createdAt",
+      u.updatedat             AS "updatedAt",
+      EXISTS (
+        SELECT 1 FROM sessions s
+        WHERE s.credentialfingerprint = u.credentialfingerprint
+          AND s.provider = u.provider
+          AND COALESCE(s.status, '') NOT IN ('TERMINATED', 'DELETED', 'FAILED')
+      ) AS "sessionActive"
+    FROM updated u`,
+    [json, vpsId]
+  );
+  if (!row) {
+    throw new ProviderError(`VPS not found during persist: ${vpsId}`, { code: 'VPS_NOT_FOUND', statusCode: 404 });
+  }
+  return row;
+}
+
+function isWithinTtl(statusCheckedAt, ttlMinutes) {
+  if (!statusCheckedAt) return false;
+  const lastCheck = new Date(statusCheckedAt);
+  const now = new Date();
+  const elapsedMinutes = (now - lastCheck) / 60000;
+  return elapsedMinutes < ttlMinutes;
+}
+
+async function refreshVpsStatus(vpsId, { force = false } = {}) {
+  const vpsRow = await db.get('SELECT id, provider, name, credentialfingerprint AS "credentialFingerprint", statuscheckedat AS "statusCheckedAt", status FROM vps WHERE id = ?', [vpsId]);
+  if (!vpsRow) {
+    throw new ProviderError(`VPS not found: ${vpsId}`, { code: 'VPS_NOT_FOUND', statusCode: 404 });
+  }
+  const providerName = vpsRow.provider;
+  const fingerprint = vpsRow['credentialFingerprint'];
+
+  // TTL check: if not forced and last status check is within TTL, return persisted row as-is without calling provider API
+  if (!force && isWithinTtl(vpsRow['statusCheckedAt'], STATUS_TTL_MINUTES)) {
+    const row = await db.get(
+      `SELECT
+        v.id,
+        v.provider,
+        v.name,
+        v.credentialfilename    AS "credentialFileName",
+        v.credentialfingerprint AS "credentialFingerprint",
+        v.status,
+        v.statuscheckedat       AS "statusCheckedAt",
+        v.createdat             AS "createdAt",
+        v.updatedat             AS "updatedAt",
+        EXISTS (
+          SELECT 1 FROM sessions s
+          WHERE s.credentialfingerprint = v.credentialfingerprint
+            AND s.provider = v.provider
+            AND COALESCE(s.status, '') NOT IN ('TERMINATED', 'DELETED', 'FAILED')
+        ) AS "sessionActive"
+      FROM vps v WHERE v.id = ?`,
+      [vpsId]
+    );
+    return row;
+  }
+
+  let loaded;
+  let entry;
+  try {
+    loaded = await buildLoadedCredential(vpsRow);
+  } catch (loadError) {
+    entry = buildUnknownEntryForVps(providerName, vpsRow.name, fingerprint, loadError);
+    if (providerName === 'codesandbox') {
+      preserveCodesandboxBilling(entry, vpsRow.status);
+    }
+    const persisted = await persistVpsStatus(vpsId, entry);
+    return persisted;
+  }
+
+  try {
+    let checkerResult;
+    const key = fingerprint ? cacheKey(providerName, fingerprint) : null;
+    if (key && !force) {
+      checkerResult = await getOrCheckStatus(key, () => resolveCheckerResult(providerName, loaded));
+    } else {
+      // force bypass: skip cache read, but write back so subsequent non-forced calls benefit
+      checkerResult = await resolveCheckerResult(providerName, loaded);
+      if (key && checkerResult?.status !== 'UNKNOWN') {
+        putCachedStatus(key, checkerResult);
+      }
+    }
+    entry = await finalizeWithLocalState(providerName, loaded, checkerResult);
+    if (providerName === 'codesandbox') {
+      preserveCodesandboxBilling(entry, vpsRow.status);
+    }
+  } catch (checkerError) {
+    entry = buildUnknownEntryForVps(providerName, vpsRow.name, fingerprint, checkerError);
+    // ensure checkedAt reflects now (already set in builder)
+    if (providerName === 'codesandbox') {
+      preserveCodesandboxBilling(entry, vpsRow.status);
+    }
+  }
+
+  const persisted = await persistVpsStatus(vpsId, entry);
+  return persisted;
+}
+
+async function refreshAllVpsStatuses({ provider, force = false } = {}) {
+  const rows = await db.all(
+    'SELECT id FROM vps WHERE (?::text IS NULL OR provider = ?::text) ORDER BY createdat DESC, id ASC',
+    [provider || null, provider || null]
+  );
+  const ids = rows.map(r => r.id);
+  const total = ids.length;
+  if (total === 0) {
+    return { summary: { total: 0, succeeded: 0, failed: 0 }, results: [] };
+  }
+
+  const settled = await mapWithConcurrency(ids, 4, async (id) => {
+    const updated = await refreshVpsStatus(id, { force });
+    return updated;
+  });
+
+  const results = [];
+  let succeeded = 0;
+  let failed = 0;
+  for (let i = 0; i < settled.length; i++) {
+    const sid = ids[i];
+    const r = settled[i];
+    if (r.status === 'fulfilled') {
+      const row = r.value;
+      // row.status is JSONB object; extract entry.status string cleanly
+      const statusStr = typeof row.status === 'object' && row.status !== null ? row.status.status : String(row.status || 'UNKNOWN');
+      const isUnknown = statusStr === 'UNKNOWN';
+      if (isUnknown) failed++; else succeeded++;
+      // fetch provider + statusCheckedAt from row
+      results.push({
+        id: row.id,
+        provider: row.provider,
+        status: statusStr,
+        statusCheckedAt: row['statusCheckedAt'] || row.statuscheckedat || null,
+        error: isUnknown ? { code: row.status?.details?.errorCode || 'UNKNOWN_ERROR', message: row.status?.details?.errorMessage || 'Credential status could not be determined.' } : null
+      });
+    } else {
+      failed++;
+      // Try to get provider for this id (best-effort)
+      let prov = provider || null;
+      try {
+        const vpsRow = await db.get('SELECT provider FROM vps WHERE id = ?', [sid]);
+        prov = vpsRow?.provider || prov;
+      } catch (_) {}
+      results.push({
+        id: sid,
+        provider: prov,
+        status: 'UNKNOWN',
+        statusCheckedAt: new Date().toISOString(),
+        error: { code: r.reason?.code || 'UNKNOWN_ERROR', message: 'Credential status could not be determined.' }
+      });
+    }
+  }
+
+  return { summary: { total, succeeded, failed }, results };
+}
+
+function numOrNullBilling(n) { return typeof n === 'number' && Number.isFinite(n) ? n : null; }
+
+/**
+ * Merge CodeSandbox dashboard billing (scraped by get-codesandbox-credits.js)
+ * into the persisted vps.status JSONB.
+ * - Preserves the existing envelope (other quotas, details, status enum).
+ * - Replaces or appends the "Credits (billing cycle)" quota entry.
+ * - Updates checkedAt / statusCheckedAt and details.creditSource/Period.
+ * - Adjusts top-level status AVAILABLE <-> QUOTA_EXHAUSTED without clobbering
+ *   INVALID / EXPIRED / LIMITED (LIMITED is local-state derived).
+ */
+async function mergeCodesandboxBilling(vpsId, billing) {
+  const row = await db.get(
+    'SELECT id, provider, name, credentialfingerprint AS "credentialFingerprint", status FROM vps WHERE id = ?',
+    [vpsId]
+  );
+  if (!row) throw new ProviderError(`VPS not found: ${vpsId}`, { code: 'VPS_NOT_FOUND', statusCode: 404 });
+  if (row.provider !== 'codesandbox') {
+    throw new ProviderError(`VPS ${vpsId} is provider "${row.provider}", not "codesandbox"`, { code: 'VPS_INVALID_PARAM', statusCode: 400 });
+  }
+
+  const fetchedAt = billing.fetchedAt || new Date().toISOString();
+  let entry = row.status;
+  const hasEnvelope = entry && typeof entry === 'object' && !Array.isArray(entry);
+
+  if (!hasEnvelope) {
+    const rem = billing.remainingCredits != null ? billing.remainingCredits
+      : (billing.includedCredits != null && billing.usedCredits != null ? Math.max(0, billing.includedCredits - billing.usedCredits) : null);
+    entry = {
+      provider: 'codesandbox',
+      credential: row.name,
+      credentialFingerprint: row['credentialFingerprint'] || null,
+      status: rem === 0 ? 'QUOTA_EXHAUSTED' : 'AVAILABLE',
+      checkedAt: fetchedAt,
+      expiresAt: null,
+      quotas: [],
+      details: { validated: true, limitations: [], localActiveSessions: 0 }
+    };
+  }
+
+  if (!Array.isArray(entry.quotas)) entry.quotas = [];
+  if (!entry.details || typeof entry.details !== 'object') entry.details = {};
+
+  const creditsQuota = {
+    name: 'Credits (billing cycle)',
+    quotaUnit: 'credits',
+    quotaPeriod: 'billing-cycle',
+    usage: numOrNullBilling(billing.usedCredits),
+    limit: numOrNullBilling(billing.includedCredits),
+    remaining: numOrNullBilling(
+      billing.remainingCredits != null ? billing.remainingCredits
+        : (billing.includedCredits != null && billing.usedCredits != null ? Math.max(0, billing.includedCredits - billing.usedCredits) : null)
+    ),
+    ...(billing.url ? { source: billing.url } : {}),
+    ...(billing.billingPeriod ? { billingPeriod: billing.billingPeriod } : {}),
+    fetchedAt,
+    ...(billing.sandboxes ? { sandboxes: billing.sandboxes } : {}),
+    ...(billing.vmsActive != null ? { vmsActive: billing.vmsActive } : {}),
+    ...(billing.freeCreditsUsed != null ? { freeCreditsUsed: billing.freeCreditsUsed } : {}),
+  };
+
+  const idx = entry.quotas.findIndex(q => {
+    if (!q || typeof q !== 'object') return false;
+    if (q.name && String(q.name).toLowerCase().includes('credits')) return true;
+    return q.quotaUnit === 'credits' && q.quotaPeriod === 'billing-cycle';
+  });
+  if (idx >= 0) entry.quotas[idx] = { ...entry.quotas[idx], ...creditsQuota };
+  else entry.quotas.push(creditsQuota);
+
+  if (creditsQuota.remaining === 0) {
+    if (entry.status === 'AVAILABLE') entry.status = 'QUOTA_EXHAUSTED';
+  } else if (creditsQuota.remaining != null && creditsQuota.remaining > 0) {
+    if (entry.status === 'QUOTA_EXHAUSTED') {
+      const stillExhausted = entry.quotas.some(q => q !== creditsQuota && q.remaining === 0 && q.limit != null);
+      if (!stillExhausted) entry.status = 'AVAILABLE';
+    }
+  }
+
+  entry.checkedAt = fetchedAt;
+  if (billing.billingPeriod) entry.details.creditBillingPeriod = billing.billingPeriod;
+  if (billing.url) entry.details.creditSource = billing.url;
+  entry.credentialFingerprint = row['credentialFingerprint'] || entry.credentialFingerprint || null;
+  entry.provider = 'codesandbox';
+
+  // Billing merge must not bump the statuscheckedat column — that timestamp
+  // tracks provider credential checks (refresh), not dashboard scrapes.
+  // The scrape time is recorded inside the envelope (checkedAt / fetchedAt).
+  return persistVpsStatus(vpsId, entry, { touchCheckedAt: false });
+}
+
+module.exports = { refreshVpsStatus, refreshAllVpsStatuses, mergeCodesandboxBilling, persistVpsStatus, preserveCodesandboxBilling };
