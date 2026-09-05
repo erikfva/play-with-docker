@@ -11,6 +11,70 @@ const STATUS_TTL_MINUTES = parseInt(process.env.VPS_STATUS_TTL_MINUTES, 10) || 5
 
 function limitation(field, reason) { return { field, reason }; }
 
+/** Matches the "Credits (billing cycle)" quota written by mergeCodesandboxBilling. */
+function isCreditsQuota(q) {
+  if (!q || typeof q !== 'object') return false;
+  if (q.name && String(q.name).toLowerCase().includes('credits')) return true;
+  return q.quotaUnit === 'credits' && q.quotaPeriod === 'billing-cycle';
+}
+
+/** True when the checker produced a placeholder (API exposes no credit balance). */
+function isEmptyCreditsQuota(q) {
+  return q.usage == null && q.limit == null && q.remaining == null;
+}
+
+function asStatusObject(status) {
+  if (!status) return null;
+  if (typeof status === 'object' && !Array.isArray(status)) return status;
+  if (typeof status === 'string') {
+    try { return JSON.parse(status); } catch (_) { return null; }
+  }
+  return null;
+}
+
+/**
+ * Preserve dashboard billing previously merged via mergeCodesandboxBilling.
+ * The CodeSandbox API does not expose credit balance, so getCredentialStatus
+ * returns a null placeholder unless the inline scraper succeeds. Without this,
+ * every refresh would wipe the scraped Credits quota (usage/limit/remaining,
+ * source, billingPeriod, fetchedAt) and revert a QUOTA_EXHAUSTED verdict that
+ * was derived from billing.
+ * - Only replaces the placeholder with the stored entry; fresh scraped data wins.
+ * - Re-applies AVAILABLE/LIMITED → QUOTA_EXHAUSTED escalation when the stored
+ *   billing shows remaining === 0 (never demotes: a fresh QUOTA_EXHAUSTED may
+ *   come from rate limits the billing cannot override).
+ */
+function preserveCodesandboxBilling(entry, priorStatus) {
+  const prior = asStatusObject(priorStatus);
+  if (!prior) return entry;
+  const priorQuotas = Array.isArray(prior.quotas) ? prior.quotas : [];
+  const priorCredits = priorQuotas.find(isCreditsQuota);
+  if (!priorCredits || isEmptyCreditsQuota(priorCredits)) return entry;
+  // Copy: entry.quotas may alias the cached checker result's array — never mutate it in place.
+  entry.quotas = Array.isArray(entry.quotas) ? entry.quotas.slice() : [];
+  const idx = entry.quotas.findIndex(isCreditsQuota);
+  const priorCopy = { ...priorCredits };
+  if (idx === -1) {
+    entry.quotas.push(priorCopy);
+  } else if (isEmptyCreditsQuota(entry.quotas[idx])) {
+    entry.quotas[idx] = priorCopy;
+  } else {
+    return entry;
+  }
+  if (!entry.details || typeof entry.details !== 'object') entry.details = {};
+  const priorDetails = prior.details && typeof prior.details === 'object' ? prior.details : {};
+  if (entry.details.creditSource == null && priorDetails.creditSource != null) {
+    entry.details.creditSource = priorDetails.creditSource;
+  }
+  if (entry.details.creditBillingPeriod == null && priorDetails.creditBillingPeriod != null) {
+    entry.details.creditBillingPeriod = priorDetails.creditBillingPeriod;
+  }
+  if (priorCredits.remaining === 0 && (entry.status === 'AVAILABLE' || entry.status === 'LIMITED')) {
+    entry.status = 'QUOTA_EXHAUSTED';
+  }
+  return entry;
+}
+
 function buildUnknownEntryForVps(provider, name, fingerprint, error) {
   const fp = fingerprint || null;
   return {
@@ -125,7 +189,7 @@ function isWithinTtl(statusCheckedAt, ttlMinutes) {
 }
 
 async function refreshVpsStatus(vpsId, { force = false } = {}) {
-  const vpsRow = await db.get('SELECT id, provider, name, credentialfingerprint AS "credentialFingerprint", statuscheckedat AS "statusCheckedAt" FROM vps WHERE id = ?', [vpsId]);
+  const vpsRow = await db.get('SELECT id, provider, name, credentialfingerprint AS "credentialFingerprint", statuscheckedat AS "statusCheckedAt", status FROM vps WHERE id = ?', [vpsId]);
   if (!vpsRow) {
     throw new ProviderError(`VPS not found: ${vpsId}`, { code: 'VPS_NOT_FOUND', statusCode: 404 });
   }
@@ -163,6 +227,9 @@ async function refreshVpsStatus(vpsId, { force = false } = {}) {
     loaded = await buildLoadedCredential(vpsRow);
   } catch (loadError) {
     entry = buildUnknownEntryForVps(providerName, vpsRow.name, fingerprint, loadError);
+    if (providerName === 'codesandbox') {
+      preserveCodesandboxBilling(entry, vpsRow.status);
+    }
     const persisted = await persistVpsStatus(vpsId, entry);
     return persisted;
   }
@@ -180,9 +247,15 @@ async function refreshVpsStatus(vpsId, { force = false } = {}) {
       }
     }
     entry = await finalizeWithLocalState(providerName, loaded, checkerResult);
+    if (providerName === 'codesandbox') {
+      preserveCodesandboxBilling(entry, vpsRow.status);
+    }
   } catch (checkerError) {
     entry = buildUnknownEntryForVps(providerName, vpsRow.name, fingerprint, checkerError);
     // ensure checkedAt reflects now (already set in builder)
+    if (providerName === 'codesandbox') {
+      preserveCodesandboxBilling(entry, vpsRow.status);
+    }
   }
 
   const persisted = await persistVpsStatus(vpsId, entry);
@@ -336,4 +409,4 @@ async function mergeCodesandboxBilling(vpsId, billing) {
   return persistVpsStatus(vpsId, entry, { touchCheckedAt: false });
 }
 
-module.exports = { refreshVpsStatus, refreshAllVpsStatuses, mergeCodesandboxBilling, persistVpsStatus };
+module.exports = { refreshVpsStatus, refreshAllVpsStatuses, mergeCodesandboxBilling, persistVpsStatus, preserveCodesandboxBilling };

@@ -124,7 +124,11 @@ function findSessionFile(name) {
 
 function runChild(sessionFile, vpsId, vpsName) {
   const script = path.join(__dirname, 'get-codesandbox-credits.js');
-  const childArgs = ['--codesandbox-credentials', sessionFile, '--vps-id', vpsId, ...passthrough];
+  // Forward --url/--token explicitly: the child defaults to
+  // http://localhost:3000 when PWD_API_URL is unset, which 404s when the
+  // server actually listens on $PORT (e.g. 3200).
+  const childArgs = ['--codesandbox-credentials', sessionFile, '--vps-id', vpsId,
+    '--api-url', baseUrl, '--server-token', serverToken, ...passthrough];
   return new Promise((resolve) => {
     execFile(process.execPath, [script, ...childArgs], {
       timeout: timeoutMinutes * 60000,
