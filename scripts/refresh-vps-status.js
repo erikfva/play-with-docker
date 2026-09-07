@@ -45,6 +45,8 @@ if (process.env.NODE_ENV !== 'production') {
   } catch (_) {}
 }
 
+const { resolveApiBase, ApiBaseConfigError } = require('./lib/api-base');
+
 const args = process.argv.slice(2);
 
 function hasFlag(flag) {
@@ -73,6 +75,15 @@ Options:
 Precedence for the base URL: --url flag > $PWD_API_URL env var > http://localhost:$PORT > http://localhost:3000
 See .env.example (PWD_API_URL) and scripts/README.md.
 
+PWD_API_URL supports two modes (same as vm-manager ORCHESTRATOR_API_BASE):
+  - single base URL:   https://host.example.com
+  - scheduled backends: url|cron;url|cron   (semicolon-separated, 5-field UTC cron)
+    cron = minute hour day-of-month month day-of-week
+    The backend matching the current UTC time is used. If zero match, the
+    request fails (NO_ACTIVE_BACKEND); if multiple match, it fails rather
+    than route ambiguously (AMBIGUOUS_BACKEND).
+  The base URL is the bare host (no /api/v1); this script appends /api/v1/...
+
 Examples:
   node scripts/refresh-vps-status.js
   node scripts/refresh-vps-status.js --provider codespaces
@@ -80,12 +91,24 @@ Examples:
   node scripts/refresh-vps-status.js --id 9951be32-be3a-465a-ba9a-73edd0691c59 --force
   PWD_API_URL=http://localhost:3200 node scripts/refresh-vps-status.js --json
   SERVER_TOKEN=xxx node scripts/refresh-vps-status.js --url http://localhost:3200 --json
+  PWD_API_URL='https://orch-a.example.com|0 8-15 * * 1-5;https://orch-b.example.com|0 16-23 * * 1-5' node scripts/refresh-vps-status.js --json
 `.trim();
   console.log(help);
   process.exit(0);
 }
 
-const baseUrl = (getArg('--url', process.env.PWD_API_URL || process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 3000}`)).replace(/\/$/, '');
+const rawBase = getArg('--url', process.env.PWD_API_URL || process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 3000}`);
+let baseUrl;
+try {
+  baseUrl = resolveApiBase(rawBase);
+} catch (err) {
+  if (err instanceof ApiBaseConfigError) {
+    console.error(`ERROR: ${err.code ? err.code + ' ' : ''}${err.message}`);
+  } else {
+    console.error(`ERROR: ${err.message}`);
+  }
+  process.exit(1);
+}
 const serverToken = getArg('--token', process.env.SERVER_TOKEN || '');
 const provider = getArg('--provider', null);
 const vpsId = getArg('--id', null);

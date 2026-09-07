@@ -14,7 +14,7 @@ Helper scripts for local development, credential seeding, and provider diagnosti
 | [`auth-browser.js`](#auth-browserjs) | Shared `playwright-core` wrapper (Chromium launcher + stealth + storageState) |
 
 All scripts load env via `dotenv` when `NODE_ENV !== production`: first the repo root `.env`, then `scripts/.env` if present (per-scripts overrides win). CLI flags `--url` / `--token` win over both. Template: `scripts/.env.example` (also documented in the root `.env.example`).
-The base URL precedence for `refresh-vps-status.js` / `seed-credentials.js` is: `--url` flag → `$PWD_API_URL` env var → `http://localhost:$PORT` → `http://localhost:3000`.
+Base URL precedence for `refresh-vps-status.js` / `refresh-codesandbox-credits.js` / `get-codesandbox-credits.js` / `seed-credentials.js` is: `--url` flag → `$PWD_API_URL` env var → `http://localhost:$PORT` → `http://localhost:3000`. `$PWD_API_URL` accepts a single URL or a scheduled `url|cron;url|cron` list — see [Backend selection](#backend-selection-pwd_api_url).
 
 ---
 
@@ -69,6 +69,33 @@ node scripts/refresh-vps-status.js --help
 | `--force` | off | Bypass TTL/status cache (`?force=true`, re-hits provider) |
 | `--json` | off | Print raw JSON and exit (no table) |
 | `--help`, `-h` | — | Show help |
+
+### Backend selection (`PWD_API_URL`)
+
+`PWD_API_URL` (and the `--url` flag) supports two modes — the same semantics as vm-manager's `ORCHESTRATOR_API_BASE`:
+
+- **Single base URL** (passthrough): `https://api.example.com`.
+- **Scheduled backends**: a semicolon-separated list of `url|cron` entries, where the entry whose cron matches the current UTC time is used. Example: `https://orch-a.example.com|0 8-15 * * 1-5;https://orch-b.example.com|0 16-23 * * 1-5`.
+
+Cron is 5-field UTC — `minute hour day-of-month month day-of-week` (0-59 0-23 1-31 1-12 0-6; 0 and 7 are both Sunday). Supports `*`, comma lists, ranges `a-b`, and steps `a-b/n` (also `*/n`).
+
+Selection rules:
+
+- exactly one backend matches → its URL is used.
+- zero match → exits `1` with `ERROR: NO_ACTIVE_BACKEND …`.
+- multiple match → exits `1` with `ERROR: AMBIGUOUS_BACKEND …` (fail rather than route ambiguously).
+
+The resolved URL is the **bare host** (trailing `/` stripped); the script appends `/api/v1/...` itself — so do **not** include `/api/v1` in `PWD_API_URL` (unlike vm-manager's `ORCHESTRATOR_API_BASE`, which includes it).
+
+Resolution happens once per invocation (at startup), not per HTTP request. CLI scripts run in seconds, so this is the pragmatic equivalent of vm-manager's per-request selection (which matters for a long-running server).
+
+```bash
+# single URL
+PWD_API_URL=https://api.example.com node scripts/refresh-vps-status.js --json
+
+# scheduled: orch-a weekdays 08-15 UTC, orch-b weekdays 16-23 UTC
+PWD_API_URL='https://orch-a.example.com|0 8-15 * * 1-5;https://orch-b.example.com|0 16-23 * * 1-5' node scripts/refresh-vps-status.js --json
+```
 
 ### Output
 
@@ -281,7 +308,7 @@ Required by `get-codesandbox-credits.js` for both Cloudflare bypass and OAuth fl
 Common variables (see `scripts/.env.example`):
 
 - `SERVER_TOKEN` — required by `refresh-vps-status.js` / `seed-credentials.js` (`x-server-token` header).
-- `PWD_API_URL` — base URL for `refresh-vps-status.js` / `seed-credentials.js` (default `http://localhost:$PORT` → `http://localhost:3000`; `--url` flag wins).
+- `PWD_API_URL` — base URL for `refresh-vps-status.js` / `refresh-codesandbox-credits.js` / `get-codesandbox-credits.js` / `seed-credentials.js` (default `http://localhost:$PORT` → `http://localhost:3000`; `--url` flag wins). Accepts a single URL or a scheduled `url|cron;url|cron` list (5-field UTC cron) — see [Backend selection](#backend-selection-pwd_api_url).
 - `PORT` — fallback for `PWD_API_URL` when it is not set (`http://localhost:$PORT`).
 - `CSB_API_KEY` / `CODESANDBOX_API_KEY` — for `test-codesandbox-api.sh`.
 - `GH_BIN` — `gh` binary path for `check-codespaces-create.sh`.

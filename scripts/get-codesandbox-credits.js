@@ -5,6 +5,7 @@ try { require('dotenv').config(); } catch {}
 
 const fs = require('fs');
 const path = require('path');
+const { resolveApiBase, ApiBaseConfigError } = require('./lib/api-base');
 
 function parseArgs(argv) {
   const args = { workspace: null, json: true, headless: false, googleCredentials: null, codesandboxCredentials: null, saveState: null, saveOnly: false, vpsId: null, vpsName: null, apiUrl: null, serverToken: null, noUpdate: false, updateVps: null };
@@ -791,7 +792,17 @@ async function main() {
   if (!args.noUpdate) {
     const ttl = scraperTtlMinutes();
     if (ttl > 0) {
-      const baseUrl = (args.apiUrl || process.env.PWD_API_URL || process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, '');
+      let baseUrl;
+      try {
+        baseUrl = resolveApiBase(args.apiUrl || process.env.PWD_API_URL || process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 3000}`);
+      } catch (err) {
+        if (err instanceof ApiBaseConfigError) {
+          console.error(`ERROR: ${err.code ? err.code + ' ' : ''}${err.message}`);
+        } else {
+          console.error(`ERROR: ${err.message}`);
+        }
+        process.exit(1);
+      }
       const token = args.serverToken || process.env.SERVER_TOKEN || '';
       if (!token) {
         console.warn('[vps-status] SERVER_TOKEN not set — cannot check billing freshness, scraping anyway.');
@@ -1088,7 +1099,17 @@ async function main() {
 }
 
 async function updateVpsBilling(output, args) {
-  const baseUrl = (args.apiUrl || process.env.PWD_API_URL || process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 3000}`).replace(/\/$/, '');
+  let baseUrl;
+  try {
+    baseUrl = resolveApiBase(args.apiUrl || process.env.PWD_API_URL || process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 3000}`);
+  } catch (err) {
+    if (err instanceof ApiBaseConfigError) {
+      console.error(`ERROR: ${err.code ? err.code + ' ' : ''}${err.message}`);
+    } else {
+      console.error(`ERROR: ${err.message}`);
+    }
+    process.exit(1);
+  }
   const token = args.serverToken || process.env.SERVER_TOKEN || '';
   if (!token) {
     console.warn('[vps-status] SERVER_TOKEN not set (--server-token / $SERVER_TOKEN) — skipping vps.status update.');

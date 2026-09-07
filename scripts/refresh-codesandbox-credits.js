@@ -47,6 +47,7 @@ if (process.env.NODE_ENV !== 'production') {
 const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
+const { resolveApiBase, ApiBaseConfigError } = require('./lib/api-base');
 
 const args = process.argv.slice(2);
 
@@ -89,7 +90,18 @@ Examples:
   process.exit(0);
 }
 
-const baseUrl = (getArg('--url', process.env.PWD_API_URL || process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 3000}`)).replace(/\/$/, '');
+const rawBase = getArg('--url', process.env.PWD_API_URL || process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 3000}`);
+let baseUrl;
+try {
+  baseUrl = resolveApiBase(rawBase);
+} catch (err) {
+  if (err instanceof ApiBaseConfigError) {
+    console.error(`ERROR: ${err.code ? err.code + ' ' : ''}${err.message}`);
+  } else {
+    console.error(`ERROR: ${err.message}`);
+  }
+  process.exit(1);
+}
 const serverToken = getArg('--token', process.env.SERVER_TOKEN || '');
 const onlyId = getArg('--id', null);
 const nameFilter = getArg('--name', null);
