@@ -4,10 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       provider:
-        description: 'Filter by provider (optional)'
+        description: 'Filter by provider (all by default)'
         type: choice
         required: false
+        default: all
         options:
+          - all
           - gcs
           - codesandbox
           - codespaces
@@ -51,7 +53,7 @@ jobs:
           PWD_API_URL: ${{ inputs.api-url }}
         run: |
           ARGS=(--json)
-          [ -n "$INPUT_PROVIDER" ] && ARGS+=(--provider "$INPUT_PROVIDER")
+          [ -n "$INPUT_PROVIDER" ] && [ "$INPUT_PROVIDER" != "all" ] && ARGS+=(--provider "$INPUT_PROVIDER")
           [ -n "$INPUT_VPS_ID" ] && ARGS+=(--id "$INPUT_VPS_ID")
           [ "$INPUT_FORCE" = "true" ] && ARGS+=(--force)
           node scripts/refresh-vps-status.js "${ARGS[@]}"
