@@ -1,6 +1,9 @@
 name: Refresh VPS Status
 
 on:
+  schedule:
+    # Daily at 12:00 UTC
+    - cron: '0 12 * * *'
   workflow_dispatch:
     inputs:
       provider:
