@@ -1,0 +1,117 @@
+name: Refresh CodeSandbox Credits
+
+# Runs scripts/refresh-codesandbox-credits.js once per codesandbox VPS, pulling
+# the Playwright storageState session files (<vps-name>.json) from the iDrive E2
+# S3-compatible bucket before launching the browser scraper.
+#
+# Required repo secrets:
+#   S3_ACCESS_KEY_ID       iDrive E2 access key
+#   S3_SECRET_ACCESS_KEY   iDrive E2 secret key
+#   S3_ENDPOINT            e.g. https://s3.us-southeast-1.idrivee2.com
+#   S3_REGION               e.g. us-southeast-1
+#   S3_BUCKET               e.g. play-with-docker
+#   SERVER_TOKEN            orchestrator API token (shared with refresh-vps-status.yml)
+#   PWD_API_URL             orchestrator base URL, or scheduled url|cron;... list
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: 'Only VPS whose name contains this substring'
+        type: string
+        required: false
+      vps-id:
+        description: 'Single VPS ID to refresh (optional)'
+        type: string
+        required: false
+      timeout-minutes:
+        description: 'Per-credential timeout in minutes'
+        type: string
+        required: false
+        default: '15'
+      headless:
+        description: 'Run browser headless (may be blocked by Cloudflare; off = headed via xvfb)'
+        type: boolean
+        required: false
+        default: false
+      dry-run:
+        description: 'List planned runs without spawning the browser'
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: refresh-codesandbox-credits
+  cancel-in-progress: true
+
+jobs:
+  refresh-codesandbox-credits:
+    name: Refresh CodeSandbox Credits
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      # Orchestrator API (parent script lists VPS rows + child PATCHes billing).
+      PWD_API_URL: ${{ secrets.PWD_API_URL }}
+      SERVER_TOKEN: ${{ secrets.SERVER_TOKEN }}
+      # Session-file lookup dir populated by the S3 sync step below.
+      CODESANDBOX_WEB_CREDENTIALS_DIR: ${{ github.workspace }}/codesandbox-web
+      # Manual dispatch should always re-scrape, regardless of stored freshness.
+      CODESANDBOX_SCRAPER_TTL: '0'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download codesandbox-web session files from iDrive E2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.S3_REGION }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+        run: |
+          set -euo pipefail
+          mkdir -p ./codesandbox-web
+          # iDrive E2 is S3-compatible and uses path-style addressing
+          # (matches the project's s3fs use_path_request_style option).
+          aws configure set default.s3.addressing_style path
+          aws s3 sync --endpoint-url "$S3_ENDPOINT" --no-progress \
+            "s3://${S3_BUCKET}/codesandbox-web/" ./codesandbox-web/
+          count=$(find ./codesandbox-web -name '*.json' | wc -l | tr -d ' ')
+          echo "Downloaded $count session file(s)."
+          ls -1 ./codesandbox-web || true
+
+      - name: Install browser (xvfb + Playwright Chromium)
+        if: ${{ inputs.dry-run != true }}
+        run: |
+          set -euo pipefail
+          # xvfb-run lets the script auto re-exec headed Chromium on a display-less
+          # runner to pass Cloudflare's challenge (scripts/get-codesandbox-credits.js:823).
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb
+          # playwright-core is required at runtime by scripts/auth-browser.js but is
+          # not declared in package.json; install without touching the lockfile.
+          npm install --no-save playwright-core
+          npx --yes playwright install --with-deps chromium
+
+      - name: Refresh CodeSandbox credits
+        run: |
+          set -euo pipefail
+          ARGS=()
+          [ -n "$INPUT_NAME" ] && ARGS+=(--name "$INPUT_NAME")
+          [ -n "$INPUT_VPS_ID" ] && ARGS+=(--id "$INPUT_VPS_ID")
+          [ -n "$INPUT_TIMEOUT_MINUTES" ] && ARGS+=(--timeout-minutes "$INPUT_TIMEOUT_MINUTES")
+          [ "$INPUT_HEADLESS" = "true" ] && ARGS+=(--headless)
+          [ "$INPUT_DRY_RUN" = "true" ] && ARGS+=(--dry-run)
+          node scripts/refresh-codesandbox-credits.js "${ARGS[@]}"
+        shell: bash
