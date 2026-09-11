@@ -12,10 +12,11 @@ Helper scripts for local development, credential seeding, and provider diagnosti
 | [`refresh-codesandbox-credits.js`](#refresh-codesandbox-creditsjs) | Run the credits scraper once per codesandbox credential (batch) |
 | [`codesandbox-auth.js`](#codesandbox-authjs) | Save a CodeSandbox Playwright storageState for reuse by the scraper |
 | [`auth-browser.js`](#auth-browserjs) | Shared `playwright-core` wrapper (Chromium launcher + stealth + storageState) |
-| [`codespace-vm.js`](#codespace-vmjs) | Dispatcher for Codespace VM lifecycle — delegates `create`/`delete`/`list` to sub-scripts |
+| [`codespace-vm.js`](#codespace-vmjs) | Dispatcher for Codespace VM lifecycle — delegates `create`/`delete`/`list`/`refresh` to sub-scripts |
 | [`create-codespace.js`](#create-codespacejs) | Create a Codespace VM via browser automation (blank template) |
 | [`delete-codespace.js`](#delete-codespacejs) | Delete a Codespace VM (with optional `--force` stop) |
 | [`list-codespaces.js`](#list-codespacesjs) | List Codespace VMs for the authenticated GitHub account |
+| [`refresh-codespace.js`](#refresh-codespacejs) | Provide a fresh Codespace VM — list → delete first → create → stop, in one browser session |
 
 All scripts load env via `dotenv` when `NODE_ENV !== production`: first the repo root `.env`, then `scripts/.env` if present (per-scripts overrides win). CLI flags `--url` / `--token` win over both. Template: `scripts/.env.example` (also documented in the root `.env.example`).
 Base URL precedence for `refresh-vps-status.js` / `refresh-codesandbox-credits.js` / `get-codesandbox-credits.js` / `seed-credentials.js` is: `--url` flag → `$PWD_API_URL` env var → `http://localhost:$PORT` → `http://localhost:3000`. `$PWD_API_URL` accepts a single URL or a scheduled `url|cron;url|cron` list — see [Backend selection](#backend-selection-pwd_api_url).
@@ -301,7 +302,7 @@ docker cp play-with-docker-app-1:/tmp/etecnologysys.json credentials/codesandbox
 
 ## codespace-vm.js
 
-Dispatcher for Codespace VM lifecycle — validates a Playwright `storageState` file and delegates to `create-codespace.js` / `delete-codespace.js` / `list-codespaces.js` via `spawnSync` with `GITHUB_AUTH_FILE`.
+Dispatcher for Codespace VM lifecycle — validates a Playwright `storageState` file and delegates to `create-codespace.js` / `delete-codespace.js` / `list-codespaces.js` / `refresh-codespace.js` via `spawnSync` with `GITHUB_AUTH_FILE`.
 
 ```bash
 # storageState created by ai-brain/github/github-auth.js --output
@@ -310,17 +311,22 @@ node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.j
 node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.json --action create --no-wait
 node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.json --action list
 node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.json --action delete --target my-codespace --force
+node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.json --action refresh
+node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.json --action refresh --keep-existing
+node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.json --action refresh --no-wait-stop
 ```
 
 | Flag | Description |
 |---|---|
 | `--credentials <path>` | **Required.** Playwright `storageState` file (must contain `cookies` + `origins` arrays; validated before dispatch). Also sets `GITHUB_AUTH_FILE` for the child. |
-| `--action <name>` | **Required.** `create` \| `delete` \| `list` (`list` takes no extra flags; `--target` only valid with `delete`) |
-| `--template <name>` | Create only. Template name, default `blank`. Passed through to `create-codespace.js`. |
+| `--action <name>` | **Required.** `create` \| `delete` \| `list` \| `refresh` (`list` takes no extra flags; `--target` only valid with `delete`) |
+| `--template <name>` | Create / refresh. Template name, default `blank`. Passed through to the child script. |
 | `--stop` | Create only. Stop the Codespace after it appears in `/codespaces`. |
 | `--no-wait` | Create only. Do not wait for the Codespace to appear in `/codespaces`. |
 | `--target <name>` | Delete only. **Required.** Codespace name or slug to delete. |
 | `--force` | Delete only. Stop an active Codespace before deleting it. |
+| `--keep-existing` | Refresh only. Skip deletion; only create a new Codespace and stop it. |
+| `--no-wait-stop` | Refresh only. Fire the stop action without waiting for GitHub status confirmation (status reports `"stopping"`). |
 
 Host path `credentials/github/<name>/github.json` appears as `/mnt/s3/github/<name>/github.json` inside the container (`docker-compose.yml` `./credentials:/mnt/s3`).
 
@@ -394,9 +400,61 @@ Output: `{ "ok": true, "codespaces": [...] }` (also logs `GitHub signed in, curr
 
 ---
 
+## refresh-codespace.js
+
+Provide a fresh Codespace VM in a single browser session — the full sequence (list → delete first → create → stop) runs in one Chromium launch instead of three separate processes. Returns the new VM information as JSON.
+
+Steps performed:
+
+1. **List** current codespaces for the authenticated account.
+2. **Delete the first one** — if it is active/running, it is stopped first (implicit `--force`). Pass `--keep-existing` to skip deletion entirely.
+3. **Create** a new codespace from the blank template (`Start with a blank canvas`), waiting for it to appear in `/codespaces`.
+4. **Stop** the new codespace.
+5. **Return** the new VM info (name, slug, url, editorUrl, machine, status).
+
+```bash
+# Full refresh: delete first codespace, create a new one, stop it
+node scripts/refresh-codespace.js --credentials /mnt/s3/github/vm-manager123/github.json
+
+# Skip deletion — just create + stop a new codespace
+node scripts/refresh-codespace.js --credentials /mnt/s3/github/vm-manager123/github.json --keep-existing
+
+# Fire-and-forget stop (skip GitHub status-change polling — much faster)
+node scripts/refresh-codespace.js --credentials /mnt/s3/github/vm-manager123/github.json --no-wait-stop
+
+# Also honors GITHUB_AUTH_FILE env
+GITHUB_AUTH_FILE=/mnt/s3/github/vm-manager123/github.json node scripts/refresh-codespace.js --keep-existing
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--credentials <path>` | `$GITHUB_AUTH_FILE` | Playwright `storageState` for GitHub |
+| `--template <name>` | `blank` | Template (`blank` is the only supported value) |
+| `--keep-existing` | off | Skip deletion of existing codespaces; only create a new one and stop it |
+| `--no-wait-stop` | off | Fire the stop action without waiting for GitHub status confirmation (status reports `"stopping"`) |
+
+Output on success (JSON):
+
+```json
+{
+  "ok": true,
+  "deleted": { "name": "old-name", "slug": "old-slug-…", "status": "deleted" },
+  "name": "new-name",
+  "slug": "new-slug-…",
+  "url": "https://github.com/codespaces/new-slug-…",
+  "editorUrl": "https://new-slug-….github.dev/",
+  "machine": "2-core • 8GB RAM • 32GB",
+  "status": "stopped"
+}
+```
+
+When `--keep-existing` is passed, `deleted` is `null`. With `--no-wait-stop`, `status` is `"stopping"` instead of `"stopped"`. Requires `auth-browser.js` (`launchGitHubBrowser`, `ensureSignedIn`, `listCodespaces`, `stopCodespace`, `deleteCodespace`, `displayNameFromSlug`).
+
+---
+
 ## auth-browser.js
 
-Shared `playwright-core` wrapper used by all browser-based scripts (`get-codesandbox-credits.js`, `codesandbox-auth.js`, `create-codespace.js`, `delete-codespace.js`, `list-codespaces.js`, `codespace-vm.js`). Exports `launchBrowserWithStorageState`, `launchGitHubBrowser`, `ensureSignedIn`, `STEALTH_SCRIPT`, `closeBrowser`, plus Codespace helpers (`findCodespace`, `listCodespaces`, `stopCodespace`, `deleteCodespace`, `displayNameFromSlug`). Auto-discovers any installed Chromium binary regardless of Playwright revision, so `npx playwright install chromium` is only needed once.
+Shared `playwright-core` wrapper used by all browser-based scripts (`get-codesandbox-credits.js`, `codesandbox-auth.js`, `create-codespace.js`, `delete-codespace.js`, `list-codespaces.js`, `refresh-codespace.js`, `codespace-vm.js`). Exports `launchBrowserWithStorageState`, `launchGitHubBrowser`, `ensureSignedIn`, `STEALTH_SCRIPT`, `closeBrowser`, plus Codespace helpers (`findCodespace`, `listCodespaces`, `stopCodespace`, `deleteCodespace`, `displayNameFromSlug`). Auto-discovers any installed Chromium binary regardless of Playwright revision, so `npx playwright install chromium` is only needed once.
 
 Required by `get-codesandbox-credits.js` for both Cloudflare bypass and OAuth flows, and by all `codespace-*` scripts for GitHub session handling — see `scripts/auth-browser.js:1` for the full API.
 

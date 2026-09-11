@@ -10,10 +10,11 @@ function printUsage() {
   node scripts/codespace-vm.js --credentials <github-auth.json> --action create [options]
   node scripts/codespace-vm.js --credentials <github-auth.json> --action delete --target <codespace-name-or-slug> [options]
   node scripts/codespace-vm.js --credentials <github-auth.json> --action list
+  node scripts/codespace-vm.js --credentials <github-auth.json> --action refresh [options]
 
 Required:
   --credentials <path>  Playwright storage state file created by github-auth.js
-  --action <action>     Action to run: create, delete, or list
+  --action <action>     Action to run: create, delete, list, or refresh
 
 Create options:
   --template <name>     Template to use. Default: blank
@@ -24,10 +25,17 @@ Delete options:
   --target <name>       Codespace name or slug to delete
   --force               Stop an active codespace before deleting it
 
+Refresh options:
+  --template <name>     Template to use for the new codespace. Default: blank
+  --keep-existing       Skip deletion; only create a new codespace and stop it
+  --no-wait-stop        Fire the stop action without waiting for GitHub status confirmation
+
 Examples:
   node scripts/codespace-vm.js --credentials ./github-auth.json --action create --stop
   node scripts/codespace-vm.js --credentials ./github-auth.json --action list
-  node scripts/codespace-vm.js --credentials ./github-auth.json --action delete --target my-codespace --force`);
+  node scripts/codespace-vm.js --credentials ./github-auth.json --action delete --target my-codespace --force
+  node scripts/codespace-vm.js --credentials ./github-auth.json --action refresh
+  node scripts/codespace-vm.js --credentials ./github-auth.json --action refresh --keep-existing`);
 }
 
 function takeValue(argv, index, name) {
@@ -67,7 +75,7 @@ function parseArgs(argv) {
       i++;
     } else if (arg.startsWith('--template=')) {
       args.passthrough.push(arg);
-    } else if (arg === '--stop' || arg === '--no-wait' || arg === '--force') {
+    } else if (arg === '--stop' || arg === '--no-wait' || arg === '--force' || arg === '--keep-existing' || arg === '--no-wait-stop') {
       args.passthrough.push(arg);
     } else {
       throw new Error(`Unknown argument: ${arg}`);
@@ -101,7 +109,8 @@ function scriptForAction(action) {
   if (action === 'create') return 'create-codespace.js';
   if (action === 'delete') return 'delete-codespace.js';
   if (action === 'list') return 'list-codespaces.js';
-  throw new Error(`Unsupported action "${action}". Use create, delete, or list.`);
+  if (action === 'refresh') return 'refresh-codespace.js';
+  throw new Error(`Unsupported action "${action}". Use create, delete, list, or refresh.`);
 }
 
 function main() {
@@ -111,7 +120,7 @@ function main() {
     return;
   }
 
-  if (!args.action) throw new Error('Missing required argument: --action <create|delete>');
+  if (!args.action) throw new Error('Missing required argument: --action <create|delete|list|refresh>');
   const credentials = validateCredentialFile(args.credentials);
   const scriptName = scriptForAction(args.action);
   const scriptArgs = [...args.passthrough];
@@ -124,7 +133,7 @@ function main() {
   }
 
   if (args.action === 'list' && scriptArgs.length > 0) {
-    throw new Error('List does not accept create/delete options');
+    throw new Error('List does not accept create/delete/refresh options');
   }
 
   const result = spawnSync(process.execPath, [path.join(__dirname, scriptName), ...scriptArgs], {

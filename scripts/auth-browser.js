@@ -503,8 +503,10 @@ async function listCodespaces(page) {
     }
   }
 
-  // Deduplicate by slug
-  const unique = results.filter((c, i, arr) => arr.findIndex((x) => x.slug === c.slug) === i);
+  // Deduplicate by slug and drop non-codespace entries (e.g. "Templates")
+  const unique = results
+    .filter((c) => c.slug !== 'templates')
+    .filter((c, i, arr) => arr.findIndex((x) => x.slug === c.slug) === i);
 
   console.log(`Found ${unique.length} codespaces:`, unique.map(c => `${c.name} (${c.slug}) - ${c.status}`).join(', '));
   return unique;
@@ -567,18 +569,44 @@ async function waitForCondition(fn, timeoutMs = 45000, intervalMs = 4000) {
   return false;
 }
 
-async function stopCodespace(page, slug) {
-  const row = await codespaceRow(page, slug);
-  await openActionsMenu(page, row);
-  await page.getByRole('menuitemradio', { name: 'Stop codespace' }).click();
-  await waitForToast(page, `"${slug}" stopped.`);
-  const stopped = await waitForCondition(async () => {
-    const items = await listCodespaces(page);
-    const match = items.find((c) => c.slug === slug);
-    return match && match.status !== 'active' && match.status !== 'running';
-  });
-  if (!stopped) throw new Error(`Stop for "${slug}" did not take effect`);
-  return { slug, status: 'stopped' };
+async function stopCodespace(page, slug, opts = {}) {
+  // Accept either a number (legacy maxAttempts) or an options object
+  const options = typeof opts === 'number' ? { maxAttempts: opts } : opts;
+  const noWait = options.noWait === true;
+  const maxAttempts = options.maxAttempts || 2;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    await page.goto('https://github.com/codespaces', { waitUntil: 'domcontentloaded' });
+    const row = await codespaceRow(page, slug);
+    await openActionsMenu(page, row);
+
+    // GitHub may render the item as menuitem or menuitemradio depending on UI version
+    const stopItem = page.getByRole('menuitemradio', { name: 'Stop codespace' });
+    const stopFallback = page.getByRole('menuitem', { name: 'Stop codespace' });
+    if (await stopItem.count()) {
+      await stopItem.click();
+    } else {
+      await stopFallback.click();
+    }
+
+    await waitForToast(page, `"${slug}" stopped.`);
+
+    // Fire-and-forget: stop was requested, skip status-change polling
+    if (noWait) return { slug, status: 'stopping' };
+
+    const stopped = await waitForCondition(async () => {
+      const items = await listCodespaces(page);
+      const match = items.find((c) => c.slug === slug);
+      return match && match.status !== 'active' && match.status !== 'running';
+    }, 120000);
+
+    if (stopped) return { slug, status: 'stopped' };
+
+    if (attempt < maxAttempts) {
+      console.log(`Stop attempt ${attempt} did not take effect for "${slug}", retrying…`);
+    }
+  }
+  throw new Error(`Stop for "${slug}" did not take effect after ${maxAttempts} attempts`);
 }
 
 async function deleteCodespace(page, slug) {
