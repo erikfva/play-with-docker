@@ -17,6 +17,7 @@ Helper scripts for local development, credential seeding, and provider diagnosti
 | [`delete-codespace.js`](#delete-codespacejs) | Delete a Codespace VM (with optional `--force` stop) |
 | [`list-codespaces.js`](#list-codespacesjs) | List Codespace VMs for the authenticated GitHub account |
 | [`refresh-codespace.js`](#refresh-codespacejs) | Provide a fresh Codespace VM — list → delete first → create → stop, in one browser session |
+| [`refresh-codespace-http.js`](#refresh-codespace-httpjs) | HTTP-only refresh (no browser) — 15× faster; list → delete → create → stop via direct GitHub Web UI requests |
 
 All scripts load env via `dotenv` when `NODE_ENV !== production`: first the repo root `.env`, then `scripts/.env` if present (per-scripts overrides win). CLI flags `--url` / `--token` win over both. Template: `scripts/.env.example` (also documented in the root `.env.example`).
 Base URL precedence for `refresh-vps-status.js` / `refresh-codesandbox-credits.js` / `get-codesandbox-credits.js` / `seed-credentials.js` is: `--url` flag → `$PWD_API_URL` env var → `http://localhost:$PORT` → `http://localhost:3000`. `$PWD_API_URL` accepts a single URL or a scheduled `url|cron;url|cron` list — see [Backend selection](#backend-selection-pwd_api_url).
@@ -314,12 +315,16 @@ node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.j
 node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.json --action refresh
 node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.json --action refresh --keep-existing
 node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.json --action refresh --no-wait-stop
+node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.json --action refresh-http
+node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.json --action refresh-http --keep-existing
+node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.json --action refresh-http --stop-delay 5
+node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.json --action refresh-http --debug
 ```
 
 | Flag | Description |
 |---|---|
 | `--credentials <path>` | **Required.** Playwright `storageState` file (must contain `cookies` + `origins` arrays; validated before dispatch). Also sets `GITHUB_AUTH_FILE` for the child. |
-| `--action <name>` | **Required.** `create` \| `delete` \| `list` \| `refresh` (`list` takes no extra flags; `--target` only valid with `delete`) |
+| `--action <name>` | **Required.** `create` \| `delete` \| `list` \| `refresh` \| `refresh-http` (`list` takes no extra flags; `--target` only valid with `delete`) |
 | `--template <name>` | Create / refresh. Template name, default `blank`. Passed through to the child script. |
 | `--stop` | Create only. Stop the Codespace after it appears in `/codespaces`. |
 | `--no-wait` | Create only. Do not wait for the Codespace to appear in `/codespaces`. |
@@ -327,6 +332,8 @@ node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.j
 | `--force` | Delete only. Stop an active Codespace before deleting it. |
 | `--keep-existing` | Refresh only. Skip deletion; only create a new Codespace and stop it. |
 | `--no-wait-stop` | Refresh only. Fire the stop action without waiting for GitHub status confirmation (status reports `"stopping"`). |
+| `--stop-delay <secs>` | `refresh-http` only. Wait N seconds after create before suspend (lets codespace provision). Default: `5`. |
+| `--debug` | `refresh-http` only. Save HTML responses to `/tmp/cs-http-debug-*.html`. |
 
 Host path `credentials/github/<name>/github.json` appears as `/mnt/s3/github/<name>/github.json` inside the container (`docker-compose.yml` `./credentials:/mnt/s3`).
 
@@ -449,6 +456,64 @@ Output on success (JSON):
 ```
 
 When `--keep-existing` is passed, `deleted` is `null`. With `--no-wait-stop`, `status` is `"stopping"` instead of `"stopped"`. Requires `auth-browser.js` (`launchGitHubBrowser`, `ensureSignedIn`, `listCodespaces`, `stopCodespace`, `deleteCodespace`, `displayNameFromSlug`).
+
+---
+
+## refresh-codespace-http.js
+
+HTTP-only equivalent of `refresh-codespace.js` — performs the full refresh cycle (list → delete first → create → stop) via direct HTTP requests to GitHub's Web UI, with **no browser or Playwright dependency**. 15× faster than browser automation (~5–11s vs ~70s).
+
+Extracts session cookies from the Playwright `storageState` JSON and makes `fetch` requests directly, parsing HTML with regex for CSRF tokens and codespace data.
+
+Steps performed:
+
+1. **List** current codespaces (`GET /codespaces` — suspend-form presence = active).
+2. **Delete the first one** (`POST /codespaces/{slug}` with `_method=delete` + per-form `authenticity_token`). Pass `--keep-existing` to skip.
+3. **Create** a new codespace from the blank template (`GET /codespaces/templates` → extract form → `POST /codespaces`). Polls `/codespaces` up to 30s if the slug isn't in the create response.
+4. **Stop** the new codespace (`POST /codespaces/{slug}/suspend`). The 302 response is immediate; actual stop takes 10–20 min on GitHub's side.
+5. **Return** timings, request log, and the new VM info as JSON.
+
+```bash
+node scripts/refresh-codespace-http.js --credentials /mnt/s3/github/vm-manager123/github.json
+node scripts/refresh-codespace-http.js --credentials /mnt/s3/github/vm-manager123/github.json --keep-existing
+node scripts/refresh-codespace-http.js --credentials /mnt/s3/github/vm-manager123/github.json --stop-delay 5
+node scripts/refresh-codespace-http.js --credentials /mnt/s3/github/vm-manager123/github.json --debug
+
+# via dispatcher
+node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.json --action refresh-http
+node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.json --action refresh-http --stop-delay 5
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--credentials <path>` | — | **Required.** Playwright `storageState` file for GitHub |
+| `--keep-existing` | off | Skip deletion; only create a new codespace and stop it |
+| `--stop-delay <secs>` | `5` | Wait N seconds after create before suspend (lets codespace provision) |
+| `--debug` | off | Save HTML responses to `/tmp/cs-http-debug-*.html` |
+
+Output on success (JSON):
+
+```json
+{
+  "ok": true,
+  "timings": { "list": 734, "delete": 601, "create": 2936, "stop": 1427, "total": 10734 },
+  "totalMs": 10734,
+  "deleted": { "name": "literate fiesta", "slug": "literate-fiesta-…", "status": "deleted" },
+  "name": "turbo space lamp",
+  "slug": "turbo-space-lamp-…",
+  "url": "https://github.com/codespaces/turbo-space-lamp-…",
+  "editorUrl": "https://turbo-space-lamp-….github.dev/",
+  "machine": "2-core • 8GB RAM • 32GB",
+  "status": "stopped",
+  "note": "Stopped immediately (suspend after 5s provisioning delay).",
+  "endpoints": [...],
+  "requestCount": 8
+}
+```
+
+When `--keep-existing` is passed, `deleted` is `null`.
+
+> **Note on account requirements**: The account must have Codespaces creation access on GitHub (paid plan or org-sponsored). Accounts without access return `"Codespace could not be created: Usage not allowed"` and the script exits with an error. Use `check-codespaces-create.sh` to validate an account first.
 
 ---
 

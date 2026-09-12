@@ -48,10 +48,10 @@ function printUsage() {
   node scripts/refresh-codespace-http.js --credentials <github.json> [--keep-existing] [--debug]
 
 Options:
-  --credentials <path>   Playwright storageState file for GitHub.
+  --credentials <path>   Playwright storageState file for GitHub. Also honors GITHUB_AUTH_FILE env.
   --keep-existing        Skip deletion; only create + stop.
   --debug                Save HTML responses to /tmp/cs-http-debug-*.html
-  --stop-delay <secs>    Wait N seconds after create before suspend (lets codespace provision).
+  --stop-delay <secs>    Wait N seconds after create before suspend (lets codespace provision). Default: 5
 `);
 }
 
@@ -299,6 +299,7 @@ async function main() {
   const args = parseArgs(process.argv);
   if (args.help) { printUsage(); return; }
 
+  if (!args.credentials) args.credentials = process.env.GITHUB_AUTH_FILE || null;
   if (!args.credentials) throw new Error('Missing --credentials <github.json>');
   const credPath = path.resolve(args.credentials);
   if (!fs.existsSync(credPath)) throw new Error(`Credential file not found: ${credPath}`);
@@ -386,23 +387,22 @@ async function main() {
   }
   if (args.debug) fs.writeFileSync('/tmp/cs-http-debug-templates.html', templatesHtml);
 
-  // Extract CSRF token from templates page
-  const createToken = extractCsrfToken(templatesHtml);
-  if (!createToken) throw new Error('Could not extract CSRF token from /codespaces/templates');
-
-  // Try to find the "blank" template form
+  // Try to find the "blank" template form (first form with action="/codespaces").
+  // extractFormFields captures all hidden inputs including the per-form authenticity_token.
+  // Do NOT overwrite authenticity_token with the meta csrf-token — GitHub requires the
+  // per-form token; the session-level meta token returns 400/422.
   let createFields = extractFormFields(templatesHtml, '/codespaces');
   if (!createFields) {
-    // Fallback: look for form with action containing "codespaces/new" or just /codespaces
+    // Fallback: look for form with action containing /codespaces/new
     createFields = extractFormFields(templatesHtml, '/codespaces/new');
   }
 
   if (createFields) {
-    // Use the extracted form fields, but update the CSRF token
-    createFields.authenticity_token = createToken;
     console.log(`  → found create form with fields: ${Object.keys(createFields).join(', ')}`);
   } else {
-    // Minimal fallback: just the authenticity token
+    // Last-resort fallback: extract session-level CSRF token from meta tag
+    const createToken = extractCsrfToken(templatesHtml);
+    if (!createToken) throw new Error('Could not extract CSRF token from /codespaces/templates');
     createFields = { authenticity_token: createToken };
     console.log('  → no form found, using minimal fields (authenticity_token only)');
   }
@@ -442,17 +442,26 @@ async function main() {
     }
   }
 
-  // If still not found, GET /codespaces and find the newest one
+  // If still not found, GET /codespaces and find the newest one.
+  // Retry up to 6 times (30s total) since codespace provisioning is async.
   if (!newSlug) {
-    console.log('  → slug not in create response, checking /codespaces…');
-    const reListRes = await httpFetch('https://github.com/codespaces', {}, cookieJar, 'create:relist');
-    const reListHtml = await reListRes.text();
-    const reListed = parseCodespaceList(reListHtml);
-    // The newest codepsace should be one that wasn't in the original list
+    console.log('  → slug not in create response, polling /codespaces…');
     const originalSlugs = new Set(existing.map((c) => c.slug));
-    const newOnes = reListed.filter((c) => !originalSlugs.has(c.slug));
-    if (newOnes.length > 0) {
-      newSlug = newOnes[0].slug;
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      if (attempt > 1) {
+        console.log(`  → relist attempt ${attempt}, waiting 5s…`);
+        await new Promise((r) => setTimeout(r, 5000));
+      }
+      const reListRes = await httpFetch('https://github.com/codespaces', {}, cookieJar, `create:relist:${attempt}`);
+      const reListHtml = await reListRes.text();
+      const reListed = parseCodespaceList(reListHtml);
+      // The newest codespace should be one that wasn't in the original list
+      const newOnes = reListed.filter((c) => !originalSlugs.has(c.slug));
+      if (newOnes.length > 0) {
+        newSlug = newOnes[0].slug;
+        break;
+      }
+      console.log(`  → no new codespace yet (attempt ${attempt}/6)`);
     }
   }
 

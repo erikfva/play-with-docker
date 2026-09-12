@@ -11,10 +11,11 @@ function printUsage() {
   node scripts/codespace-vm.js --credentials <github-auth.json> --action delete --target <codespace-name-or-slug> [options]
   node scripts/codespace-vm.js --credentials <github-auth.json> --action list
   node scripts/codespace-vm.js --credentials <github-auth.json> --action refresh [options]
+  node scripts/codespace-vm.js --credentials <github-auth.json> --action refresh-http [options]
 
 Required:
   --credentials <path>  Playwright storage state file created by github-auth.js
-  --action <action>     Action to run: create, delete, list, or refresh
+  --action <action>     Action to run: create, delete, list, refresh, or refresh-http
 
 Create options:
   --template <name>     Template to use. Default: blank
@@ -25,17 +26,23 @@ Delete options:
   --target <name>       Codespace name or slug to delete
   --force               Stop an active codespace before deleting it
 
-Refresh options:
-  --template <name>     Template to use for the new codespace. Default: blank
+Refresh / refresh-http options:
   --keep-existing       Skip deletion; only create a new codespace and stop it
   --no-wait-stop        Fire the stop action without waiting for GitHub status confirmation
+  --stop-delay <secs>   (refresh-http only) Wait N seconds after create before suspend. Default: 5
+  --debug               (refresh-http only) Save HTML responses to /tmp/cs-http-debug-*.html
+
+Refresh options (browser only):
+  --template <name>     Template to use for the new codespace. Default: blank
 
 Examples:
   node scripts/codespace-vm.js --credentials ./github-auth.json --action create --stop
   node scripts/codespace-vm.js --credentials ./github-auth.json --action list
   node scripts/codespace-vm.js --credentials ./github-auth.json --action delete --target my-codespace --force
   node scripts/codespace-vm.js --credentials ./github-auth.json --action refresh
-  node scripts/codespace-vm.js --credentials ./github-auth.json --action refresh --keep-existing`);
+  node scripts/codespace-vm.js --credentials ./github-auth.json --action refresh --keep-existing
+  node scripts/codespace-vm.js --credentials ./github-auth.json --action refresh-http
+  node scripts/codespace-vm.js --credentials ./github-auth.json --action refresh-http --stop-delay 5`);
 }
 
 function takeValue(argv, index, name) {
@@ -75,7 +82,13 @@ function parseArgs(argv) {
       i++;
     } else if (arg.startsWith('--template=')) {
       args.passthrough.push(arg);
-    } else if (arg === '--stop' || arg === '--no-wait' || arg === '--force' || arg === '--keep-existing' || arg === '--no-wait-stop') {
+    } else if (arg === '--stop' || arg === '--no-wait' || arg === '--force' || arg === '--keep-existing' || arg === '--no-wait-stop' || arg === '--debug') {
+      args.passthrough.push(arg);
+    } else if (arg === '--stop-delay') {
+      const val = takeValue(raw, i, '--stop-delay');
+      args.passthrough.push(`--stop-delay=${val}`);
+      i++;
+    } else if (arg.startsWith('--stop-delay=')) {
       args.passthrough.push(arg);
     } else {
       throw new Error(`Unknown argument: ${arg}`);
@@ -110,7 +123,8 @@ function scriptForAction(action) {
   if (action === 'delete') return 'delete-codespace.js';
   if (action === 'list') return 'list-codespaces.js';
   if (action === 'refresh') return 'refresh-codespace.js';
-  throw new Error(`Unsupported action "${action}". Use create, delete, list, or refresh.`);
+  if (action === 'refresh-http') return 'refresh-codespace-http.js';
+  throw new Error(`Unsupported action "${action}". Use create, delete, list, refresh, or refresh-http.`);
 }
 
 function main() {
@@ -120,7 +134,7 @@ function main() {
     return;
   }
 
-  if (!args.action) throw new Error('Missing required argument: --action <create|delete|list|refresh>');
+  if (!args.action) throw new Error('Missing required argument: --action <create|delete|list|refresh|refresh-http>');
   const credentials = validateCredentialFile(args.credentials);
   const scriptName = scriptForAction(args.action);
   const scriptArgs = [...args.passthrough];
