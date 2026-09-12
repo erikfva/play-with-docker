@@ -1,0 +1,123 @@
+name: Refresh Codespace VMs
+
+# Runs scripts/refresh-codespace-http.js for each GitHub credential in the S3
+# bucket, cycling each account's codespace (delete old → create new → stop).
+#
+# No browser or Playwright required — uses direct HTTP requests to GitHub's
+# Web UI (~10s per account vs ~70s for browser automation).
+#
+# Required repo secrets:
+#   S3_ACCESS_KEY_ID       iDrive E2 access key
+#   S3_SECRET_ACCESS_KEY   iDrive E2 secret key
+#   S3_ENDPOINT            e.g. https://s3.us-southeast-1.idrivee2.com
+#   S3_REGION              e.g. us-southeast-1
+#   S3_BUCKET              e.g. play-with-docker
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: 'Account folder name to refresh (e.g. vm-manager232-santi). Required.'
+        type: string
+        required: true
+      keep-existing:
+        description: 'Skip deletion — only create a new codespace and stop it'
+        type: boolean
+        required: false
+        default: false
+      stop-delay:
+        description: 'Seconds to wait after create before suspend (default 5)'
+        type: string
+        required: false
+        default: '5'
+      dry-run:
+        description: 'List matched credentials without running the refresh'
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: refresh-codespace
+  cancel-in-progress: true
+
+jobs:
+  refresh-codespace:
+    name: Refresh Codespace VMs
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download GitHub credential files from S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.S3_REGION }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+        run: |
+          set -euo pipefail
+          mkdir -p ./github-credentials
+          aws configure set default.s3.addressing_style path
+          aws s3 sync --endpoint-url "$S3_ENDPOINT" --no-progress \
+            "s3://${S3_BUCKET}/github/" ./github-credentials/
+          count=$(find ./github-credentials -name 'github.json' | wc -l | tr -d ' ')
+          echo "Downloaded credentials for $count account(s)."
+          ls -1 ./github-credentials || true
+
+      - name: Refresh codespaces
+        run: |
+          set -euo pipefail
+
+          NAME="${INPUT_NAME:-}"
+          KEEP_EXISTING="${INPUT_KEEP_EXISTING:-false}"
+          STOP_DELAY="${INPUT_STOP_DELAY:-5}"
+          DRY_RUN="${INPUT_DRY_RUN:-false}"
+
+          if [ -z "$NAME" ]; then
+            echo "ERROR: --name is required. Provide an account folder name (e.g. vm-manager232-santi)."
+            exit 1
+          fi
+
+          CRED_FILE="./github-credentials/${NAME}/github.json"
+          if [ ! -f "$CRED_FILE" ]; then
+            echo "ERROR: Credential file not found: $CRED_FILE"
+            echo "Available accounts:"
+            ls -1 ./github-credentials/ || true
+            exit 1
+          fi
+
+          # Build passthrough args
+          EXTRA_ARGS=(--stop-delay "$STOP_DELAY")
+          [ "$KEEP_EXISTING" = "true" ] && EXTRA_ARGS+=(--keep-existing)
+
+          echo "Account:    $NAME"
+          echo "Credential: $CRED_FILE"
+          echo "Args:       ${EXTRA_ARGS[*]}"
+          echo "──────────────────────────────────────────"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "[dry-run] would run: node scripts/refresh-codespace-http.js --credentials $CRED_FILE ${EXTRA_ARGS[*]}"
+            exit 0
+          fi
+
+          node scripts/refresh-codespace-http.js \
+            --credentials "$CRED_FILE" \
+            "${EXTRA_ARGS[@]}"
+        shell: bash
+        env:
+          INPUT_NAME: ${{ inputs.name }}
+          INPUT_KEEP_EXISTING: ${{ inputs.keep-existing }}
+          INPUT_STOP_DELAY: ${{ inputs.stop-delay }}
+          INPUT_DRY_RUN: ${{ inputs.dry-run }}
