@@ -9,22 +9,52 @@
  * needed — just cookies + CSRF tokens extracted from HTML.
  *
  * Flow:
- *   1. List current codespaces     — GET  github.com/codespaces
- *   2. Delete the first one         — POST github.com/codespaces/{slug}
- *   3. Create a new blank codespace — POST github.com/codespaces
- *   4. Stop the new codespace       — POST github.com/codespaces/{slug}/suspend
- *   5. Return the new VM information
+ *   1. List current codespaces        — GET  github.com/codespaces
+ *   2. Delete the first one            — POST github.com/codespaces/{slug}
+ *   3. Create a new blank codespace    — POST github.com/codespaces
+ *   4. Wait for codespace to be ready  — GET  github.com/codespaces (polls HTML page)
+ *      (polls until the suspend form for the slug appears in the HTML)
+ *      Suspend form present = active = Docker initialized. No PAT needed.
+ *   5. Stop the new codespace          — POST github.com/codespaces/{slug}/suspend
+ *   6. Return the new VM information
  *
  * All timing and endpoint details are tracked and printed.
+ *
+ * WHY THE PROVISION WAIT IS REQUIRED
+ * -----------------------------------
+ * When GitHub creates a codespace via the Web UI (step 3), the actual
+ * devcontainer provisioning — installing Docker, running post-create hooks,
+ * starting the Docker engine — happens asynchronously.  The create POST
+ * returns (and the slug is assigned) before that work is done.
+ *
+ * If the codespace is stopped too early, the Docker engine and devcontainer
+ * setup never complete.  The backend orchestrator later adopts this codespace
+ * and runs `docker system prune -af` as its initialization check; that command
+ * fails because Docker is not running, so every subsequent `docker` command in
+ * the session will also fail.
+ *
+ * Waiting for the suspend form to appear on GET /codespaces (session cookies,
+ * no PAT needed) guarantees the same "fully provisioned" baseline that the
+ * Playwright browser flow achieves by waiting for the editor URL to load.
+ * Per research: status keywords (Active/Stopped) are NOT in raw HTML — only
+ * the suspend form presence is a reliable active/inactive signal.
  */
 
 const fs = require('fs');
 const path = require('path');
 
-// ── Args ────────────────────────────────────────────────────────────────────
+// ── Args ─────────────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const args = { credentials: null, keepExisting: false, debug: false, stopDelay: 5 };
+  const args = {
+    credentials: null,
+    keepExisting: false,
+    debug: false,
+    // How long (seconds) to wait for the codespace to become active.
+    provisionTimeout: 300,
+    // Poll interval (seconds) when waiting for active state.
+    pollInterval: 10,
+  };
   const raw = argv.slice(2);
   for (let i = 0; i < raw.length; i++) {
     const a = raw[i];
@@ -33,8 +63,10 @@ function parseArgs(argv) {
     else if (a.startsWith('--credentials=')) args.credentials = a.slice('--credentials='.length);
     else if (a === '--keep-existing') args.keepExisting = true;
     else if (a === '--debug') args.debug = true;
-    else if (a === '--stop-delay') args.stopDelay = parseInt(raw[++i], 10) || 0;
-    else if (a.startsWith('--stop-delay=')) args.stopDelay = parseInt(a.slice('--stop-delay='.length), 10) || 0;
+    else if (a === '--provision-timeout') args.provisionTimeout = parseInt(raw[++i], 10) || 300;
+    else if (a.startsWith('--provision-timeout=')) args.provisionTimeout = parseInt(a.slice('--provision-timeout='.length), 10) || 300;
+    else if (a === '--poll-interval') args.pollInterval = parseInt(raw[++i], 10) || 10;
+    else if (a.startsWith('--poll-interval=')) args.pollInterval = parseInt(a.slice('--poll-interval='.length), 10) || 10;
     else {
       console.error(`Unknown argument: ${a}`);
       process.exit(2);
@@ -48,14 +80,26 @@ function printUsage() {
   node scripts/refresh-codespace-http.js --credentials <github.json> [--keep-existing] [--debug]
 
 Options:
-  --credentials <path>   Playwright storageState file for GitHub. Also honors GITHUB_AUTH_FILE env.
-  --keep-existing        Skip deletion; only create + stop.
-  --debug                Save HTML responses to /tmp/cs-http-debug-*.html
-  --stop-delay <secs>    Wait N seconds after create before suspend (lets codespace provision). Default: 5
+  --credentials <path>        Playwright storageState file for GitHub. Also honors GITHUB_AUTH_FILE env.
+  --keep-existing             Skip deletion; only create + stop.
+  --debug                     Save HTML responses to /tmp/cs-http-debug-*.html
+  --provision-timeout <secs>  Max seconds to wait for the new codespace to become active
+                              before stopping it. Default: 300 (5 min). Set to 0 to skip.
+                              Polls GET /codespaces for the suspend form — no PAT needed.
+                              Suspend form present = active = Docker fully initialized.
+  --poll-interval <secs>      Polling interval in seconds. Default: 10.
+
+Why provision-timeout matters:
+  GitHub provisions codespaces asynchronously — Docker and devcontainer setup run
+  after the create POST returns. The script polls the /codespaces page and waits
+  for the suspend form to appear (suspend form present = codespace active = Docker
+  initialized). Stopping before that leaves Docker uninitialized, causing the
+  backend adoption to fail. Status keywords (Active/Stopped) are NOT in the raw
+  HTML — only the suspend form presence is a reliable signal (per research).
 `);
 }
 
-// ── Cookie loading ──────────────────────────────────────────────────────────
+// ── Cookie loading ────────────────────────────────────────────────────────────
 
 function loadCookies(statePath) {
   const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
@@ -71,7 +115,7 @@ function loadCookies(statePath) {
 
 /**
  * Update the cookie string with Set-Cookie response headers.
- * Simple approach: replace matching cookie names, keep the rest.
+ * Replaces matching cookie names, keeps the rest.
  */
 function updateCookies(cookieStr, setCookieHeaders) {
   if (!setCookieHeaders || setCookieHeaders.length === 0) return cookieStr;
@@ -85,7 +129,97 @@ function updateCookies(cookieStr, setCookieHeaders) {
   return [...map.values()].join('; ');
 }
 
-// ── HTTP fetch with tracking ─────────────────────────────────────────────────
+// ── Provision wait ────────────────────────────────────────────────────────────
+
+/**
+ * Check whether a codespace is active by looking for its suspend form in the
+ * raw HTML of the /codespaces page.
+ *
+ * Per research-lifecycle.md: GitHub does NOT render status keywords (Active,
+ * Stopped, etc.) in the raw server-rendered HTML. The only reliable signal is
+ * the presence or absence of the suspend form:
+ *
+ *   present  → codespace is active / running / provisioning
+ *   absent   → codespace is stopped / idle / shutdown
+ *
+ * api.github.com returns 401 with session cookies (requires a PAT), so the
+ * REST API cannot be used for status polling without a token.
+ */
+function isCodespaceActive(html, slug) {
+  return html.includes(`/codespaces/${slug}/suspend`);
+}
+
+/**
+ * Poll GET /codespaces (using session cookies, no PAT needed) until the
+ * suspend form for the new slug appears in the HTML.
+ *
+ * Suspend form present = codespace is active = devcontainer and Docker engine
+ * are fully initialized. This is the HTTP equivalent of the Playwright script
+ * waiting for the editor page (*.github.dev) to load.
+ *
+ * Returns { status: 'active', html } when the suspend form is found,
+ * or { status: null, html: null } on timeout.
+ */
+async function waitForActiveStatus(slug, cookieJar, { timeoutMs = 300_000, pollIntervalMs = 10_000, requestLog } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let attempt = 0;
+
+  console.log(`  → polling /codespaces for suspend form of ${slug} (timeout ${timeoutMs / 1000}s, interval ${pollIntervalMs / 1000}s)…`);
+
+  while (Date.now() < deadline) {
+    attempt++;
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+
+    const url = 'https://github.com/codespaces';
+    let res;
+    try {
+      res = await fetch(url, {
+        headers: {
+          'User-Agent': UA,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.5',
+          'Cookie': cookieJar.value,
+        },
+        redirect: 'manual',
+      });
+    } catch (fetchErr) {
+      console.warn(`  → poll attempt ${attempt}: fetch error (${fetchErr.message}), retrying…`);
+      continue;
+    }
+
+    if (requestLog) {
+      requestLog.push({
+        ts: new Date().toISOString(),
+        method: 'GET',
+        url,
+        status: res.status,
+        label: `provision-poll:${attempt}`,
+      });
+    }
+
+    const setCookies = res.headers.getSetCookie?.() || [];
+    if (setCookies.length > 0) cookieJar.value = updateCookies(cookieJar.value, setCookies);
+
+    if (!res.ok && res.status !== 302) {
+      console.warn(`  → poll attempt ${attempt}: HTTP ${res.status}, retrying…`);
+      continue;
+    }
+
+    const html = await res.text();
+    const active = isCodespaceActive(html, slug);
+    console.log(`  → [poll ${attempt}] suspend form ${active ? 'PRESENT (active)' : 'absent (still provisioning)'}`);
+
+    if (active) {
+      console.log(`  → codespace is active after ${Math.round((Date.now() - (deadline - timeoutMs)) / 1000)}s\n`);
+      return { status: 'active', html };
+    }
+  }
+
+  console.warn(`  → provision wait timed out after ${timeoutMs / 1000}s. Proceeding with stop anyway.`);
+  return { status: null, html: null };
+}
+
+// ── HTTP fetch with tracking ──────────────────────────────────────────────────
 
 const requests = [];
 const timings = {};
@@ -130,15 +264,11 @@ async function httpFetch(url, options, cookieJar, label) {
   entry.status = res.status;
   entry.statusText = res.statusText;
 
-  // Capture Location header for redirects
   const location = res.headers.get('location');
   if (location) entry.location = location;
 
-  // Update cookies from Set-Cookie headers
   const setCookies = res.headers.getSetCookie?.() || [];
-  if (setCookies.length > 0) {
-    cookieJar.value = updateCookies(cookieJar.value, setCookies);
-  }
+  if (setCookies.length > 0) cookieJar.value = updateCookies(cookieJar.value, setCookies);
 
   return res;
 }
@@ -153,23 +283,7 @@ async function followRedirect(res, cookieJar, label) {
   return httpFetch(fullUrl, {}, cookieJar, label);
 }
 
-// ── HTML parsing helpers ────────────────────────────────────────────────────
-
-/**
- * Extract CSRF token from HTML (meta tag or hidden input).
- */
-function extractCsrfToken(html) {
-  // <meta name="csrf-token" content="..." />
-  const meta = html.match(/<meta[^>]*name=["']csrf-token["'][^>]*content=["']([^"']+)["']/i);
-  if (meta) return meta[1];
-  // <input ... name="authenticity_token" ... value="..." />
-  const input = html.match(/<input[^>]*name=["']authenticity_token["'][^>]*value=["']([^"']+)["']/i);
-  if (input) return input[1];
-  // Try reversed attribute order: value before name
-  const input2 = html.match(/<input[^>]*value=["']([^"']+)["'][^>]*name=["']authenticity_token["']/i);
-  if (input2) return input2[1];
-  return null;
-}
+// ── HTML parsing helpers ──────────────────────────────────────────────────────
 
 /**
  * Parse codespace list from the /codespaces HTML page.
@@ -179,19 +293,15 @@ function parseCodespaceList(html) {
   const codespaces = [];
   const seen = new Set();
 
-  // Find all unique slugs from href and action attributes
   const slugRegex = /(?:href|action)=["']\/codespaces\/([a-z0-9][a-z0-9-]+)["']/gi;
   let match;
   while ((match = slugRegex.exec(html)) !== null) {
     const slug = match[1];
-    // Filter out non-codespace entries: "templates", "new"
     if (slug === 'templates' || slug === 'new' || seen.has(slug)) continue;
     seen.add(slug);
 
-    // Status: check if the suspend form is present for this slug
     const suspendForm = html.includes(`/codespaces/${slug}/suspend`);
 
-    // Display name: look for span.h5 near the slug
     let name = slug;
     const ctxStart = Math.max(0, match.index - 1000);
     const ctxEnd = Math.min(html.length, match.index + 1000);
@@ -212,42 +322,14 @@ function parseCodespaceList(html) {
 }
 
 /**
- * Extract all hidden input fields from a form matching the given action.
- * Returns { name: value } pairs.
+ * Extract hidden input fields from a form by its action URL.
+ * When method is provided, only the form whose _method hidden input matches is
+ * returned (GitHub renders multiple forms with the same action but different
+ * _method values, each with its own authenticity_token).
+ * When method is null, the first matching form is returned.
  */
-function extractFormFields(html, formAction) {
-  // Find the form with the matching action
-  const escapedAction = formAction.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const formRegex = new RegExp(
-    `<form[^>]*action=["']${escapedAction}["'][^>]*>([\\s\\S]*?)</form>`,
-    'i'
-  );
-  const formMatch = html.match(formRegex);
-  if (!formMatch) return null;
-
-  const formBody = formMatch[1];
-  const fields = {};
-  const inputRegex = /<input[^>]*name=["']([^"']+)["'][^>]*value=["']([^"']*)["']/gi;
-  const inputRegex2 = /<input[^>]*value=["']([^"']*)["'][^>]*name=["']([^"']+)["']/gi;
-  let m;
-  while ((m = inputRegex.exec(formBody)) !== null) {
-    fields[m[1]] = m[2];
-  }
-  while ((m = inputRegex2.exec(formBody)) !== null) {
-    if (!(m[2] in fields)) fields[m[2]] = m[1];
-  }
-  return fields;
-}
-
-/**
- * Find a specific form's fields by action URL and _method value.
- * GitHub renders multiple forms with the same action but different _method
- * (delete, patch, etc.). Each has its own authenticity_token.
- */
-function findFormFields(html, slug, method) {
-  const action = `/codespaces/${slug}`;
-  const escaped = action.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // Match all forms with this action
+function extractFormFields(html, formAction, method = null) {
+  const escaped = formAction.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const formRegex = new RegExp(
     `<form[^>]*action=["']${escaped}["'][^>]*>([\\s\\S]*?)</form>`,
     'gi'
@@ -255,21 +337,15 @@ function findFormFields(html, slug, method) {
   let formMatch;
   while ((formMatch = formRegex.exec(html)) !== null) {
     const formBody = formMatch[1];
-    // Extract all inputs
     const fields = {};
     const inputRegex = /<input[^>]*name=["']([^"']+)["'][^>]*value=["']([^"']*)["']/gi;
     const inputRegex2 = /<input[^>]*value=["']([^"']*)["'][^>]*name=["']([^"']+)["']/gi;
     let m;
-    while ((m = inputRegex.exec(formBody)) !== null) {
-      fields[m[1]] = m[2];
-    }
+    while ((m = inputRegex.exec(formBody)) !== null) fields[m[1]] = m[2];
     while ((m = inputRegex2.exec(formBody)) !== null) {
       if (!(m[2] in fields)) fields[m[2]] = m[1];
     }
-    // Check if this form's _method matches
-    if (fields._method === method) {
-      return fields;
-    }
+    if (method === null || fields._method === method) return fields;
   }
   return null;
 }
@@ -279,10 +355,8 @@ function findFormFields(html, slug, method) {
  * Looks for {slug}.github.dev or /codespaces/{slug} patterns.
  */
 function extractNewSlug(html) {
-  // Look for *.github.dev hostname
   const devMatch = html.match(/https?:\/\/([a-z0-9][a-z0-9-]+)\.github\.dev/i);
   if (devMatch) return devMatch[1];
-  // Look for /codespaces/{slug} that's not "templates"
   const csMatch = html.match(/\/codespaces\/([a-z0-9][a-z0-9-]+)/i);
   if (csMatch && csMatch[1] !== 'templates') return csMatch[1];
   return null;
@@ -293,7 +367,7 @@ function displayNameFromSlug(slug) {
   return (m ? m[1] : slug).replace(/-/g, ' ');
 }
 
-// ── Main flow ───────────────────────────────────────────────────────────────
+// ── Main flow ─────────────────────────────────────────────────────────────────
 
 async function main() {
   const args = parseArgs(process.argv);
@@ -311,37 +385,27 @@ async function main() {
   let deleted = null;
   let newSlug = null;
 
-  // ── Step 1: List ────────────────────────────────────────────────────────
+  // ── Step 1: List ─────────────────────────────────────────────────────────
   startTimer('list');
   const listRes = await httpFetch('https://github.com/codespaces', {}, cookieJar, 'list');
   let listHtml = await listRes.text();
   if (listRes.status === 302) {
     const redirectRes = await followRedirect(listRes, cookieJar, 'list:redirect');
-    if (redirectRes) {
-      listHtml = await redirectRes.text();
-    }
+    if (redirectRes) listHtml = await redirectRes.text();
   }
   if (args.debug) fs.writeFileSync('/tmp/cs-http-debug-list.html', listHtml);
   const existing = parseCodespaceList(listHtml);
   endTimer('list');
   console.log(`  → found ${existing.length} codespaces: ${existing.map((c) => `${c.name} (${c.slug}) - ${c.status}`).join(', ')}\n`);
 
-  // ── Step 2: Delete first ────────────────────────────────────────────────
+  // ── Step 2: Delete first ──────────────────────────────────────────────────
   if (!args.keepExisting && existing.length > 0) {
     const first = existing[0];
 
-    // Extract the per-form token from the delete form (_method=delete)
-    let deleteFields = findFormFields(listHtml, first.slug, 'delete');
-    if (!deleteFields) {
-      // Fallback to meta tag token
-      const metaToken = extractCsrfToken(listHtml);
-      if (!metaToken) throw new Error('Could not extract CSRF token for delete');
-      deleteFields = { authenticity_token: metaToken, _method: 'delete' };
-    }
+    const deleteFields = extractFormFields(listHtml, `/codespaces/${first.slug}`, 'delete');
+    if (!deleteFields) throw new Error(`Could not extract delete form for ${first.slug}`);
 
     startTimer('delete');
-    const deleteBody = new URLSearchParams(deleteFields);
-
     const deleteRes = await httpFetch(
       `https://github.com/codespaces/${first.slug}`,
       {
@@ -351,16 +415,13 @@ async function main() {
           'Referer': 'https://github.com/codespaces',
           'Origin': 'https://github.com',
         },
-        body: deleteBody.toString(),
+        body: new URLSearchParams(deleteFields).toString(),
       },
       cookieJar,
       'delete'
     );
 
-    // Follow 302 redirect if any
-    if (deleteRes.status === 302) {
-      await followRedirect(deleteRes, cookieJar, 'delete:redirect');
-    }
+    if (deleteRes.status === 302) await followRedirect(deleteRes, cookieJar, 'delete:redirect');
 
     endTimer('delete');
     const ok = deleteRes.status === 302 || deleteRes.status === 200;
@@ -370,10 +431,9 @@ async function main() {
     console.log('  → no codespaces to delete (or --keep-existing)\n');
   }
 
-  // ── Step 3: Create ───────────────────────────────────────────────────────
+  // ── Step 3: Create ────────────────────────────────────────────────────────
   startTimer('create');
 
-  // First GET the templates page to extract form data
   const templatesRes = await httpFetch(
     'https://github.com/codespaces/templates',
     {},
@@ -387,30 +447,14 @@ async function main() {
   }
   if (args.debug) fs.writeFileSync('/tmp/cs-http-debug-templates.html', templatesHtml);
 
-  // Try to find the "blank" template form (first form with action="/codespaces").
-  // extractFormFields captures all hidden inputs including the per-form authenticity_token.
-  // Do NOT overwrite authenticity_token with the meta csrf-token — GitHub requires the
-  // per-form token; the session-level meta token returns 400/422.
-  let createFields = extractFormFields(templatesHtml, '/codespaces');
-  if (!createFields) {
-    // Fallback: look for form with action containing /codespaces/new
-    createFields = extractFormFields(templatesHtml, '/codespaces/new');
-  }
+  // Per-form authenticity_token is required — the session-level meta token causes 422.
+  const createFields = extractFormFields(templatesHtml, '/codespaces') ||
+    extractFormFields(templatesHtml, '/codespaces/new');
+  if (!createFields) throw new Error('Could not extract create form from /codespaces/templates');
 
-  if (createFields) {
-    console.log(`  → found create form with fields: ${Object.keys(createFields).join(', ')}`);
-  } else {
-    // Last-resort fallback: extract session-level CSRF token from meta tag
-    const createToken = extractCsrfToken(templatesHtml);
-    if (!createToken) throw new Error('Could not extract CSRF token from /codespaces/templates');
-    createFields = { authenticity_token: createToken };
-    console.log('  → no form found, using minimal fields (authenticity_token only)');
-  }
-
+  console.log(`  → found create form with fields: ${Object.keys(createFields).join(', ')}`);
   if (args.debug) console.log(`  → form data: ${JSON.stringify(createFields)}`);
 
-  // POST to create
-  const createBody = new URLSearchParams(createFields);
   const createRes = await httpFetch(
     'https://github.com/codespaces',
     {
@@ -420,7 +464,7 @@ async function main() {
         'Referer': 'https://github.com/codespaces/templates',
         'Origin': 'https://github.com',
       },
-      body: createBody.toString(),
+      body: new URLSearchParams(createFields).toString(),
     },
     cookieJar,
     'create:post'
@@ -429,10 +473,8 @@ async function main() {
   let createHtml = await createRes.text();
   if (args.debug) fs.writeFileSync('/tmp/cs-http-debug-create-response.html', createHtml);
 
-  // Extract the new codespace slug from the response
   newSlug = extractNewSlug(createHtml);
 
-  // If not found, follow redirect and try again
   if (!newSlug && createRes.status === 302) {
     const cr = await followRedirect(createRes, cookieJar, 'create:redirect');
     if (cr) {
@@ -442,8 +484,7 @@ async function main() {
     }
   }
 
-  // If still not found, GET /codespaces and find the newest one.
-  // Retry up to 6 times (30s total) since codespace provisioning is async.
+  // Slug may not appear in create response — poll until the new codespace appears.
   if (!newSlug) {
     console.log('  → slug not in create response, polling /codespaces…');
     const originalSlugs = new Set(existing.map((c) => c.slug));
@@ -454,9 +495,7 @@ async function main() {
       }
       const reListRes = await httpFetch('https://github.com/codespaces', {}, cookieJar, `create:relist:${attempt}`);
       const reListHtml = await reListRes.text();
-      const reListed = parseCodespaceList(reListHtml);
-      // The newest codespace should be one that wasn't in the original list
-      const newOnes = reListed.filter((c) => !originalSlugs.has(c.slug));
+      const newOnes = parseCodespaceList(reListHtml).filter((c) => !originalSlugs.has(c.slug));
       if (newOnes.length > 0) {
         newSlug = newOnes[0].slug;
         break;
@@ -469,30 +508,45 @@ async function main() {
   if (!newSlug) throw new Error('Could not determine the new codespace slug after create');
   console.log(`  → created ${displayNameFromSlug(newSlug)} (${newSlug})\n`);
 
-  // ── Step 4: Stop ──────────────────────────────────────────────────────────
-  // Optional delay before stop — lets codespace fully provision so suspend works
-  if (args.stopDelay > 0) {
-    console.log(`  → waiting ${args.stopDelay}s before stop (codespace provisioning)...\n`);
-    await new Promise((r) => setTimeout(r, args.stopDelay * 1000));
+  // ── Step 4: Wait for provisioning ────────────────────────────────────────
+  // Poll GET /codespaces until the suspend form for the new slug appears in the
+  // HTML. Suspend form present = codespace fully active = Docker initialized.
+  // Per research-lifecycle.md: status keywords are NOT in raw HTML; the suspend
+  // form is the only reliable signal available without a PAT.
+  startTimer('provision-wait');
+  let finalProvisionState = null;
+  let provisionHtml = null;
+
+  if (args.provisionTimeout > 0) {
+    const result = await waitForActiveStatus(newSlug, cookieJar, {
+      timeoutMs: args.provisionTimeout * 1000,
+      pollIntervalMs: args.pollInterval * 1000,
+      requestLog: requests,
+    });
+    finalProvisionState = result.status;
+    provisionHtml = result.html;
+  } else {
+    console.warn('  → WARNING: provision wait disabled (--provision-timeout 0). Docker initialization not confirmed.');
   }
-  // GET /codespaces to get a fresh page with the suspend form for the new codespace
+  endTimer('provision-wait');
+
+  // ── Step 5: Stop ──────────────────────────────────────────────────────────
+  // Reuse the last provision-poll HTML on the first attempt (it already has the
+  // suspend form with a fresh authenticity_token), avoiding an extra GET request.
   startTimer('stop');
   let stopStatus = null;
 
   for (let attempt = 1; attempt <= 3; attempt++) {
-    const stopListRes = await httpFetch('https://github.com/codespaces', {}, cookieJar, `stop:get-list:${attempt}`);
-    const stopListHtml = await stopListRes.text();
-
-    // The suspend form has action="/codespaces/{slug}/suspend" with just authenticity_token (no _method)
-    let stopFields = extractFormFields(stopListHtml, `/codespaces/${newSlug}/suspend`);
-    if (!stopFields) {
-      // Fallback to meta tag token alone
-      const metaToken = extractCsrfToken(stopListHtml);
-      if (!metaToken) throw new Error('Could not extract CSRF token for stop action');
-      stopFields = { authenticity_token: metaToken };
+    let stopListHtml;
+    if (attempt === 1 && provisionHtml) {
+      stopListHtml = provisionHtml;
+    } else {
+      const stopListRes = await httpFetch('https://github.com/codespaces', {}, cookieJar, `stop:get-list:${attempt}`);
+      stopListHtml = await stopListRes.text();
     }
 
-    const stopBody = new URLSearchParams(stopFields);
+    const stopFields = extractFormFields(stopListHtml, `/codespaces/${newSlug}/suspend`);
+    if (!stopFields) throw new Error(`Could not extract suspend form for ${newSlug}`);
 
     const stopRes = await httpFetch(
       `https://github.com/codespaces/${newSlug}/suspend`,
@@ -503,7 +557,7 @@ async function main() {
           'Referer': 'https://github.com/codespaces',
           'Origin': 'https://github.com',
         },
-        body: stopBody.toString(),
+        body: new URLSearchParams(stopFields).toString(),
       },
       cookieJar,
       `stop:post-suspend:${attempt}`
@@ -513,16 +567,14 @@ async function main() {
 
     if (stopRes.status === 302) {
       await followRedirect(stopRes, cookieJar, 'stop:redirect');
-      break; // success
+      break;
     }
 
     if (stopRes.status === 422 && attempt < 3) {
       console.log(`  → stop attempt ${attempt}: ${stopRes.status} (retrying in 5s…)`);
       await new Promise((r) => setTimeout(r, 5000));
     } else {
-      // Read the error body for debugging
-      const errBody = await stopRes.text();
-      if (args.debug) fs.writeFileSync(`/tmp/cs-http-debug-stop-error-${attempt}.html`, errBody);
+      if (args.debug) fs.writeFileSync(`/tmp/cs-http-debug-stop-error-${attempt}.html`, await stopRes.text());
       break;
     }
   }
@@ -565,7 +617,7 @@ async function main() {
       if (r.status) ep.statuses.add(r.status);
     } catch {}
   }
-  for (const [key, ep] of eps) {
+  for (const [, ep] of eps) {
     console.log(`  ${ep.method.padEnd(6)} ${ep.host}${ep.path}  [${[...ep.statuses].join(',') || '---'}]  ×${ep.count}`);
   }
 
@@ -583,10 +635,13 @@ async function main() {
     url: `https://github.com/codespaces/${newSlug}`,
     editorUrl: `https://${newSlug}.github.dev/`,
     machine: '2-core • 8GB RAM • 32GB',
-    status: stopOk ? (args.stopDelay >= 3 ? 'stopped' : 'stopping (async, may take 10-20min)') : 'failed',
-    note: args.stopDelay >= 3
-      ? `Stopped immediately (suspend after ${args.stopDelay}s provisioning delay).`
-      : 'Suspend POST returns 302 but codespace may not stop immediately without a provisioning delay. Use --stop-delay 5 (default) for immediate stop.',
+    status: stopOk ? 'stopped' : 'failed',
+    provisionState: finalProvisionState,
+    note: (() => {
+      if (!stopOk) return 'Suspend POST did not return 302; codespace may still be running.';
+      if (finalProvisionState === 'active') return 'Codespace was fully active (suspend form confirmed) before stop — Docker and devcontainer initialized.';
+      return 'Provision wait timed out or was disabled; Docker initialization not confirmed.';
+    })(),
     endpoints: [...eps.values()].map((e) => ({
       method: e.method,
       host: e.host,
