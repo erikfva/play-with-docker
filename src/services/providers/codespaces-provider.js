@@ -378,15 +378,16 @@ class CodespacesProvider extends BaseProvider {
 
     const { token } = await loadCodespacesCredentials(credentialRef);
 
+    const initializedMessage = 'echo codespaces-vm-initialized';
     const cleanupScript = [
       'docker system prune -af',
       'docker volume prune -f',
       'docker builder prune -af',
       'sudo rm -rf /tmp/* /var/tmp/* 2>/dev/null || true',
-      'echo codespaces-vm-initialized'
+      initializedMessage
     ].join(' && ');
 
-    const result = await executeInCodespace(providerSessionId, cleanupScript, token, {
+    const result = await executeInCodespace(providerSessionId, initializedMessage, token, {
       timeout: INIT_TIMEOUT_MS
     });
 
