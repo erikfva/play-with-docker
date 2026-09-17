@@ -29,7 +29,8 @@ Delete options:
 Refresh / refresh-http options:
   --keep-existing       Skip deletion; only create a new codespace and stop it
   --no-wait-stop        Fire the stop action without waiting for GitHub status confirmation
-  --stop-delay <secs>   (refresh-http only) Wait N seconds after create before suspend. Default: 5
+  --provision-timeout <secs>  (refresh-http only) Max seconds to wait for active before stop. Default: 300 (0 to skip)
+  --poll-interval <secs>      (refresh-http only) Polling interval for the provision wait. Default: 10
   --debug               (refresh-http only) Save HTML responses to /tmp/cs-http-debug-*.html
 
 Refresh options (browser only):
@@ -42,7 +43,7 @@ Examples:
   node scripts/codespace-vm.js --credentials ./github-auth.json --action refresh
   node scripts/codespace-vm.js --credentials ./github-auth.json --action refresh --keep-existing
   node scripts/codespace-vm.js --credentials ./github-auth.json --action refresh-http
-  node scripts/codespace-vm.js --credentials ./github-auth.json --action refresh-http --stop-delay 5`);
+  node scripts/codespace-vm.js --credentials ./github-auth.json --action refresh-http --provision-timeout 300`);
 }
 
 function takeValue(argv, index, name) {
@@ -84,11 +85,17 @@ function parseArgs(argv) {
       args.passthrough.push(arg);
     } else if (arg === '--stop' || arg === '--no-wait' || arg === '--force' || arg === '--keep-existing' || arg === '--no-wait-stop' || arg === '--debug') {
       args.passthrough.push(arg);
-    } else if (arg === '--stop-delay') {
-      const val = takeValue(raw, i, '--stop-delay');
-      args.passthrough.push(`--stop-delay=${val}`);
+    } else if (arg === '--provision-timeout') {
+      const val = takeValue(raw, i, '--provision-timeout');
+      args.passthrough.push(`--provision-timeout=${val}`);
       i++;
-    } else if (arg.startsWith('--stop-delay=')) {
+    } else if (arg.startsWith('--provision-timeout=')) {
+      args.passthrough.push(arg);
+    } else if (arg === '--poll-interval') {
+      const val = takeValue(raw, i, '--poll-interval');
+      args.passthrough.push(`--poll-interval=${val}`);
+      i++;
+    } else if (arg.startsWith('--poll-interval=')) {
       args.passthrough.push(arg);
     } else {
       throw new Error(`Unknown argument: ${arg}`);

@@ -25,6 +25,21 @@ on:
         type: boolean
         required: false
         default: false
+      provision-timeout:
+        description: 'Max seconds to wait for the codespace to become active before stopping (0 to skip)'
+        type: string
+        required: false
+        default: '300'
+      poll-interval:
+        description: 'Polling interval in seconds for the provision wait'
+        type: string
+        required: false
+        default: '10'
+      debug:
+        description: 'Save HTML responses to /tmp/cs-http-debug-*.html'
+        type: boolean
+        required: false
+        default: false
       dry-run:
         description: 'List matched credentials without running the refresh'
         type: boolean
@@ -77,6 +92,9 @@ jobs:
 
           NAME="${INPUT_NAME:-}"
           KEEP_EXISTING="${INPUT_KEEP_EXISTING:-false}"
+          PROVISION_TIMEOUT="${INPUT_PROVISION_TIMEOUT:-300}"
+          POLL_INTERVAL="${INPUT_POLL_INTERVAL:-10}"
+          DEBUG="${INPUT_DEBUG:-false}"
           DRY_RUN="${INPUT_DRY_RUN:-false}"
 
           if [ -z "$NAME" ]; then
@@ -92,9 +110,12 @@ jobs:
             exit 1
           fi
 
-          # Build passthrough args
-          EXTRA_ARGS=""
+          # Build passthrough args (must init as array — scalar "" would pass an empty arg).
+          EXTRA_ARGS=()
           [ "$KEEP_EXISTING" = "true" ] && EXTRA_ARGS+=(--keep-existing)
+          [ -n "$PROVISION_TIMEOUT" ] && EXTRA_ARGS+=(--provision-timeout "$PROVISION_TIMEOUT")
+          [ -n "$POLL_INTERVAL" ] && EXTRA_ARGS+=(--poll-interval "$POLL_INTERVAL")
+          [ "$DEBUG" = "true" ] && EXTRA_ARGS+=(--debug)
 
           echo "Account:    $NAME"
           echo "Credential: $CRED_FILE"
@@ -113,4 +134,7 @@ jobs:
         env:
           INPUT_NAME: ${{ inputs.name }}
           INPUT_KEEP_EXISTING: ${{ inputs.keep-existing }}
+          INPUT_PROVISION_TIMEOUT: ${{ inputs.provision-timeout }}
+          INPUT_POLL_INTERVAL: ${{ inputs.poll-interval }}
+          INPUT_DEBUG: ${{ inputs.debug }}
           INPUT_DRY_RUN: ${{ inputs.dry-run }}
