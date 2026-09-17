@@ -26,15 +26,17 @@ Delete options:
   --target <name>       Codespace name or slug to delete
   --force               Stop an active codespace before deleting it
 
-Refresh / refresh-http options:
+Shared refresh options (refresh + refresh-http):
   --keep-existing       Skip deletion; only create a new codespace and stop it
-  --no-wait-stop        Fire the stop action without waiting for GitHub status confirmation
-  --provision-timeout <secs>  (refresh-http only) Max seconds to wait for active before stop. Default: 300 (0 to skip)
-  --poll-interval <secs>      (refresh-http only) Polling interval for the provision wait. Default: 10
-  --debug               (refresh-http only) Save HTML responses to /tmp/cs-http-debug-*.html
 
 Refresh options (browser only):
   --template <name>     Template to use for the new codespace. Default: blank
+  --no-wait-stop        Fire the stop action without waiting for GitHub status confirmation
+
+Refresh-http options (HTTP only):
+  --provision-timeout <secs>  Max seconds to wait for active before stop. Default: 300 (0 to skip)
+  --poll-interval <secs>      Polling interval for the provision wait. Default: 10
+  --debug               Save HTML responses to /tmp/cs-http-debug-*.html
 
 Examples:
   node scripts/codespace-vm.js --credentials ./github-auth.json --action create --stop
@@ -134,6 +136,28 @@ function scriptForAction(action) {
   throw new Error(`Unsupported action "${action}". Use create, delete, list, refresh, or refresh-http.`);
 }
 
+// Flags each action's child script actually accepts. The dispatcher collects
+// flags generically, so validate here to fail fast with a clear message
+// instead of the child's generic "Unknown argument" (exit 2).
+// NOTE: exact matches are compared with equality (not prefix), so --no-wait
+// never collides with --no-wait-stop.
+const ACTION_FLAGS = {
+  create: { exact: ['--stop', '--no-wait'], prefix: ['--template='] },
+  delete: { exact: ['--force'], prefix: [] },
+  list: { exact: [], prefix: [] },
+  refresh: { exact: ['--keep-existing', '--no-wait-stop'], prefix: ['--template='] },
+  'refresh-http': { exact: ['--keep-existing', '--debug'], prefix: ['--provision-timeout=', '--poll-interval='] },
+};
+
+function validateFlagsForAction(action, passthrough) {
+  const spec = ACTION_FLAGS[action];
+  for (const arg of passthrough) {
+    if (spec.exact.includes(arg)) continue;
+    if (spec.prefix.some((p) => arg.startsWith(p))) continue;
+    throw new Error(`--action ${action} does not support "${arg}"`);
+  }
+}
+
 function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
@@ -156,6 +180,10 @@ function main() {
   if (args.action === 'list' && scriptArgs.length > 0) {
     throw new Error('List does not accept create/delete/refresh options');
   }
+
+  // Validate the passthrough flags (not scriptArgs — for delete, scriptArgs[0]
+  // is the positional target, which is not a flag).
+  validateFlagsForAction(args.action, args.passthrough);
 
   const result = spawnSync(process.execPath, [path.join(__dirname, scriptName), ...scriptArgs], {
     stdio: 'inherit',

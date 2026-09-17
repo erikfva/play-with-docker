@@ -330,8 +330,8 @@ node scripts/codespace-vm.js --credentials /mnt/s3/github/vm-manager123/github.j
 | `--no-wait` | Create only. Do not wait for the Codespace to appear in `/codespaces`. |
 | `--target <name>` | Delete only. **Required.** Codespace name or slug to delete. |
 | `--force` | Delete only. Stop an active Codespace before deleting it. |
-| `--keep-existing` | Refresh only. Skip deletion; only create a new Codespace and stop it. |
-| `--no-wait-stop` | Refresh only. Fire the stop action without waiting for GitHub status confirmation (status reports `"stopping"`). |
+| `--keep-existing` | Refresh + `refresh-http`. Skip deletion; only create a new Codespace and stop it. |
+| `--no-wait-stop` | Refresh (browser) only. Fire the stop action without waiting for GitHub status confirmation (status reports `"stopping"`). Rejected with `refresh-http` (use `--provision-timeout` / `--poll-interval` instead). |
 | `--provision-timeout <secs>` | `refresh-http` only. Max seconds to wait for the codespace to become active before stopping. Default: `300`. Set to `0` to skip (not recommended). |
 | `--poll-interval <secs>` | `refresh-http` only. Polling interval for the provision wait. Default: `10`. |
 | `--debug` | `refresh-http` only. Save HTML responses to `/tmp/cs-http-debug-*.html`. |
