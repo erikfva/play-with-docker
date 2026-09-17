@@ -25,11 +25,6 @@ on:
         type: boolean
         required: false
         default: false
-      stop-delay:
-        description: 'Seconds to wait after create before suspend (default 5)'
-        type: string
-        required: false
-        default: '5'
       dry-run:
         description: 'List matched credentials without running the refresh'
         type: boolean
@@ -82,7 +77,6 @@ jobs:
 
           NAME="${INPUT_NAME:-}"
           KEEP_EXISTING="${INPUT_KEEP_EXISTING:-false}"
-          STOP_DELAY="${INPUT_STOP_DELAY:-5}"
           DRY_RUN="${INPUT_DRY_RUN:-false}"
 
           if [ -z "$NAME" ]; then
@@ -99,7 +93,7 @@ jobs:
           fi
 
           # Build passthrough args
-          EXTRA_ARGS=(--stop-delay "$STOP_DELAY")
+          EXTRA_ARGS=""
           [ "$KEEP_EXISTING" = "true" ] && EXTRA_ARGS+=(--keep-existing)
 
           echo "Account:    $NAME"
@@ -119,5 +113,4 @@ jobs:
         env:
           INPUT_NAME: ${{ inputs.name }}
           INPUT_KEEP_EXISTING: ${{ inputs.keep-existing }}
-          INPUT_STOP_DELAY: ${{ inputs.stop-delay }}
           INPUT_DRY_RUN: ${{ inputs.dry-run }}
