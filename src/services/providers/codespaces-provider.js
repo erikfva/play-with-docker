@@ -353,9 +353,7 @@ class CodespacesProvider extends BaseProvider {
   /**
    * Initialize a Codespaces VM after adoption. Runs the ESSENTIAL, fast cleanup
    * so the VM starts clean and the session can be treated as created: prune
-   * unused docker images, volumes, and build cache, and clear temp files. The
-   * slower teardown tasks (package cache, logs, home-directory reset) are
-   * handled in terminateSession so provision stays quick.
+   * unused docker images, volumes, and build cache, and clear temp files.
    *
    * This method is called fire-and-forget from createSession. It uses a 5-minute
    * timeout because `docker system prune -af` and `docker builder prune -af` can
@@ -751,11 +749,7 @@ class CodespacesProvider extends BaseProvider {
 
     const { token } = await loadCodespacesCredentials(credentialRef);
 
-    // Stop the VM FIRST so delete returns quickly and the VM ends STOPPED
-    // immediately (which also kills ttyd/cloudflared). Heavy cleanup runs in
-    // the BACKGROUND on the VM; the stop may interrupt it, which is acceptable
-    // for teardown since stopping the VM halts all its processes anyway.
-    //
+    // Stop the VM so it ends STOPPED immediately (which also kills ttyd/cloudflared).
     // If the account is suspended or the codespace is already gone (403/404),
     // treat it as already stopped — log a warning and continue so the route
     // can still mark the local row TERMINATED.
@@ -777,23 +771,11 @@ class CodespacesProvider extends BaseProvider {
       throw stopError;
     }
 
-    // Fire-and-forget cleanup: clear package caches/logs and reset the home
-    // dir so the VM is left as close to a fresh VM as possible before GitHub
-    // fully halts it. Best-effort — failures here must not fail the delete.
-    try {
-      const cleanupScript = [
-        'sudo apt-get clean 2>/dev/null || true',
-        'sudo journalctl --vacuum-size=20M >/dev/null 2>&1 || true',
-        'find /home/codespace -mindepth 1 -maxdepth 1 ! -name ".ssh" ! -name ".bashrc" ! -name ".bash_logout" ! -name ".profile" -exec rm -rf {} + 2>/dev/null || true',
-        'find /home/codespace/.[!.]* -maxdepth 0 -exec rm -rf {} + 2>/dev/null || true'
-      ].join(' && ');
-      await executeInCodespace(providerSessionId, `nohup bash -c '${cleanupScript}' >/dev/null 2>&1 &`, token, {
-        timeout: 15_000
-      });
-      console.log(`[Codespaces] Launched background cleanup for ${providerSessionId}`);
-    } catch (cleanupLaunchError) {
-      console.warn(`[Codespaces] Failed to launch background cleanup for ${providerSessionId}: ${cleanupLaunchError.message}`);
-    }
+    // Cleanup was previously attempted here via a fire-and-forget SSH command,
+    // but the VM is already stopping at this point so the SSH attempt almost
+    // always timed out (burning the full 15s timeout) before the stop completed.
+    // The stop itself kills all running processes, so no explicit cleanup is
+    // needed — GitHub will garbage-collect the VM on its own schedule.
   }
 
   /**
