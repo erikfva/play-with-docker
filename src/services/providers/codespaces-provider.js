@@ -106,17 +106,66 @@ function numOrNull(n) { return typeof n === 'number' && Number.isFinite(n) ? n :
 function round1(n) { return Math.round(n * 10) / 10; }
 function limitation(field, reason) { return { field, reason }; }
 function quotaEntry({ name = null, quotaUnit, quotaPeriod, usage = null, limit = null, remaining = null, extra = {} }) { return { ...(name ? { name } : {}), quotaUnit, quotaPeriod, usage, limit, remaining, ...extra }; }
+/**
+ * Aggregate month-to-date Codespaces usage from billing usageItems.
+ *
+ * SKU-driven classification (NOT product-gated): GitHub reports compute and
+ * storage rows with product "Codespaces" and skus like "Codespaces Compute" /
+ * "Codespaces Storage", but storage historically also appears under
+ * "Shared Storage" with a codespaces-flavoured sku — a strict
+ * `product === 'codespaces'` filter silently drops those rows (the bug that
+ * left storage usage permanently null for container-100). We therefore match
+ * primarily on normalized sku text and only use product as a tiebreak.
+ *
+ * Quantity semantics: `quantity` is GROSS consumption before included-plan
+ * discounts; `netQuantity` is net of included amounts. The quota entries we
+ * produce are gross usage vs the included limit, so gross `quantity` is the
+ * right field — `grossQuantity` (an alias present in some payloads) is
+ * accepted, `netQuantity` is explicitly NOT used.
+ *
+ * Unit awareness: compute rows may be metered in core-hours already, or in
+ * per-machine clock minutes/hours that must be scaled by core count. Storage
+ * is normalized to GB-months. Unknown units are treated as already-normalized
+ * and summed rather than dropped.
+ */
 function extractCodespacesUsage(body) {
   const items = Array.isArray(body?.usageItems) ? body.usageItems : Array.isArray(body) ? body : [];
-  const rows = items.filter((i) => String(i?.product || '').toLowerCase() === 'codespaces');
-  let computeHours = null; let storageGbMonths = null;
+  const rows = items.filter((i) => {
+    const text = `${i?.product || ''} ${i?.sku || ''}`.toLowerCase();
+    return text.includes('codespace') || text.includes('shared storage');
+  });
+  let computeCoreHours = null; let storageGbMonths = null;
   for (const row of rows) {
-    const qty = numOrNull(row.grossQuantity ?? row.usageQuantity ?? row.quantity);
-    const unit = String(row.unitType || row.unit || '').toLowerCase();
+    const qty = numOrNull(row.quantity ?? row.grossQuantity ?? row.usageQuantity);
     if (qty == null) continue;
-    if (unit.includes('hour') || unit.includes('core')) { computeHours = round1((computeHours ?? 0) + qty); } else if (unit.includes('gb') || unit.includes('storage')) { storageGbMonths = round1((storageGbMonths ?? 0) + qty); }
+    const sku = String(row.sku || '').toLowerCase();
+    const unit = String(row.unitType || row.unit || '').toLowerCase();
+    const isStorageSku = sku.includes('storage');
+    const isStorageUnit = unit.includes('gb') || unit.includes('storage') || unit.includes('byte');
+    const isComputeSku = !isStorageSku && (sku.includes('compute') || sku.includes('codespace'));
+    const isComputeUnit = unit.includes('hour') || unit.includes('core') || unit.includes('min');
+    if (isStorageSku || (isStorageUnit && !isComputeSku)) {
+      // Unit normalization to GB-months: "GB-months"/"gigabytes" are taken as
+      // GB-months directly; minutes/hours on a storage row are MB-min style
+      // prorations — without the sku's MB base we cannot convert, so keep raw.
+      storageGbMonths = round1((storageGbMonths ?? 0) + qty);
+    } else if (isComputeSku || isComputeUnit) {
+      // Per-machine rows report wall-clock minutes/hours for a specific core
+      // count ("2-core", "4-core" in the sku). Scale to core-hours so the sum
+      // is comparable to the 120/180 core-hour included limits.
+      const coreMatch = sku.match(/(\d+)\s*-?\s*core/i);
+      const cores = coreMatch ? Number.parseInt(coreMatch[1], 10) : 1;
+      let hours = qty;
+      if (unit.includes('min') && !unit.includes('month')) {
+        hours = qty / 60;
+      }
+      computeCoreHours = round1((computeCoreHours ?? 0) + hours * cores);
+    } else {
+      // Unknown unit on a codespaces row: count as compute rather than drop.
+      computeCoreHours = round1((computeCoreHours ?? 0) + qty);
+    }
   }
-  return { computeHours, storageGbMonths };
+  return { computeHours: computeCoreHours, storageGbMonths };
 }
 
 class CodespacesProvider extends BaseProvider {
@@ -173,20 +222,32 @@ class CodespacesProvider extends BaseProvider {
     const spaces = await githubClient.listCodespaces(loaded.token);
     const adoptable = Array.isArray(spaces) ? spaces.length : 0;
     let usage = null;
-    try { const body = await githubClient.getBillingUsageSummary(loaded.token, login); usage = extractCodespacesUsage(body); } catch (error) { limitations.push(limitation('quotas[0].usage', `Billing usage summary unavailable (${safeErrorCode(error)}). Requires "Plan" user read permission on the token and a personal account context.`)); }
+    let billingPeriod = null;
+    try { const body = await githubClient.getMonthlyCodespacesUsage(loaded.token, login); usage = extractCodespacesUsage(body); billingPeriod = body?.billingPeriod ?? null; } catch (error) { limitations.push(limitation('quotas[0].usage', `Billing usage unavailable (${safeErrorCode(error)}). Month-to-date usage is read from the user billing usage report; it requires the token to have billing read permission on a personal account context.`)); }
     const computeUsage = usage?.computeHours ?? null;
     const computeLimit = refLimits.computeCoreHoursPerMonth;
-    const computeRemain = computeUsage != null ? Math.max(0, computeLimit - computeUsage) : null;
-    quotas.push(quotaEntry({ name: 'Codespaces compute (core-hours)', quotaUnit: 'core-hours', quotaPeriod: 'month', usage: numOrNull(computeUsage), limit: computeLimit, remaining: numOrNull(computeRemain) }));
+    const computeRemain = computeUsage != null ? Math.max(0, round1(computeLimit - computeUsage)) : null;
+    const computeQuota = quotaEntry({ name: 'Codespaces compute (core-hours)', quotaUnit: 'core-hours', quotaPeriod: 'month', usage: numOrNull(computeUsage), limit: computeLimit, remaining: numOrNull(computeRemain), extra: { ...(billingPeriod ? { billingPeriod } : {}) } });
+    // Escalate before pushing: a zero remaining allowance is a definitive
+    // quota verdict, not a passing check.
+    const computeExhausted = computeQuota.remaining === 0 && computeQuota.limit != null;
+    quotas.push(computeQuota);
     limitations.push(limitation('quotas[0]', 'Included compute is metered in core-hours, not clock hours: consumption accrues at the codespace machine\'s core-count multiplier (a 4-core machine depletes the allowance twice as fast as a 2-core machine). Remaining core-hours overstate possible clock runtime unless divided by core count.'));
     const storageUsage = usage?.storageGbMonths ?? null;
     const storageLimit = refLimits.storageGbMonth;
-    const storageRemain = storageUsage != null ? Math.max(0, storageLimit - storageUsage) : null;
-    quotas.push(quotaEntry({ name: 'Codespaces storage (GB-month)', quotaUnit: 'GB-month', quotaPeriod: 'month', usage: numOrNull(storageUsage), limit: storageLimit, remaining: numOrNull(storageRemain) }));
+    const storageRemain = storageUsage != null ? Math.max(0, round1(storageLimit - storageUsage)) : null;
+    const storageQuota = quotaEntry({ name: 'Codespaces storage (GB-month)', quotaUnit: 'GB-month', quotaPeriod: 'month', usage: numOrNull(storageUsage), limit: storageLimit, remaining: numOrNull(storageRemain), extra: { ...(billingPeriod ? { billingPeriod } : {}) } });
+    const storageExhausted = storageQuota.remaining === 0 && storageQuota.limit != null;
+    quotas.push(storageQuota);
+    const quotaExhausted = computeExhausted || storageExhausted;
+    const details = { referenceLimits: refLimits, plan, adoptable, ...(billingPeriod ? { billingPeriod } : {}), ...(spaces[0]?.state != null ? { adoptedCodespaceState: spaces[0].state } : {}) };
     if (adoptable === 0) {
-      return { status: 'UNAVAILABLE', validated: true, quotas, limitations, expiresAt: null, details: { referenceLimits: refLimits, plan, adoptable: 0, reason: "This orchestrator uses adopt-don\'t-create flow. The GitHub account must already have at least one codespace before a session can be created." } };
+      return { status: 'UNAVAILABLE', validated: true, quotas, limitations, expiresAt: null, details: { ...details, adoptable: 0, reason: "This orchestrator uses adopt-don\'t-create flow. The GitHub account must already have at least one codespace before a session can be created." } };
     }
-    return { status: 'AVAILABLE', validated: true, quotas, limitations, expiresAt: null, details: { referenceLimits: refLimits, plan, adoptable, adoptedCodespaceState: spaces[0]?.state ?? null } };
+    if (quotaExhausted) {
+      return { status: 'QUOTA_EXHAUSTED', validated: true, quotas, limitations, expiresAt: null, details };
+    }
+    return { status: 'AVAILABLE', validated: true, quotas, limitations, expiresAt: null, details };
   }
 
   /**

@@ -273,8 +273,81 @@ async function validateToken(token) {
   return githubGet('/user', token);
 }
 
-async function getBillingUsageSummary(token, login) {
-  return githubGet(`/users/${encodeURIComponent(login)}/settings/billing/usage/summary`, token);
+/**
+ * Daily billing summary for one account + day.
+ * The endpoint REQUIRES year/month/day query params — it returns a single
+ * day's usage, never month-to-date. Callers that omit the date get today's
+ * UTC date (still a single day); use getMonthlyCodespacesUsage for the
+ * month-to-date total.
+ */
+async function getBillingUsageSummary(token, login, { year, month, day } = {}) {
+  const now = new Date();
+  const y = year ?? now.getUTCFullYear();
+  const m = month ?? now.getUTCMonth() + 1;
+  const d = day ?? now.getUTCDate();
+  const qs = `year=${encodeURIComponent(y)}&month=${encodeURIComponent(m)}&day=${encodeURIComponent(d)}`;
+  return githubGet(`/users/${encodeURIComponent(login)}/settings/billing/usage/summary?${qs}`, token);
+}
+
+/**
+ * Month-to-date billing report for one account.
+ * Unlike the daily summary above, this endpoint takes only year+month and
+ * returns the whole month in a single call.
+ */
+async function getBillingUsageReport(token, login, { year, month } = {}) {
+  const now = new Date();
+  const y = year ?? now.getUTCFullYear();
+  const m = month ?? now.getUTCMonth() + 1;
+  const qs = `year=${encodeURIComponent(y)}&month=${encodeURIComponent(m)}`;
+  return githubGet(`/users/${encodeURIComponent(login)}/settings/billing/usage?${qs}`, token);
+}
+
+/**
+ * Month-to-date usageItems for the current UTC month.
+ * Prefers the single-call usage report; falls back to aggregating one daily
+ * summary per day (1..today) when the report endpoint is unavailable for the
+ * token (e.g. older scopes returning 404). Returns `{ usageItems: [...] }`
+ * in both paths so callers parse a single shape.
+ */
+async function getMonthlyCodespacesUsage(token, login, { now = new Date(), concurrency = 4 } = {}) {
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth() + 1;
+
+  try {
+    const report = await getBillingUsageReport(token, login, { year, month });
+    const items = Array.isArray(report?.usageItems) ? report.usageItems : Array.isArray(report) ? report : [];
+    return { usageItems: items, billingSource: 'usage-report', billingPeriod: `${year}-${String(month).padStart(2, '0')}` };
+  } catch (reportError) {
+    // Only fall back when the report endpoint itself is unavailable for this
+    // token (404/403). Auth errors and rate limits must surface, not be
+    // hidden behind a partial daily aggregation.
+    const retriable = reportError?.statusCode === 404 || reportError?.statusCode === 403;
+    if (!retriable) {
+      throw reportError;
+    }
+    const lastError = reportError;
+
+    const today = now.getUTCDate();
+    const days = Array.from({ length: today }, (_, i) => i + 1);
+    const merged = [];
+    // Bounded concurrency so a 31-day month does not fan out 31 requests.
+    for (let i = 0; i < days.length; i += concurrency) {
+      const chunk = days.slice(i, i + concurrency);
+      const results = await Promise.all(
+        chunk.map((day) => getBillingUsageSummary(token, login, { year, month, day }).catch(() => null))
+      );
+      for (const body of results) {
+        if (!body) continue;
+        const items = Array.isArray(body?.usageItems) ? body.usageItems : Array.isArray(body) ? body : [];
+        merged.push(...items);
+      }
+    }
+
+    if (merged.length === 0) {
+      throw lastError;
+    }
+    return { usageItems: merged, billingSource: 'daily-summary-fallback', billingPeriod: `${year}-${String(month).padStart(2, '0')}` };
+  }
 }
 
 /**
@@ -310,5 +383,7 @@ module.exports = {
   stopCodespace,
   validateToken,
   getBillingUsageSummary,
+  getBillingUsageReport,
+  getMonthlyCodespacesUsage,
   invalidateCodespace
 };
