@@ -1,0 +1,117 @@
+name: Delete All/One Inactive Codespaces
+
+# Queries the backend for all VPS rows belonging to the `codespaces` provider,
+# then runs scripts/delete-inactive-codespaces-http.js for each account to
+# delete its stopped (inactive) codespaces via direct GitHub Web UI HTTP
+# requests. No Playwright browser required — only session cookies from the
+# storageState JSON files stored in S3.
+#
+# Active codespaces (suspend form present in HTML) are always skipped.
+# VPS rows without a matching credential file in S3 are skipped (not failed).
+#
+# Required repo secrets:
+#   SERVER_TOKEN           orchestrator API token
+#   PWD_API_URL            orchestrator base URL (or scheduled url|cron;... list)
+#   S3_ACCESS_KEY_ID       iDrive E2 access key
+#   S3_SECRET_ACCESS_KEY   iDrive E2 secret key
+#   S3_ENDPOINT            e.g. https://s3.us-southeast-1.idrivee2.com
+#   S3_REGION              e.g. us-southeast-1
+#   S3_BUCKET              e.g. play-with-docker
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: 'Only VPS whose name contains this substring (leave blank for all)'
+        type: string
+        required: false
+      vps-id:
+        description: 'Single VPS ID to target (optional)'
+        type: string
+        required: false
+      delay:
+        description: 'Seconds to wait between consecutive delete requests per account (default: 1)'
+        type: string
+        required: false
+        default: '1'
+      timeout-minutes:
+        description: 'Per-VPS timeout in minutes (default: 5)'
+        type: string
+        required: false
+        default: '5'
+      debug:
+        description: 'Save HTML responses to /tmp/cs-delete-debug-*.html'
+        type: boolean
+        required: false
+        default: false
+      dry-run:
+        description: 'List inactive codespaces per account without deleting them'
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: delete-inactive-codespaces-all
+  cancel-in-progress: true
+
+jobs:
+  delete-inactive-codespaces-all:
+    name: Delete Inactive Codespaces (All VPS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      SERVER_TOKEN: ${{ secrets.SERVER_TOKEN }}
+      PWD_API_URL: ${{ secrets.PWD_API_URL }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download all GitHub credential files from S3
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.S3_REGION }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+        run: |
+          set -euo pipefail
+          mkdir -p ./github-credentials
+          aws configure set default.s3.addressing_style path
+          aws s3 sync --endpoint-url "$S3_ENDPOINT" --no-progress \
+            "s3://${S3_BUCKET}/github/" ./github-credentials/
+          count=$(find ./github-credentials -name 'github.json' | wc -l | tr -d ' ')
+          echo "Downloaded credentials for $count account(s)."
+
+      - name: Delete inactive codespaces for all VPS
+        run: |
+          set -euo pipefail
+
+          ARGS=(--credentials-dir ./github-credentials)
+
+          [ -n "${INPUT_NAME:-}" ]             && ARGS+=(--name "$INPUT_NAME")
+          [ -n "${INPUT_VPS_ID:-}" ]           && ARGS+=(--id "$INPUT_VPS_ID")
+          [ -n "${INPUT_DELAY:-}" ]            && ARGS+=(--delay "$INPUT_DELAY")
+          [ -n "${INPUT_TIMEOUT_MINUTES:-}" ]  && ARGS+=(--timeout-minutes "$INPUT_TIMEOUT_MINUTES")
+          [ "${INPUT_DEBUG:-false}" = "true" ] && ARGS+=(--debug)
+          [ "${INPUT_DRY_RUN:-false}" = "true" ] && ARGS+=(--dry-run)
+
+          node scripts/delete-inactive-codespaces-all.js "${ARGS[@]}"
+        shell: bash
+        env:
+          INPUT_NAME: ${{ inputs.name }}
+          INPUT_VPS_ID: ${{ inputs.vps-id }}
+          INPUT_DELAY: ${{ inputs.delay }}
+          INPUT_TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
+          INPUT_DEBUG: ${{ inputs.debug }}
+          INPUT_DRY_RUN: ${{ inputs.dry-run }}
