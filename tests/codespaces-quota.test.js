@@ -85,7 +85,14 @@ function loadProviderWithBilling({ billingBody, plan = 'free', codespaces = [{ n
   });
 
   const CodespacesProvider = require('../src/services/providers/codespaces-provider');
-  return { provider: new CodespacesProvider(), calls };
+  const provider = new CodespacesProvider();
+  // Drop the stub entries: later tests in this file require the real modules
+  // (the provider already captured the stub references at load time).
+  delete require.cache[dbPath];
+  delete require.cache[loaderPath];
+  delete require.cache[clientPath];
+  delete require.cache[executorPath];
+  return { provider, calls };
 }
 
 test('quota: aggregates 2-core compute to core-hours and reads storage under Shared Storage', async () => {
@@ -205,6 +212,35 @@ test('client: falls back to per-day summaries when the report endpoint 404s', as
     delete require.cache[clientPath];
   }
   assert.equal(seen.filter((u) => u.includes('/settings/billing/usage/summary?')).length, 3);
+});
+
+test('register: details carry codespace existence, count and inventory', async () => {
+  const { provider } = loadProviderWithBilling({
+    billingBody: usageReportFixture(),
+    codespaces: [
+      { name: 'cs-1', display_name: 'dev box', state: 'Available', machine: { name: 'standardLinux' }, last_used_at: '2026-10-01T00:00:00Z' },
+      { name: 'cs-2', state: 'Shutdown' }
+    ]
+  });
+  const result = await provider.getCredentialStatus({ token: 'ghp_test' });
+
+  assert.equal(result.details.hasCodespaces, true);
+  assert.equal(result.details.codespaceCount, 2);
+  assert.equal(result.details.adoptable, 2); // kept for backward compatibility
+  assert.deepEqual(result.details.codespaces, [
+    { name: 'cs-1', displayName: 'dev box', state: 'Available', machine: 'standardLinux', lastUsedAt: '2026-10-01T00:00:00Z' },
+    { name: 'cs-2', displayName: 'cs-2', state: 'Shutdown' }
+  ]);
+});
+
+test('register: no codespaces yields hasCodespaces=false, empty inventory, UNAVAILABLE', async () => {
+  const { provider } = loadProviderWithBilling({ billingBody: usageReportFixture(), codespaces: [] });
+  const result = await provider.getCredentialStatus({ token: 'ghp_test' });
+
+  assert.equal(result.status, 'UNAVAILABLE');
+  assert.equal(result.details.hasCodespaces, false);
+  assert.equal(result.details.codespaceCount, 0);
+  assert.deepEqual(result.details.codespaces, []);
 });
 
 test('client: daily summary requires year/month/day params', async () => {

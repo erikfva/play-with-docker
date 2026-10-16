@@ -105,6 +105,24 @@ function isTerminalAuthError(error) { return ( error?.code === 'CODESPACES_TOKEN
 function numOrNull(n) { return typeof n === 'number' && Number.isFinite(n) ? n : null; }
 function round1(n) { return Math.round(n * 10) / 10; }
 function limitation(field, reason) { return { field, reason }; }
+/**
+ * Summarize one GitHub codespace object for the persisted credential register.
+ * Keeps only inventory-relevant fields (no tokens, no URLs); nulls are dropped
+ * so the envelope stays compact when GitHub omits optional properties.
+ */
+function summarizeCodespace(space) {
+  if (!space || typeof space !== 'object') return null;
+  const machine = space.machine && typeof space.machine === 'object' ? space.machine : {};
+  const summary = {
+    name: space.name ?? null,
+    displayName: space.display_name ?? space.name ?? null,
+    state: space.state ?? null,
+    machine: machine.name ?? null,
+    lastUsedAt: space.last_used_at ?? null
+  };
+  Object.keys(summary).forEach((key) => { if (summary[key] == null) delete summary[key]; });
+  return summary;
+}
 function quotaEntry({ name = null, quotaUnit, quotaPeriod, usage = null, limit = null, remaining = null, extra = {} }) { return { ...(name ? { name } : {}), quotaUnit, quotaPeriod, usage, limit, remaining, ...extra }; }
 /**
  * Aggregate month-to-date Codespaces usage from billing usageItems.
@@ -220,7 +238,10 @@ class CodespacesProvider extends BaseProvider {
     let refLimits;
     if (plan === 'pro') { refLimits = { computeCoreHoursPerMonth: 180, storageGbMonth: 20 }; } else { refLimits = { computeCoreHoursPerMonth: 120, storageGbMonth: 15 }; if (plan !== 'free') { limitations.push(limitation('details.referenceLimits', `Account plan is '${plan ?? 'unknown'}'. Reference limits shown are for GitHub Free personal accounts. Organization/enterprise accounts have no included Codespaces quota by default.`)); } }
     const spaces = await githubClient.listCodespaces(loaded.token);
-    const adoptable = Array.isArray(spaces) ? spaces.length : 0;
+    const spaceList = Array.isArray(spaces) ? spaces : [];
+    const adoptable = spaceList.length;
+    const hasCodespaces = adoptable > 0;
+    const codespaces = spaceList.map(summarizeCodespace).filter(Boolean);
     let usage = null;
     let billingPeriod = null;
     try { const body = await githubClient.getMonthlyCodespacesUsage(loaded.token, login); usage = extractCodespacesUsage(body); billingPeriod = body?.billingPeriod ?? null; } catch (error) { limitations.push(limitation('quotas[0].usage', `Billing usage unavailable (${safeErrorCode(error)}). Month-to-date usage is read from the user billing usage report; it requires the token to have billing read permission on a personal account context.`)); }
@@ -240,9 +261,18 @@ class CodespacesProvider extends BaseProvider {
     const storageExhausted = storageQuota.remaining === 0 && storageQuota.limit != null;
     quotas.push(storageQuota);
     const quotaExhausted = computeExhausted || storageExhausted;
-    const details = { referenceLimits: refLimits, plan, adoptable, ...(billingPeriod ? { billingPeriod } : {}), ...(spaces[0]?.state != null ? { adoptedCodespaceState: spaces[0].state } : {}) };
-    if (adoptable === 0) {
-      return { status: 'UNAVAILABLE', validated: true, quotas, limitations, expiresAt: null, details: { ...details, adoptable: 0, reason: "This orchestrator uses adopt-don\'t-create flow. The GitHub account must already have at least one codespace before a session can be created." } };
+    const details = {
+      referenceLimits: refLimits,
+      plan,
+      hasCodespaces,
+      codespaceCount: adoptable,
+      adoptable,
+      codespaces,
+      ...(billingPeriod ? { billingPeriod } : {}),
+      ...(spaceList[0]?.state != null ? { adoptedCodespaceState: spaceList[0].state } : {})
+    };
+    if (!hasCodespaces) {
+      return { status: 'UNAVAILABLE', validated: true, quotas, limitations, expiresAt: null, details: { ...details, reason: "This orchestrator uses adopt-don\'t-create flow. The GitHub account must already have at least one codespace before a session can be created." } };
     }
     if (quotaExhausted) {
       return { status: 'QUOTA_EXHAUSTED', validated: true, quotas, limitations, expiresAt: null, details };
