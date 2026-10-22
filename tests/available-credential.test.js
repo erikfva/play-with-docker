@@ -78,6 +78,7 @@ test('listInUseKeys excludes terminal session statuses', async () => {
 
   assert.equal(fingerprints.has('sha256:busy'), true);
   const sql = calls.all[0].sql;
+  assert.match(sql, /SELECT DISTINCT credentialFingerprint AS "inUseKey"/);
   assert.ok(/NOT IN/.test(sql));
   assert.deepEqual(calls.all[0].params, ['codespaces', 'TERMINATED', 'FAILED']);
 });
@@ -194,7 +195,10 @@ test('extractCoreHoursRemaining derives remaining from limit - usage', () => {
 });
 
 test('extractCoreHoursRemaining ignores non-compute quotas', () => {
-  const quotas = [{ name: 'Codespaces storage (GB-month)', quotaUnit: 'GB-month', limit: 15, usage: 0, remaining: 15 }];
+  const quotas = [
+    { name: 'Codespaces storage (GB-month)', quotaUnit: 'GB-month', limit: 15, usage: 0, remaining: 15 },
+    { name: 'Codespaces compute (minutes)', quotaUnit: 'minutes', limit: 6000, usage: 0, remaining: 6000 }
+  ];
   assert.equal(extractCoreHoursRemaining(quotas), null);
   assert.equal(extractCoreHoursRemaining(null), null);
   assert.equal(extractCoreHoursRemaining([]), null);
@@ -348,10 +352,34 @@ test('codespaces ranking treats a credential without a compute quota as zero cap
   assert.equal(result.credentialRef, 'codespaces/withquota.json');
 });
 
+test('codespaces ranking ignores compute quotas not metered in core-hours', async () => {
+  const result = await getAvailableCredential('codespaces', {
+    candidates: [
+      candidate({
+        id: '1', provider: 'codespaces', credentialRef: 'codespaces/minutes.json',
+        credentialFingerprint: 'sha256:minutes',
+        status: JSON.stringify({
+          status: 'AVAILABLE',
+          quotas: [{ name: 'Codespaces compute (minutes)', quotaUnit: 'minutes', remaining: 6000 }]
+        })
+      }),
+      candidate({
+        id: '2', provider: 'codespaces', credentialRef: 'codespaces/core-hours.json',
+        credentialFingerprint: 'sha256:core-hours',
+        status: JSON.stringify({ status: 'AVAILABLE', quotas: [computeQuota(5)] })
+      })
+    ],
+    inUseKeys: []
+  });
+
+  assert.equal(result.credentialRef, 'codespaces/core-hours.json');
+  assert.equal(result.coreHoursRemaining, 5);
+});
+
 // ---------------------------------------------------------------------------
 // GCS: every provider enforces in-use detection; GCS keys off credentialRef
 // ---------------------------------------------------------------------------
-test('gcs excludes a credential because a session uses it', async () => {
+test('gcs excludes a credential that backs a live session', async () => {
   const result = await getAvailableCredential('gcs', {
     candidates: [
       candidate({ id: '1', provider: 'gcs', credentialRef: 'gcloud/a.json', credentialFingerprint: 'sha256:a' }),
@@ -409,6 +437,25 @@ test('all candidates in use raises NO_AVAILABLE_CREDENTIAL', async () => {
     }),
     (error) => {
       assert.equal(error.code, NO_AVAILABLE_CREDENTIAL);
+      assert.equal(error.details.reason, ALL_IN_USE_OR_UNUSABLE);
+      assert.equal(error.details.inUse, 2);
+      return true;
+    }
+  );
+});
+
+test('all in-use GCS candidates raise NO_AVAILABLE_CREDENTIAL', async () => {
+  await assert.rejects(
+    () => getAvailableCredential('gcs', {
+      candidates: [
+        candidate({ id: '1', provider: 'gcs', credentialRef: 'gcloud/one.json' }),
+        candidate({ id: '2', provider: 'gcs', credentialRef: 'gcloud/two.json' })
+      ],
+      inUseKeys: ['gcloud/one.json', 'gcloud/two.json']
+    }),
+    (error) => {
+      assert.equal(error.code, NO_AVAILABLE_CREDENTIAL);
+      assert.equal(error.statusCode, 409);
       assert.equal(error.details.reason, ALL_IN_USE_OR_UNUSABLE);
       assert.equal(error.details.inUse, 2);
       return true;

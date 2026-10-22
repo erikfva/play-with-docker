@@ -49,6 +49,8 @@ const LIMITED_STATUS = 'LIMITED';
  * Key on the sessions table that identifies the credential a session consumes.
  * Codesandbox/Codespaces persist a credential fingerprint; GCS does not, so its
  * sessions are matched on the stored credential reference (the registry name).
+ * Pre-LAB-010 GCS sessions may store a credential file path instead, which will
+ * not match a registry name and therefore will not be detected as in use.
  * Every provider is subject to the in-use rule.
  */
 const IN_USE_KEY = {

@@ -164,7 +164,8 @@ Returns the single best credential that can be used right now for a provider.
 - **Errors:** `400 VPS_INVALID_PARAM` (missing or unsupported `provider` — the same code the other
   `GET /api/v1/vps` routes use for a bad query parameter), `409 NO_AVAILABLE_CREDENTIAL` (no usable
   credential for the provider; the `details` object reports `provider`, `reason`, `considered`, `inUse`
-  and `unusable` counts).
+  and `unusable` counts). `reason` is `NO_REGISTERED_CREDENTIALS` when the registry has no candidates,
+  or `ALL_IN_USE_OR_UNUSABLE` when candidates exist but none are eligible.
 
 ---
 
