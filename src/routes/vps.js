@@ -12,6 +12,7 @@ const {
 } = require('../services/vps-credential-utils');
 const { ProviderError } = require('../services/errors/provider-errors');
 const { refreshVpsStatus, refreshAllVpsStatuses, mergeCodesandboxBilling } = require('../services/vps-status-service');
+const { getAvailableCredential } = require('../services/available-credential-service');
 
 const router = express.Router();
 
@@ -256,6 +257,51 @@ router.get('/', async (req, res) => {
     return res.json({ vps: rows, total, limit: limitVal, offset: offsetVal });
   } catch (error) {
     return mapErrorToHttp(res, error, 'Failed to list VPS records');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/vps/available-credential?provider=… — pick the best usable
+// credential for a provider. Must be declared before the /:id routes so the
+// literal path is not swallowed by the parameterised one.
+//
+// Selection rules live in services/available-credential-service.js:
+//   - credentials backing a live session are skipped,
+//   - INVALID / EXPIRED / QUOTA_EXHAUSTED / UNAVAILABLE credentials are skipped,
+//   - default providers: first eligible credential in registration order,
+//   - codespaces: eligible credential with the most remaining core-hours.
+//
+// Responds 400 for an unknown/missing provider and 409 (NO_AVAILABLE_CREDENTIAL)
+// when no credential is usable.
+// ---------------------------------------------------------------------------
+router.get('/available-credential', async (req, res) => {
+  try {
+    const { provider } = req.query;
+
+    if (provider === undefined || provider === null || provider === '') {
+      throw new ProviderError(
+        'Query parameter "provider" is required',
+        { code: 'VPS_INVALID_PARAM', statusCode: 400 }
+      );
+    }
+
+    // Provider validity is validated here with the shared helper so the error
+    // code matches the other GET routes of this router (VPS_INVALID_PARAM).
+    // The service re-validates and would throw VPS_INVALID_PROVIDER when
+    // called directly.
+    try {
+      validateProvider(String(provider));
+    } catch {
+      throw new ProviderError(
+        `Invalid provider: "${provider}". Must be one of: gcs, codesandbox, codespaces`,
+        { code: 'VPS_INVALID_PARAM', statusCode: 400 }
+      );
+    }
+
+    const selection = await getAvailableCredential(String(provider));
+    return res.json(selection);
+  } catch (error) {
+    return mapErrorToHttp(res, error, 'Failed to select an available credential');
   }
 });
 
