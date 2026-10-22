@@ -6,10 +6,14 @@ const { getProvider } = require('./provider-factory');
 const { ProviderError } = require('./errors/provider-errors');
 const { mapWithConcurrency } = require('../utils/async-helpers');
 const { getOrCheckStatus, putCachedStatus, cacheKey } = require('./status-cache');
+const {
+  buildSessionActiveExistsSql,
+  IN_USE_KEY,
+  TERMINAL_SESSION_STATUSES,
+  DEFAULT_TERMINAL_SESSION_STATUSES
+} = require('./session-in-use');
 
 const STATUS_TTL_MINUTES = parseInt(process.env.VPS_STATUS_TTL_MINUTES, 10) || 5;
-
-function limitation(field, reason) { return { field, reason }; }
 
 /** Matches the "Credits (billing cycle)" quota written by mergeCodesandboxBilling. */
 function isCreditsQuota(q) {
@@ -94,17 +98,24 @@ function buildUnknownEntryForVps(provider, name, fingerprint, error) {
   };
 }
 
-async function countActiveSessionsForVps(provider, fingerprint) {
-  if (provider === 'gcs') return null;
-  if (!fingerprint) return 0;
-  const TERMINAL_SETS = {
-    codesandbox: ['TERMINATED', 'DELETED', 'FAILED'],
-    codespaces: ['TERMINATED', 'FAILED']
-  };
-  const terminalStatuses = TERMINAL_SETS[provider] || ['TERMINATED', 'DELETED', 'FAILED'];
+/**
+ * Count non-terminal sessions consuming this credential.
+ *
+ * The identity column is provider-specific (see session-in-use.js): GCS stores
+ * the registry name in `credentialRef` and leaves `credentialFingerprint` NULL,
+ * so the caller must pass that name as `credentialRef` for GCS. Matching on the
+ * fingerprint alone made every GCS credential look unused.
+ */
+async function countActiveSessionsForVps(provider, credentialRef, fingerprint) {
+  const keyColumn = IN_USE_KEY[provider] || 'credentialFingerprint';
+  const identity = keyColumn === 'credentialRef' ? credentialRef : fingerprint;
+  if (!identity) return 0;
+
+  const terminalStatuses = TERMINAL_SESSION_STATUSES[provider]
+    || DEFAULT_TERMINAL_SESSION_STATUSES;
   const placeholders = terminalStatuses.map(() => '?').join(', ');
-  const sql = `SELECT COUNT(*)::int AS count FROM sessions WHERE provider = ? AND credentialFingerprint = ? AND COALESCE(status, '') NOT IN (${placeholders})`;
-  const row = await db.get(sql, [provider, fingerprint, ...terminalStatuses]);
+  const sql = `SELECT COUNT(*)::int AS count FROM sessions WHERE provider = ? AND ${keyColumn} = ? AND COALESCE(status, '') NOT IN (${placeholders})`;
+  const row = await db.get(sql, [provider, identity, ...terminalStatuses]);
   return row?.count ?? 0;
 }
 
@@ -119,18 +130,17 @@ async function resolveCheckerResult(providerName, loaded) {
 }
 
 async function finalizeWithLocalState(providerName, rawLoaded, checkerResult) {
-  const ENFORCES = new Set(['codesandbox', 'codespaces']);
   const fp = rawLoaded.credentialFingerprint || null;
+  const credentialRef = rawLoaded.credentialRef || rawLoaded.name || null;
   const PRECEDENCE = ['INVALID', 'EXPIRED', 'QUOTA_EXHAUSTED', 'UNAVAILABLE', 'LIMITED', 'AVAILABLE'];
   function resolveStatus(cands) { return PRECEDENCE.find(s => cands.includes(s)) || 'UNKNOWN'; }
 
-  const localCount = await countActiveSessionsForVps(providerName, fp);
+  const localCount = await countActiveSessionsForVps(providerName, credentialRef, fp);
   const candidates = [checkerResult.status];
-  if (localCount > 0 && ENFORCES.has(providerName)) candidates.push('LIMITED');
+  // Every provider whose sessions can be tied back to a registry row gets
+  // LIMITED while in use — including GCS, which is matched on credentialRef.
+  if (localCount > 0) candidates.push('LIMITED');
   const limitations = [...(checkerResult.limitations ?? [])];
-  if (providerName === 'gcs') {
-    limitations.push(limitation('details.localActiveSessions', 'Local active-session count is unavailable for GCS because existing session rows do not persist a canonical credential identity. GCS has no credential uniqueness constraint, so this does not affect availability.'));
-  }
   const entry = {
     provider: providerName,
     credential: rawLoaded.credentialRef || rawLoaded.name || null,
@@ -165,12 +175,7 @@ async function persistVpsStatus(vpsId, entry, { touchCheckedAt = true } = {}) {
       u.statuscheckedat       AS "statusCheckedAt",
       u.createdat             AS "createdAt",
       u.updatedat             AS "updatedAt",
-      EXISTS (
-        SELECT 1 FROM sessions s
-        WHERE s.credentialfingerprint = u.credentialfingerprint
-          AND s.provider = u.provider
-          AND COALESCE(s.status, '') NOT IN ('TERMINATED', 'DELETED', 'FAILED')
-      ) AS "sessionActive"
+      ${buildSessionActiveExistsSql('u')} AS "sessionActive"
     FROM updated u`,
     [json, vpsId]
   );
@@ -209,12 +214,7 @@ async function refreshVpsStatus(vpsId, { force = false } = {}) {
         v.statuscheckedat       AS "statusCheckedAt",
         v.createdat             AS "createdAt",
         v.updatedat             AS "updatedAt",
-        EXISTS (
-          SELECT 1 FROM sessions s
-          WHERE s.credentialfingerprint = v.credentialfingerprint
-            AND s.provider = v.provider
-            AND COALESCE(s.status, '') NOT IN ('TERMINATED', 'DELETED', 'FAILED')
-        ) AS "sessionActive"
+        ${buildSessionActiveExistsSql('v')} AS "sessionActive"
       FROM vps v WHERE v.id = ?`,
       [vpsId]
     );

@@ -7,6 +7,11 @@ const { listAvailableCredentials } = require('./credentials-lister');
 const { cacheKey, getOrCheckStatus } = require('./status-cache');
 const { initGoogleCredentialsFromS3IfNeeded } = require('./google-credentials-loader');
 const { mapWithConcurrency } = require('../utils/async-helpers');
+const {
+  IN_USE_KEY,
+  TERMINAL_SESSION_STATUSES,
+  DEFAULT_TERMINAL_SESSION_STATUSES
+} = require('./session-in-use');
 const { loadCodeSandboxCredentials } = require('./providers/codesandbox/credentials-loader');
 const { loadCodespacesCredentials } = require('./providers/codespaces/credentials-loader');
 
@@ -15,8 +20,6 @@ const PROVIDER_PREFIXES = {
   codesandbox: 'codesandbox',
   codespaces: 'codespaces'
 };
-
-const ENFORCES_TOKEN_UNIQUENESS = new Set(['codesandbox', 'codespaces']);
 
 const LOADERS = {
   gcs: async (ref) => {
@@ -74,23 +77,21 @@ function resolveStatus(candidates) {
   return PRECEDENCE.find((s) => candidates.includes(s)) || 'UNKNOWN';
 }
 
-async function countActiveSessions(dbInstance, provider, fingerprint) {
-  if (provider === 'gcs') return null;
-  if (!fingerprint) return 0;
+async function countActiveSessions(dbInstance, provider, credentialRef, fingerprint) {
+  const keyColumn = IN_USE_KEY[provider] || 'credentialFingerprint';
+  const identity = keyColumn === 'credentialRef' ? credentialRef : fingerprint;
+  if (!identity) return 0;
 
-  const TERMINAL_SETS = {
-    codesandbox: ['TERMINATED', 'DELETED', 'FAILED'],
-    codespaces: ['TERMINATED', 'FAILED']
-  };
-  const terminalStatuses = TERMINAL_SETS[provider] || ['TERMINATED', 'DELETED', 'FAILED'];
+  const terminalStatuses = TERMINAL_SESSION_STATUSES[provider]
+    || DEFAULT_TERMINAL_SESSION_STATUSES;
   const placeholders = terminalStatuses.map(() => '?').join(', ');
   const sql = `
     SELECT COUNT(*)::int AS count FROM sessions
     WHERE provider = ?
-      AND credentialFingerprint = ?
+      AND ${keyColumn} = ?
       AND COALESCE(status, '') NOT IN (${placeholders})
   `;
-  const row = await dbInstance.get(sql, [provider, fingerprint, ...terminalStatuses]);
+  const row = await dbInstance.get(sql, [provider, identity, ...terminalStatuses]);
   return row?.count ?? 0;
 }
 
@@ -115,21 +116,16 @@ async function finalizeEntry(providerName, raw, checkerResult) {
   const localCount = await countActiveSessions(
     db,
     providerName,
+    raw.credentialRef,
     raw.credentialFingerprint
   );
 
   const candidates = [checkerResult.status];
-  if (localCount > 0 && ENFORCES_TOKEN_UNIQUENESS.has(providerName)) {
+  if (localCount > 0) {
     candidates.push('LIMITED');
   }
 
   const limitations = [...(checkerResult.limitations ?? [])];
-  if (providerName === 'gcs') {
-    limitations.push(limitation(
-      'details.localActiveSessions',
-      'Local active-session count is unavailable for GCS because existing session rows do not persist a canonical credential identity. GCS has no credential uniqueness constraint, so this does not affect availability.'
-    ));
-  }
 
   const entry = buildEntry({
     provider: providerName,

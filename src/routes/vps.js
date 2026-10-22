@@ -13,6 +13,7 @@ const {
 const { ProviderError } = require('../services/errors/provider-errors');
 const { refreshVpsStatus, refreshAllVpsStatuses, mergeCodesandboxBilling } = require('../services/vps-status-service');
 const { getAvailableCredential } = require('../services/available-credential-service');
+const { buildSessionActiveExistsSql } = require('../services/session-in-use');
 
 const router = express.Router();
 
@@ -30,13 +31,10 @@ const VALID_SORT_ORDERS = new Set(['asc', 'desc']);
 
 // Correlated EXISTS sub-query used in both the SELECT list and the
 // sessionActive WHERE filter. Contains no ? placeholders so it never
-// disturbs convertSql's $n index rewriting.
-const SESSION_ACTIVE_SUBQUERY = `EXISTS (
-    SELECT 1 FROM sessions s
-    WHERE s.credentialfingerprint = v.credentialfingerprint
-      AND s.provider              = v.provider
-      AND COALESCE(s.status, '') NOT IN ('TERMINATED', 'DELETED', 'FAILED')
-  )`;
+// disturbs convertSql's $n index rewriting. Built by session-in-use.js so the
+// provider-specific credential identity (GCS uses credentialRef, the token
+// providers use the fingerprint) stays in one place.
+const SESSION_ACTIVE_SUBQUERY = buildSessionActiveExistsSql('v');
 
 // ---------------------------------------------------------------------------
 // Safe column list — credentialcontent is intentionally excluded from all
