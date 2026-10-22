@@ -142,7 +142,30 @@ Protected routes require one of the following authorization mechanisms:
 | **GET** | `/api/v1/sessions/google-credentials` | List available credential files for GCS. | None. |
 | **GET** | `/api/v1/sessions/codesandbox-credentials` | List available credentials for CodeSandbox. | None. |
 | **GET** | `/api/v1/sessions/codespaces-credentials` | List available credentials for Codespaces. | None. |
+| **GET** | `/api/v1/vps/available-credential` | Select the best usable credential for a provider. | Query: `?provider=gcs\|codesandbox\|codespaces`. |
 | **GET** | `/health` | Server status check (no token required). | None. |
+
+### VPS Credential Selection (`GET /api/v1/vps/available-credential`)
+
+Returns the single best credential that can be used right now for a provider.
+
+- **Source of truth:** the `vps` registry table (LAB-010) only. File-backed credentials are never
+  considered for selection, even if the registry has no rows for that provider.
+- **Exclusions:** credentials whose persisted status is `INVALID`, `EXPIRED`, `QUOTA_EXHAUSTED` or
+  `UNAVAILABLE`; and any credential currently backing a non-terminal session. GCS is also enforced
+  by stored `credentialRef` matching, so an in-use GCS credential is skipped.
+- **Strategy:** `first-available` (registration order) for GCS/CodeSandbox; `max-core-hours` for
+  Codespaces — the eligible credential with the most remaining compute core-hours wins, because
+  first-available would routinely hand out an account that is about to run out.
+- **Response:** `{ provider, strategy, credentialRef, credential, credentialFingerprint, status,
+  statusCheckedAt, inUse, inUseKnown, coreHoursRemaining }`. `inUseKnown` is `true` for all
+  supported providers because the session-key match is explicit (`credentialRef` for GCS, fingerprint
+  for CodeSandbox/Codespaces).
+- **Errors:** `400 VPS_INVALID_PARAM` (missing or unsupported `provider` — the same code the other
+  `GET /api/v1/vps` routes use for a bad query parameter), `409 NO_AVAILABLE_CREDENTIAL` (no usable
+  credential for the provider; the `details` object reports `provider`, `reason`, `considered`, `inUse`
+  and `unusable` counts). `reason` is `NO_REGISTERED_CREDENTIALS` when the registry has no candidates,
+  or `ALL_IN_USE_OR_UNUSABLE` when candidates exist but none are eligible.
 
 ---
 
