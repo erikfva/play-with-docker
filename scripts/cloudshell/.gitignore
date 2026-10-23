@@ -1,0 +1,5 @@
+# Tokens, the generated SSH keypair, and the relay cookie live here.
+# Never commit these.
+.state/
+*.pyc
+__pycache__/

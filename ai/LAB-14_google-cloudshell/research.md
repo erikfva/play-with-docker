@@ -1,15 +1,49 @@
 # LAB-14 — Google Cloud Shell from a saved browser credential
 
-**Status:** Cloud Shell VM **created and RUNNING** via the web API. Shell reached the SSH
-auth stage through the `/_cloudshell/tcp/22` websocket relay; the final SSH signature step
-is **not** automated (see [Known blocker](#known-blocker-ssh-agent-signing)).
+**Status:** Cloud Shell VM **created and RUNNING** via the web API. **Shell is fully
+automated** — `ssh` over the `/_cloudshell/tcp/22` websocket relay runs commands in the VM
+(`ls`, `whoami`, `docker ps`, exit 0). See [§8.1](#81-working-recipe).
+
+> **Correction (2026-10-23):** an earlier revision described an unsolved SSH blocker and
+> recommended the browser as the only way to a shell. That was wrong — the problem was the
+> SSH **username**. Details in [§8](#8-ssh-solved--there-is-no-blocker).
+
+> **Tooling:** the whole flow is packaged as
+> [`scripts/cloudshell/cloudshell.py`](../../scripts/cloudshell/README.md) —
+> `validate` / `list` / `start` / `status` / `exec` / `shell` / `bridge` / `abandon`.
+> Use it instead of hand-rolling the `curl` in §5 and the bridge in §7; this document
+> remains the protocol reference and the record of why each step is what it is.
 
 **Credential used:** `/mnt/s3/google/etecnologysys/google.json`
 (Playwright `storageState` produced by `/config/workspace/ai-brain/google/google-auth.js`)
 
 **Date of work:** 2026-10-22 → 2026-10-23
 **Account:** `etecnologysys@gmail.com`
-**VM:** `cs-666362651618-default.cs-us-east1-rtep.cloudshell.dev` (`35.231.23.99`, us-east1)
+**VM (first run):** `cs-666362651618-default.cs-us-east1-rtep.cloudshell.dev` (`35.231.23.99`, us-east1)
+
+### Status of the 2026-10-23 re-run (independent reproduction)
+
+The full §2 → §5 path was re-run from a clean shell against the same credential, taken this
+time from `/config/workspace/play-with-docker/credentials/google/etecnologysys/google.json`
+(same `storageState`, 49 cookies). Result: **VM created and RUNNING again, and SSH command
+execution now works** — the previous "SSH blocker" was a wrong-username problem, not a
+cryptographic one. Corrections to the steps below:
+
+- **§5.1 fails as written** — `newtoken` needs `-L` ([§5.1a](#51a-the-newtoken-call-needs--l)).
+- **§6.3 had the wrong SSH username** — it is the account name, not `cloudshelluser`
+  ([§8.1](#81-working-recipe)).
+- **§8's "key field is ignored" conclusion is wrong** — `setupsession` registers the key and
+  the key authenticates ([§8.2](#82-why-the-original-conclusion-was-wrong)).
+
+- Environment was again `state: 1` (stopped) and `setupsession` again returned `state: 3`.
+- The VM came up in a **different zone**: `8.229.29.25` /
+  `cs-666362651618-default.cs-us-west1-ijlt.cloudshell.dev` (prefixed host
+  `970-cs-…-us-west1-ijlt.cloudshell.dev`). The zone is not sticky — **always read the host
+  and IP out of the `setupsession` / `environments/get` response**, never cache them from a
+  previous run or from this document.
+- **§5.1 as written fails with `302`** — see [§5.1a](#51a-the-newtoken-call-needs--l).
+- The relay was driven end-to-end (`101` + SSH banner) **and used to run commands** — see
+  [§8.1](#81-working-recipe).
 
 ---
 
@@ -21,16 +55,23 @@ uses at `https://shell.cloud.google.com`:
 
 | Step | Call | Result |
 |---|---|---|
-| 1 | `GET /newtoken?authuser=0` | XSRF token, required as `&token=` on every call |
-| 2 | `GET /cloudshell/ca` | `200` = account allowed, `403` = blocked |
+| 1 | `GET /newtoken?authuser=0` (**follow redirects**) | XSRF token, required as `&token=` on every call |
+| 2 | `GET /cloudshell/ca` (**follow redirects**) | `200` + `[]` = account allowed, `403` = blocked |
 | 3 | `GET /cloudshell/environments/list?request=["users/me"]` | lists environments + state |
 | 4 | `POST /cloudshell/setupsession` | **provisions + starts** the VM, returns access token |
 | 5 | `GET /cloudshell/environments/get?request=["users/me/environments/default"]` | confirms `state: 3` = RUNNING |
 | 6 | `GET ssh.cloud.google.com/cloudshell/jwt?…` → `/_cloudshell/login` | sets `CloudShellAuthorization` |
 | 7 | `wss://…/_cloudshell/tcp/22?_cloudshellAccessToken=…` | `101 Switching Protocols` = SSH relay open |
+| 8 | `ssh` through the relay as **`<account name>`** | **arbitrary command execution in the VM** (§8.1) |
 
 Everything is authenticated by the **session cookies** in `google.json` — no OAuth client,
-no `gcloud`, no browser automation needed for steps 1–5.
+no `gcloud`, no browser automation needed for steps 1–8.
+
+> [!WARNING]
+> Steps 1 and 2 **require `curl -L`**. Without it both return `302 → accounts.google.com`,
+> which looks like an expired credential. Steps 7 and 8 fail with `503` unless step 6 ran
+> first. Details: [§5.1a](#51a-the-newtoken-call-needs--l),
+> [§6.2a](#62a-extracting-the-login-url-js-escapes-will-bite-you).
 
 ---
 
@@ -93,6 +134,20 @@ Observed on 2026-10-22:
 | `myaccount.google.com` | 200 (profile page, account chip) | 302 → login | authenticated |
 | `www.google.com` | 200, "Sign out" | "Sign in" | authenticated |
 | `mail.google.com/.../#inbox` | 200, real inbox render | → `accounts.google.com/ServiceLogin` | authenticated |
+
+> [!NOTE]
+> Checks (b) and (c) are **weaker than they look** and were re-tested on 2026-10-23.
+> - `https://www.google.com/` returned **no `Sign out` and no `Sign in`** string at all in this
+>   container (the markup varies by client/JS path), so grepping for it can produce an empty
+>   result that reads as inconclusive rather than unauthenticated.
+> - `mail.google.com/mail/u/0/#inbox` returns **`200` even when unauthenticated** — it serves a
+>   shell page and does the login redirect client-side. In the re-run it returned
+>   `200 final=https://mail.google.com/mail/u/0/` while `https://mail.google.com/mail/feed/atom`
+>   returned **`401`**, which is the real signal.
+>
+> Prefer these, in order: `myaccount.google.com` → `200` vs `302`; `accounts.google.com/` →
+> follows to `myaccount.google.com`; `mail/feed/atom` → `200` not `401`. Skip the `Sign out`
+> grep.
 
 ### 2.3 Cookie expiry audit
 
@@ -212,6 +267,46 @@ TOKEN=$(curl -sS -b $JAR -c $JAR -A "$UA" \
   | python3 -I -c 'import sys,re; t=re.sub(r"^\)\]\}\x27\n?","",sys.stdin.read()); m=re.search(r"\"([A-Za-z0-9_\-:.]{16,})\"",t); print(m.group(1) if m else "")')
 ```
 
+### 5.1a The `newtoken` call needs `-L`
+
+The command above **does not work as written** in a fresh container. Without `-L` it returns:
+
+```
+HTTP/2 302
+location: https://accounts.google.com/ServiceLogin?passive=1209600&osid=1&continue=https://shell.cloud.google.com/newtoken?...
+```
+
+with an empty body, so `TOKEN` comes back empty and every later call fails. This looks
+identical to an expired credential, which is why it is worth calling out: the `302` is an
+account-picker bounce, **not** an auth failure — the same jar returns `200` on
+`myaccount.google.com` in the same breath.
+
+Following redirects settles it (`pli=1` is appended along the way):
+
+```bash
+TOKEN=$(curl -sS -L -b $JAR -c $JAR -A "$UA" \
+  'https://shell.cloud.google.com/newtoken?authuser=0' \
+  | python3 -I -c 'import sys,re; t=re.sub(r"^\)\]\}\x27\n?","",sys.stdin.read()); m=re.search(r"\"([A-Za-z0-9_\-:.]{16,})\"",t); print(m.group(1) if m else "")')
+# )]}'
+# ["ssh.nxt","AFUMQgCjK4LkCpgFXnNTVhy17bXA:1792775894698"]
+# TOKEN is the part before the colon (42 chars); the suffix is an expiry timestamp
+```
+
+Two further notes from the re-run:
+
+- Use `-c $JAR` on these calls. The redirect chain **rotates** `SIDCC`, `NID`, `__Host-GAPS`,
+  `LSID`, `__Host-{1,3}PLSID`, `__Secure-{1,3}PSIDCC/PSIDTS`. A read-only jar keeps working
+  for a while but drifts; writing the rotated cookies back keeps it aligned with what a browser
+  would hold. Re-running `make_jar.py` resets the jar to the original file's values.
+- `shell.cloud.google.com` accepts the session from `SID` / `__Secure-1PSID` alone — the
+  account-scoped `LSID`/`OSID` on `accounts.google.com`/`myaccount.google.com` are not sent
+  cross-domain and are not needed for Cloud Shell. So a `302` here is never fixed by adding
+  cookies, only by following it.
+
+> [!NOTE]
+> `/cloudshell/ca` returns `302` without `-L` too, for the same reason. With `-L` it returns
+> `200` with body `)]}'\n[]` — an **empty array means allowed**; a real denial is `403`.
+
 ### 5.2 List environments (read-only sanity check)
 
 ```bash
@@ -254,7 +349,9 @@ Minimal working body:
 > `[1, …]` and `[2, …]` both accepted (enum 1/2 = key type).
 > **Gotcha 3:** the content is **not** a PEM line. Use the base64 SSH wire blob
 > (the middle token of `id_ecdsa.pub`) — or, per the bundle, the raw key material.
-> See [§8](#8-known-blocker-ssh-agent-signing) for why the key form matters.
+> See [§8](#8-ssh-solved--there-is-no-blocker) for why the key form matters — and note that
+> the conclusion there has since been revised: the wire blob **is** accepted, and the original
+> failures were caused by the SSH username.
 
 ### 5.4 The call
 
@@ -287,6 +384,11 @@ curl -sS -b $JAR -c $JAR -A "$UA" \
 - `[3][3]` = environment **state** → `3` = RUNNING
 - `[3][5]` = VM public IP, `[3][11]` = `…cloudshell.dev` host
 
+> [!NOTE]
+> `[0]` is documented above as `1`/`2`, but the 2026-10-23 re-run returned **`[0] == 3`** on a
+> cold start of a stopped environment. Treat the field as an opaque start-kind enum — branch on
+> `[3][3]` for readiness, not on `[0]`. The shape of the rest of the response was unchanged.
+
 ### 5.6 Confirm it is running
 
 ```bash
@@ -315,9 +417,10 @@ eligible to use Cloud Shell"*.
 
 ## 6. Getting a shell
 
-Two paths: **browser** (works today) or **relay + SSH** (works up to auth, see §8).
+Two paths, **both work**: **relay + SSH** (scriptable — recommended, see §8.1) or
+**browser** (interactive).
 
-### 6.1 Browser (recommended)
+### 6.1 Browser
 
 Open `https://shell.cloud.google.com/` in a browser already signed in as
 `etecnologysys@gmail.com`. The VM from §5 is reused — you land in a working terminal.
@@ -344,6 +447,68 @@ Notes:
 - The `access token` expires quickly — refresh with `setupsession` (or
   `/cloudshell/generateaccesstoken`) and reconnect immediately.
 
+> [!IMPORTANT]
+> **Step 2 is mandatory and its absence is the actual cause of the `503`.** Opening the relay
+> websocket before `/_cloudshell/login` has set `CloudShellAuthorization` returns
+> `HTTP/1.1 503 Service Unavailable` in the handshake — which reads like "wrong host" (the
+> bare-vs-prefixed note above) but is not. Confirmed on 2026-10-23: same prefixed host, same
+> access token, `503` before the login exchange and `101` immediately after.
+
+### 6.2a Extracting the login URL (JS escapes will bite you)
+
+The URL lives in an inline `<script>` as `window.location = '<url>'`, but the host writes it
+with **JavaScript escapes**, not percent-encoding:
+
+```
+window.location = 'https:\/\/970-cs-…\/_cloudshell\/login?token=…\x26redirect=…'
+```
+
+`\x26` is `&`. A naive extraction gives you a URL whose only query params are `token` and
+`redirect` fused into one value, and `/_cloudshell/login` answers **`400` with an empty body**
+(not a useful error). Unescape both forms:
+
+```python
+import re
+t = open('/tmp/gval/jwt.html', encoding='utf-8').read()
+u = re.search(r"window\.location = '([^']+)'", t).group(1)
+u = u.replace('\\/', '/')
+u = re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), u)
+assert '&redirect=' in u
+```
+
+Then, and this is the whole handshake:
+
+```bash
+# 1. build state = {token, target_host, authuser, cloud_shell_environment_name}, b64 it
+#    and GET https://ssh.cloud.google.com/cloudshell/jwt?redirect_uri=...&state=...   (-L)
+# 2. unescape the resulting URL as above and GET it WITHOUT following the redirect:
+curl -sS -o login.body -D login.hdr -A "$UA" \
+  -H 'origin: https://shell.cloud.google.com' "$(cat login_url.txt)"
+# HTTP/2 302 ... Set-Cookie: CloudShellAuthorization=…    <-- this is what the relay wants
+```
+
+`302` with `CloudShellAuthorization` = success. `400` = the URL was mangled (see above).
+Note only `CloudShellAuthorization` comes back here; earlier notes mention a `vscode-tkn`
+cookie too, but it is not required for the `tcp/22` relay.
+
+Build the relay `Cookie:` header from that single `Set-Cookie` line, **not** from the browser
+jar — the `.google.com` cookies are not used by the `cloudshell.dev` host:
+
+```python
+pairs = [ln.split(':', 1)[1].strip().split(';')[0]
+         for ln in open('/tmp/gval/login.hdr').read().splitlines()
+         if ln.lower().startswith('set-cookie:')]
+open('/tmp/gval/relay_cookie.txt', 'w').write('; '.join(pairs))
+```
+
+Verified relay open (`wsbridge.py`, no changes needed):
+
+```
+UPGRADE_OK 101 -> SSH relay open
+first frame opcode=2 len=43
+banner: b'SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.19\r\n'
+```
+
 ### 6.3 SSH over the relay
 
 The relay is a raw TCP tunnel to port 22, so `ssh` works via `ProxyCommand`:
@@ -351,13 +516,16 @@ The relay is a raw TCP tunnel to port 22, so `ssh` works via `ProxyCommand`:
 ```bash
 ssh -o "ProxyCommand=python3 -I proxycmd2.py 2238" \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o IdentitiesOnly=yes -i /tmp/gval/ssh/id_ecdsa2 \
-    cloudshelluser@cs-666362651618-default.cs-us-east1-rtep.cloudshell.dev
+    -o IdentitiesOnly=yes -i /tmp/gval/ssh/id_ecdsa \
+    etecnologysys@cs-666362651618-default.cs-us-west1-ijlt.cloudshell.dev
 ```
 
-- **Username:** `cloudshelluser` (bundle: `…||"cloudshelluser"`; `root` when ephemeral).
-  The account name `etecnologysys` is **not** a valid SSH user here.
-- Direct SSH to the VM IP (`35.231.23.99:22`) is refused — the VM only accepts via relay.
+- **Username:** the **account name** (`etecnologysys`) — this is what works. `cloudshelluser`
+  is rejected with `Permission denied (publickey)`, despite the bundle string `…||"cloudshelluser"`
+  (that is used for *ephemeral* environments). Confirmed on 2026-10-23: `whoami` returns
+  `etecnologysys`. See §8.
+- Direct SSH to the VM IP (`35.231.23.99:22`, or whatever `[3][5]` reports) is refused — the VM
+  only accepts via relay.
 
 ---
 
@@ -571,21 +739,35 @@ bridge and run `ssh` **in the same command**:
 ```bash
 cd /tmp/gval
 python3 -I wsbridge.py --listen 127.0.0.1:2238 \
-  --cookie-file cookie_hdr.txt \
-  --url "wss://970-cs-666362651618-default.cs-us-east1-rtep.cloudshell.dev/_cloudshell/tcp/22?_cloudshellAccessToken=$(cat access_token.txt)" &
+  --cookie-file relay_cookie.txt \
+  --url "wss://970-cs-666362651618-default.cs-us-west1-ijlt.cloudshell.dev/_cloudshell/tcp/22?_cloudshellAccessToken=$(cat access_token.txt)" &
 BP=$!; sleep 3
 
 ssh -o "ProxyCommand=python3 -I proxycmd2.py 2238" \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o ConnectTimeout=20 -o BatchMode=yes -o IdentitiesOnly=yes \
-    -i /tmp/gval/ssh/id_ecdsa2 \
-    cloudshelluser@cs-666362651618-default.cs-us-east1-rtep.cloudshell.dev \
+    -i /tmp/gval/ssh/id_ecdsa \
+    etecnologysys@cs-666362651618-default.cs-us-west1-ijlt.cloudshell.dev \
     'echo SHELL_OK; whoami; hostname; pwd'
 
 kill $BP
 ```
 
-Build `cookie_hdr.txt` from the jar, filtered to the relay host:
+> [!IMPORTANT]
+> Two corrections from the 2026-10-23 re-run:
+> - Use **`relay_cookie.txt`** (the single `CloudShellAuthorization` from §6.2a), not
+>   `cookie_hdr.txt`. The script below builds a header from the browser jar filtered to
+>   `cloudshell.dev`, but the jar has **no `cloudshell.dev` cookies at all** — it yields an
+>   empty header. Only `CloudShellAuthorization` is needed.
+> - The username is **the account name** (`etecnologysys`), not `cloudshelluser`. See §8.
+>
+> The bridge accepts **one** connection, so it must be restarted for each `ssh` attempt.
+> A second `ssh` against a bridge already consumed fails with
+> `ConnectionRefusedError` / `Connection closed by UNKNOWN port 65535`, which is a bridge
+> artefact and not an auth failure.
+
+Build `cookie_hdr.txt` from the jar, filtered to the relay host (**superseded** — see note
+above; kept for reference since the jar contains no relay-host cookies):
 
 ```python
 import sys
@@ -603,7 +785,94 @@ open("/tmp/gval/cookie_hdr.txt", "w").write("; ".join(pairs))
 
 ---
 
-## 8. Known blocker: SSH agent signing
+## 8. SSH: solved — there is no blocker
+
+> **This section previously described a "known blocker: SSH agent signing", with the
+> conclusion that an interactive shell could not be automated and the browser was the only
+> option. That conclusion was wrong.** The 2026-10-23 re-run got a full working shell with
+> plain `ssh(1)` over the relay, no agent protocol, no browser. The blocker was **the
+> username**, not the key or the signing model. The original text is kept below
+> ([§8.2](#82-why-the-original-conclusion-was-wrong)) because the dead-ends are still useful.
+
+### 8.1 Working recipe
+
+```bash
+ssh -o "ProxyCommand=python3 -I proxycmd2.py 2238" \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=20 -o BatchMode=yes -o IdentitiesOnly=yes \
+    -i /tmp/gval/ssh/id_ecdsa \
+    etecnologysys@cs-666362651618-default.cs-us-west1-ijlt.cloudshell.dev \
+    'echo "whoami=$(whoami)"; ls; uname -a; docker ps'
+```
+
+Observed output:
+
+```
+SHELL_OK
+whoami=etecnologysys
+host=cs-666362651618-default
+pwd=/home/etecnologysys
+--- ls ---
+cloudflared-linux-amd64.deb
+README-cloudshell.txt
+--- uname ---
+Linux cs-666362651618-default 6.6.157+ #1 SMP PREEMPT_DYNAMIC Sat Sep 26 08:51:55 UTC 2026 x86_64 GNU/Linux
+--- docker ---
+/usr/bin/docker
+ssh_exit=0
+```
+
+So `ls`, `uname`, `whoami`, `pwd`, and **`docker ps`** all execute, exit status is `0`, and
+stdin/stdout pipe normally. Docker is present and usable in the VM.
+
+**The three things that actually matter:**
+
+| Requirement | Correct value | Wrong value → symptom |
+|---|---|---|
+| **Username** | `etecnologysys` (the account name) | `cloudshelluser` → `Permission denied (publickey)` |
+| **Key** | the ECDSA key registered in `setupsession` field 3, passed as **base64 of the SSH wire blob** (`id_ecdsa.pub` middle token) | see the table in §8.2 |
+| **Relay cookie** | `CloudShellAuthorization` from `/_cloudshell/login` | absent → `503` at websocket handshake |
+
+The username point contradicts the old §6.3 note ("Username: `cloudshelluser` … The account
+name `etecnologysys` is **not** a valid SSH user here") — that was wrong, or was true only for a
+different flow. Verify with `whoami` if it drifts again.
+
+`setupsession`'s key field **does** work. Re-running `setupsession` (warm start, `http=200`)
+showed the key present in the environment's field 7, at index 9 of 10:
+
+```
+key count: 10
+OUR KEY BLOB PRESENT: True
+  9: AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlz...   <== OURS
+```
+
+> Pitfall when checking this yourself: compare the **base64 blob**, i.e.
+> `pub_line.split()[1]`, not the whole `.pub` line — the line includes the trailing comment
+> (`cloudshell-lab14`) and will never match the server's stored value. An earlier check in this
+> re-run compared whole lines and wrongly concluded the key was not registered.
+
+### 8.2 Why the original conclusion was wrong
+
+The old diagnosis — "the VM trusts an ephemeral key via the relay agent, and `setupsession`'s
+key field does not reach `authorized_keys`" — was inferred from the failure to log in as
+`cloudshelluser`. Once the account name is used, the registered key authenticates directly, so
+neither the agent protocol nor the browser is needed.
+
+Field 7 of the environment **is** that array of `authorized_keys`-style entries, and it holds
+the debris of the original attempts, which is why they looked like they "worked but didn't":
+
+| Index | Decoded content | Verdict |
+|---|---|---|
+| 0, 1, 8, 9 | `SSH wire blob` | valid |
+| 2, 3 | base64 of **PEM text** | invalid material |
+| 5, 6 | raw **32-byte** scalar | invalid material |
+| 7 | raw **65-byte** EC point | invalid material |
+| 4 | raw bytes starting `ssh-rsa` | invalid material |
+
+That matches the old attempts table in §8.3 exactly. The conclusion to draw is *not* "the field
+is ignored" but "the field is honoured literally — send the SSH wire blob, and the key works".
+
+### 8.3 Original text (superseded — kept for the record)
 
 **Symptom:** relay reaches `101 Switching Protocols`, SSH completes key exchange and
 algorithm negotiation, then:
@@ -614,7 +883,7 @@ debug1: Authentications that can continue: publickey
 cloudshelluser@…: Permission denied (publickey).
 ```
 
-**Why:** the web client does **not** hand the VM a static authorized key. It generates an
+**Why (as believed at the time — see §8.1 for the correction):** the web client generates an
 **ephemeral ECDSA P-256 keypair in the page** (`Vz`/`NYa` in the bundle) and signs each SSH
 auth challenge through the agent protocol over the relay:
 
@@ -626,11 +895,7 @@ NYa.prototype.getPublicKey = function () {
 NYa.prototype.signData = function (a) { /* signs the relayed challenge */ };
 ```
 
-So the VM trusts the key for the life of the **session**, verified via the access token —
-`setupsession`'s key field registers a key with the *session*, but the VM's
-`authorized_keys` is managed by the relay agent, not by that field.
-
-**Attempts made** (all got `Permission denied`):
+**Attempts made** (all got `Permission denied`, all with `cloudshelluser`):
 
 | Content sent to `[2, content]` | Stored as |
 |---|---|
@@ -640,12 +905,20 @@ So the VM trusts the key for the life of the **session**, verified via the acces
 | base64 of SSH wire blob | `ecdsa-sha2-nistp256` |
 | base64 of raw 32-byte private scalar | `ecdsa-sha2-nistp256` |
 
-Both `cloudshelluser` and the account name were tried. **Not** tried: implementing the
-SSH agent protocol (`SSH2_AGENTC_REQUEST_IDENTITIES` / `SIGN_REQUEST`) over the relay so the
-ephemeral key can sign — that is the remaining work.
+Note the row that matters: **base64 of SSH wire blob was already in this table and was rejected
+— because of the username, not the key.**
 
-**Recommendation:** for a working terminal, use the browser (§6.1). The API path in §5 is
-still the right way to **create/warm** the VM programmatically.
+### 8.4 Still open
+
+- Only the `default` environment was tested; ephemeral/temporary environments (which the bundle
+  suggests run as `root`) were not.
+- The key is valid for the life of the session; behaviour after the access token rotates was
+  not characterised.
+- `POST /cloudshell/generateaccesstoken` (`§3.1`) for refreshing an expired relay token was not
+  exercised — the re-run just re-called `setupsession`.
+
+**Recommendation (revised):** a scripted shell **is** achievable end-to-end — §5 creates the
+VM, §6.2a authorises the relay, §8.1 runs commands. Use the browser only for interactive work.
 
 ---
 
@@ -676,7 +949,9 @@ shortcut at `google-auth.js:450-456` and `:463-470` — but it still needs Chrom
    `chmod 600` it.
 2. During this lab the cookie jar, XSRF token, access token, generated SSH keys and all
    captured HTTP responses were kept at mode `0600` and **deleted** afterwards. Reproduce
-   with `umask 077`.
+   with `umask 077`. **The 2026-10-23 re-run left them in place at `/tmp/gval/`** (all `0600`,
+   directory `0700`): `jar2.txt` (live session), `access_token.txt`, `relay_cookie.txt`,
+   `ssh/id_ecdsa`. Delete them when done.
 3. **Do not paste `access_token` / `CloudShellAuthorization` / cookie values into logs,
    tickets, or chat.** The `_cloudshellAccessToken` grants terminal access to the VM for its
    lifetime. Prefer redacting to `<token>` in any write-up.
@@ -684,6 +959,15 @@ shortcut at `google-auth.js:450-456` and `:463-470` — but it still needs Chrom
    quota until then. Tear down with `POST /cloudshell/devshell/abandon`.
 5. `_cloudshellAccessToken` is short-lived; refresh via `setupsession` or
    `/cloudshell/generateaccesstoken` and reconnect immediately — a stale token yields `503`.
+   Note that `503` is **ambiguous**: a missing `CloudShellAuthorization` cookie produces the
+   same response (§6.2a). Check the cookie before blaming the token.
+6. **The registered SSH key is durable across sessions.** Because `setupsession` appends the
+   key to the environment's key array (field 7), a key generated once keeps working on later
+   sessions. Treat the private key in `/tmp/gval/ssh/id_ecdsa` as a credential: it grants
+   command execution in the VM for as long as it stays in that array.
+7. **SSH command execution is now a proven capability, not just a relay handshake.** Anyone
+   holding the credential file plus the private key can run arbitrary commands in the VM —
+   including `docker`. Scope access to `google.json` accordingly.
 
 ---
 
@@ -716,10 +1000,27 @@ Then confirm `state` returns to `1` via `environments/get`. Otherwise let it idl
 | VM started | **yes** — `setupsession` → 200, state 3 (RUNNING) |
 | VM IP / host | `35.231.23.99` / `cs-666362651618-default.cs-us-east1-rtep.cloudshell.dev` |
 | Relay reached | **yes** — `101 Switching Protocols` on `/_cloudshell/tcp/22` |
-| Interactive shell | **not automated** — SSH publickey denied (§8); browser works |
+| Interactive shell | **automated** — `ssh` as `etecnologysys` runs arbitrary commands (§8.1) |
 | Refresh needed? | no |
 
 The VM was left **running** at the end of the lab. It idles out after ~20 min.
+
+### 2026-10-23 re-run
+
+Same credential, reproduced from a clean shell. Everything above still holds, with these
+deltas:
+
+| Item | First run (10-22) | Re-run (10-23) |
+|---|---|---|
+| Credential path | `/mnt/s3/…` | `/config/workspace/play-with-docker/credentials/google/etecnologysys/google.json` |
+| Cookie count / expired | 49 / 4 (`OTZ`) | 49 / 4 (`OTZ`) — identical |
+| Zone / host | us-east1, `…-us-east1-rtep` | **us-west1**, `…-us-west1-ijlt` — not sticky |
+| VM IP | `35.231.23.99` | `8.229.29.25`, then `34.168.245.26` after a warm re-`setupsession` |
+| `newtoken` | worked as written | **needs `-L`** (§5.1a) |
+| `setupsession` `[0]` start type | `1`/`2` | `3` on cold start; `2` on warm re-run |
+| `setupsession` key field | assumed ignored | **honoured** — key present in field 7 (§8.1) |
+| SSH shell | blocked (wrong user) | **works** as `etecnologysys` (§8.1) |
+| Teardown | not tested | not tested (VM left running) |
 
 ---
 

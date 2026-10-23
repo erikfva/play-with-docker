@@ -18,6 +18,7 @@ Helper scripts for local development, credential seeding, and provider diagnosti
 | [`list-codespaces.js`](#list-codespacesjs) | List Codespace VMs for the authenticated GitHub account |
 | [`refresh-codespace.js`](#refresh-codespacejs) | Provide a fresh Codespace VM — list → delete first → create → stop, in one browser session |
 | [`refresh-codespace-http.js`](#refresh-codespace-httpjs) | HTTP-only refresh (no browser) — ~15× faster; list → delete → create → wait for active → stop via direct GitHub Web UI requests |
+| [`cloudshell/cloudshell.py`](cloudshell/README.md) | Google Cloud Shell VM client — `validate` / `list` / `start` / `status` / `exec` / `shell` / `abandon` from a saved browser session (no browser, no `gcloud`) |
 
 All scripts load env via `dotenv` when `NODE_ENV !== production`: first the repo root `.env`, then `scripts/.env` if present (per-scripts overrides win). CLI flags `--url` / `--token` win over both. Template: `scripts/.env.example` (also documented in the root `.env.example`).
 Base URL precedence for `refresh-vps-status.js` / `refresh-codesandbox-credits.js` / `get-codesandbox-credits.js` / `seed-credentials.js` is: `--url` flag → `$PWD_API_URL` env var → `http://localhost:$PORT` → `http://localhost:3000`. `$PWD_API_URL` accepts a single URL or a scheduled `url|cron;url|cron` list — see [Backend selection](#backend-selection-pwd_api_url).
@@ -547,3 +548,4 @@ Common variables (see `scripts/.env.example`):
 - `CODESANDBOX_SCRAPER_TTL` (minutes, default `60`) — minimal billing freshness; the scraper skips the browser run while the stored Credits quota `fetchedAt + TTL` is still in the future (`0` = always scrape).
 - `CODESANDBOX_WEB_CREDENTIALS_DIR` — session-file lookup dir for `refresh-codesandbox-credits.js` (default `/mnt/s3/codesandbox-web`, fallback `credentials/codesandbox-web`).
 - `VPS_STATUS_TTL_MINUTES` — TTL for `refresh-vps-status.js` cache bypass (`--force` ignores it) — server env (root `.env.example`).
+- `CLOUDSHELL_STATE_DIR` / `CLOUDSHELL_TRACE` — state dir and per-hop HTTP tracing for `cloudshell/cloudshell.py` (see [`cloudshell/README.md`](cloudshell/README.md)).
