@@ -347,11 +347,17 @@ class CodespacesProvider extends BaseProvider {
 
     const providerSessionId = codespace.name;
 
-    // If the adopted codespace is STOPPED, wake it up by starting it and
+    // If the adopted codespace is stopped, wake it up by starting it and
     // waiting for it to become Available; then send a test command to confirm
     // it is truly up before reporting the session as created (RUNNING).
-    const adoptedState = normalizeStatus(codespace.state || '');
-    if (adoptedState === 'STOPPED') {
+    //
+    // GitHub reports a stopped codespace as "Shutdown", not "STOPPED". Compare
+    // the *mapped* status (via mapState) rather than the raw GitHub state:
+    // a raw-string check misses "Shutdown" entirely and skips the wake-up,
+    // leaving the codespace stopped while the session is created as RUNNING —
+    // the first command then dies with "shell closed: exit status 1".
+    const adoptedStatus = mapState(codespace.state);
+    if (adoptedStatus === 'STOPPED') {
       try {
         await githubClient.startCodespace(token, providerSessionId);
       } catch (startError) {
@@ -422,7 +428,11 @@ class CodespacesProvider extends BaseProvider {
       console.warn(`[Codespaces] Non-fatal initialization failure for ${providerSessionId}: ${initError.message}`);
     }
 
-    session.status = 'RUNNING';
+    // Do NOT force RUNNING here. `mapToSession` already yields RUNNING when the
+    // codespace is Available (either it was already up, or the wake-up branch
+    // above replaced the state), and reports the honest STARTING/PENDING/STOPPED
+    // otherwise. Forcing RUNNING made a codespace that never booted look ready,
+    // so the setup runner immediately issued commands against a stopped VM.
 
     // Inject keep-alive config into metadata (mapper builds its own metadata)
     const syntheticMetadata = { ...(session.metadata || {}) };
