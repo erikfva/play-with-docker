@@ -7,7 +7,8 @@
     "dev": "nodemon src/server.js", 
     "start": "node src/server.js",
     "test": "node --test",
-    "seed-credentials": "node scripts/seed-credentials.js"
+    "seed-credentials": "node scripts/seed-credentials.js",
+    "list-registered-codespaces": "node scripts/list-registered-codespaces.js"
   },
   "repository": {
     "type": "git",

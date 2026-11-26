@@ -3,7 +3,16 @@ const db = require('../../db/db');
 const githubClient = require('./codespaces/client');
 const { loadCodespacesCredentials } = require('./codespaces/credentials-loader');
 const { mapToSession, mapState } = require('./codespaces/session-mapper');
-const { executeInCodespace, BOOT_TIMEOUT_MS, COMMAND_TIMEOUT_MS } = require('./codespaces/cli-executor');
+const {
+  executeInCodespace,
+  listCodespacesViaCli,
+  createCodespaceViaCli,
+  GEO_TO_CLI_LOCATION,
+  BOOT_TIMEOUT_MS,
+  COMMAND_TIMEOUT_MS
+} = require('./codespaces/cli-executor');
+const { loadCredentialByRef } = require('../db-credentials-loader');
+const { cacheKey, invalidateCache } = require('../status-cache');
 const { getRowValue } = require('../../utils/helpers');
 const {
   ProviderError,
@@ -99,6 +108,96 @@ function sleep(ms) {
 }
 
 function redactTokensFromMessage(msg) { return String(msg || '').replace(/\b[A-Za-z0-9_\-]{20,}\b/g, '[REDACTED]'); }
+
+const ensureLocks = new Map();
+
+async function withCredentialLock(key, fn) {
+  const currentLock = ensureLocks.get(key) || Promise.resolve();
+  let release;
+  const nextLock = new Promise((resolve) => {
+    release = resolve;
+  });
+
+  ensureLocks.set(key, nextLock);
+
+  try {
+    await currentLock;
+  } catch (_) {
+    // Ignore previous run failure so next queued operation can proceed cleanly
+  }
+
+  let client;
+  let lockAcquired = false;
+  try {
+    client = await db.pool.connect();
+    await client.query(
+      "SELECT pg_advisory_lock(hashtext('codespaces-ensure'), hashtext($1))",
+      [key]
+    );
+    lockAcquired = true;
+    return await fn();
+  } finally {
+    try {
+      if (client) {
+        let releaseError;
+        try {
+          if (lockAcquired) {
+            await client.query(
+              "SELECT pg_advisory_unlock(hashtext('codespaces-ensure'), hashtext($1))",
+              [key]
+            );
+          }
+        } catch (error) {
+          releaseError = error;
+          throw error;
+        } finally {
+          client.release(releaseError);
+        }
+      }
+    } finally {
+      release();
+      if (ensureLocks.get(key) === nextLock) {
+        ensureLocks.delete(key);
+      }
+    }
+  }
+}
+
+function isTransientConfirmError(error) {
+  if (!error) return false;
+
+  const status = error.statusCode || error.status;
+  if (status === 429 || (status >= 500 && status < 600)) {
+    return true;
+  }
+
+  const code = error.code;
+  if (
+    code === 'CODESPACES_RATE_LIMIT_EXCEEDED' ||
+    code === 'CODESPACES_COMMAND_TIMEOUT' ||
+    code === 'ETIMEDOUT' ||
+    code === 'ECONNRESET' ||
+    code === 'ENOTFOUND' ||
+    code === 'EAI_AGAIN'
+  ) {
+    return true;
+  }
+
+  const msg = String(error.message || '').toLowerCase();
+  if (
+    msg.includes('rate limit') ||
+    msg.includes('timeout') ||
+    msg.includes('econnreset') ||
+    msg.includes('etimedout') ||
+    msg.includes('network') ||
+    msg.includes('fetch failed') ||
+    msg.includes('socket hang up')
+  ) {
+    return true;
+  }
+
+  return false;
+}
 function safeReason(error) { const msg = error?.message || 'unknown error'; return redactTokensFromMessage(msg); }
 function safeErrorCode(error) { return error?.code || (error?.statusCode ? `HTTP_${error.statusCode}` : null) || (error?.status ? `HTTP_${error.status}` : null) || 'UNKNOWN_ERROR'; }
 function isTerminalAuthError(error) { return ( error?.code === 'CODESPACES_TOKEN_INVALID' || error?.code === 'CODESPACES_TOKEN_INSUFFICIENT_SCOPE' || error?.code === 'CODESPACES_ACCOUNT_SUSPENDED' ); }
@@ -877,6 +976,195 @@ class CodespacesProvider extends BaseProvider {
     // always timed out (burning the full 15s timeout) before the stop completed.
     // The stop itself kills all running processes, so no explicit cleanup is
     // needed — GitHub will garbage-collect the VM on its own schedule.
+  }
+
+  /**
+   * Ensure a Codespace exists for the given registered DB credential.
+   * Checks GitHub via `gh` CLI. If one exists, returns it (created: false).
+   * If none exists, creates it via `gh codespace create` (created: true).
+   */
+  async ensureCodespace(options = {}) {
+    const { credentialRef } = options;
+    if (!credentialRef || typeof credentialRef !== 'string' || !credentialRef.trim()) {
+      throw new ProviderError('Codespaces credential reference is required', {
+        code: 'CODESPACES_NO_CREDENTIAL',
+        statusCode: 401
+      });
+    }
+
+    let targetRepo;
+    if (options.repository !== undefined && options.repository !== null) {
+      if (typeof options.repository !== 'string' || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(options.repository.trim())) {
+        throw new ProviderError('Invalid repository format. Expected "owner/repo"', {
+          code: 'CODESPACES_INVALID_REPOSITORY',
+          statusCode: 400
+        });
+      }
+      targetRepo = options.repository.trim();
+    } else {
+      const defaultRepo = (process.env.CODESPACES_DEFAULT_REPOSITORY && process.env.CODESPACES_DEFAULT_REPOSITORY.trim())
+        || 'vm-manager235-1/test';
+      if (!defaultRepo || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(defaultRepo)) {
+        throw new ProviderError(`Configured default repository is invalid: "${defaultRepo}". Expected "owner/repo"`, {
+          code: 'CODESPACES_REPOSITORY_NOT_CONFIGURED',
+          statusCode: 500
+        });
+      }
+      targetRepo = defaultRepo;
+    }
+
+    let targetMachine;
+    if (options.machine !== undefined && options.machine !== null) {
+      if (typeof options.machine !== 'string' || !options.machine.trim()) {
+        throw new ProviderError(`Unsupported Codespaces machine type: ${options.machine}`, {
+          code: 'CODESPACES_INVALID_MACHINE',
+          statusCode: 400,
+          details: { supportedMachines: Array.from(VALID_MACHINES) }
+        });
+      }
+      this.validateMachine(options.machine.trim());
+      targetMachine = options.machine.trim();
+    } else if (process.env.CODESPACES_DEFAULT_MACHINE && process.env.CODESPACES_DEFAULT_MACHINE.trim()) {
+      targetMachine = process.env.CODESPACES_DEFAULT_MACHINE.trim();
+      this.validateMachine(targetMachine);
+    }
+
+    let targetGeo;
+    let cliLocation;
+    if (options.geo !== undefined && options.geo !== null) {
+      if (typeof options.geo !== 'string' || !options.geo.trim()) {
+        throw new ProviderError(`Unsupported Codespaces geo region: ${options.geo}`, {
+          code: 'CODESPACES_INVALID_GEO',
+          statusCode: 400,
+          details: { supportedGeos: Array.from(VALID_GEOS) }
+        });
+      }
+      this.validateGeo(options.geo.trim());
+      targetGeo = options.geo.trim();
+    } else if (process.env.CODESPACES_DEFAULT_GEO && process.env.CODESPACES_DEFAULT_GEO.trim()) {
+      targetGeo = process.env.CODESPACES_DEFAULT_GEO.trim();
+      this.validateGeo(targetGeo);
+    }
+
+    if (targetGeo) {
+      cliLocation = GEO_TO_CLI_LOCATION[targetGeo];
+      if (!cliLocation) {
+        throw new ProviderError(`Unsupported Codespaces geo region: ${targetGeo}`, {
+          code: 'CODESPACES_INVALID_GEO',
+          statusCode: 400
+        });
+      }
+    }
+
+    let targetBranch;
+    if (options.branch !== undefined && options.branch !== null) {
+      if (
+        typeof options.branch !== 'string' ||
+        !options.branch.trim() ||
+        !/^[a-zA-Z0-9_.\-\/]+$/.test(options.branch.trim()) ||
+        options.branch.trim().length > 255
+      ) {
+        throw new ProviderError('Invalid branch name. Must be a valid non-empty branch string', {
+          code: 'CODESPACES_INVALID_BRANCH',
+          statusCode: 400
+        });
+      }
+      targetBranch = options.branch.trim();
+    }
+
+    let targetDisplayName;
+    if (options.displayName !== undefined && options.displayName !== null) {
+      if (
+        typeof options.displayName !== 'string' ||
+        !options.displayName.trim() ||
+        options.displayName.trim().length > 48
+      ) {
+        throw new ProviderError('Invalid displayName. Must be a non-empty string of 48 characters or less', {
+          code: 'CODESPACES_INVALID_DISPLAY_NAME',
+          statusCode: 400
+        });
+      }
+      targetDisplayName = options.displayName.trim();
+    }
+
+    // Load DB credential strictly - no fallback to file/s3/env
+    const { token, credentialFingerprint } = await loadCredentialByRef('codespaces', credentialRef.trim());
+
+    return withCredentialLock(
+      `codespaces:${credentialFingerprint || credentialRef.trim()}`,
+      async () => {
+        // Step 1: Check GitHub account using gh CLI
+        const existingList = await listCodespacesViaCli(token);
+
+        if (Array.isArray(existingList) && existingList.length > 0) {
+          const targetName = existingList[0].name;
+          const verified = await githubClient.getCodespace(token, targetName, { nocache: true });
+          return {
+            created: false,
+            providerSessionId: verified.name,
+            codespace: {
+              name: verified.name,
+              displayName: verified.display_name || verified.name,
+              state: verified.state,
+              status: mapState(verified.state),
+              machine: verified.machine?.name || null,
+              location: verified.location || null,
+              webIdeUrl: verified.web_url || null,
+              sshCommand: `gh codespace ssh -c ${verified.name}`
+            }
+          };
+        }
+
+        // Step 2: Create Codespace via gh CLI
+        const createOptions = {
+          repo: targetRepo,
+          machine: targetMachine,
+          location: cliLocation,
+          branch: targetBranch,
+          displayName: targetDisplayName
+        };
+
+        const createdName = await createCodespaceViaCli(createOptions, token);
+        githubClient.invalidateCodespace(token, createdName);
+
+        // Confirm post-creation via REST
+        let verified;
+        try {
+          verified = await githubClient.getCodespace(token, createdName, { nocache: true });
+        } catch (confirmError) {
+          console.warn(`[Codespaces] Post-create confirmation failed for ${createdName}: ${redactTokensFromMessage(confirmError.message)}`);
+          if (!isTransientConfirmError(confirmError)) {
+            try {
+              await githubClient.deleteCodespace(token, createdName);
+              console.log(`[Codespaces] Cleaned up orphaned codespace ${createdName}`);
+            } catch (cleanupError) {
+              console.warn(`[Codespaces] Failed to clean up orphaned codespace ${createdName}: ${redactTokensFromMessage(cleanupError.message)}`);
+            }
+          }
+          throw confirmError;
+        }
+
+        // Invalidate status-cache for this credential so VPS status service refreshes promptly
+        if (credentialFingerprint) {
+          invalidateCache(cacheKey('codespaces', credentialFingerprint));
+        }
+
+        return {
+          created: true,
+          providerSessionId: verified.name,
+          codespace: {
+            name: verified.name,
+            displayName: verified.display_name || verified.name,
+            state: verified.state,
+            status: mapState(verified.state),
+            machine: verified.machine?.name || null,
+            location: verified.location || null,
+            webIdeUrl: verified.web_url || null,
+            sshCommand: `gh codespace ssh -c ${verified.name}`
+          }
+        };
+      }
+    );
   }
 
   /**

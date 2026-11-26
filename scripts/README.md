@@ -4,6 +4,7 @@ Helper scripts for local development, credential seeding, and provider diagnosti
 
 | Script | Purpose |
 |---|---|
+| [`list-registered-codespaces.js`](#list-registered-codespacesjs) | List all persisted Codespaces credential registrations via the backend |
 | [`refresh-vps-status.js`](#refresh-vps-statusjs) | Refresh persisted VPS credential status via LAB-012 endpoints (bulk or single) |
 | [`seed-credentials.js`](#seed-credentialsjs) | Bulk-import credential files from a local directory into `vps` |
 | [`check-codespaces-create.sh`](#check-codespaces-createsh) | Validate a GitHub PAT and whether the account can adopt / create a Codespace |
@@ -21,6 +22,29 @@ Helper scripts for local development, credential seeding, and provider diagnosti
 
 All scripts load env via `dotenv` when `NODE_ENV !== production`: first the repo root `.env`, then `scripts/.env` if present (per-scripts overrides win). CLI flags `--url` / `--token` win over both. Template: `scripts/.env.example` (also documented in the root `.env.example`).
 Base URL precedence for `refresh-vps-status.js` / `refresh-codesandbox-credits.js` / `get-codesandbox-credits.js` / `seed-credentials.js` is: `--url` flag → `$PWD_API_URL` env var → `http://localhost:$PORT` → `http://localhost:3000`. `$PWD_API_URL` accepts a single URL or a scheduled `url|cron;url|cron` list — see [Backend selection](#backend-selection-pwd_api_url).
+
+---
+
+## list-registered-codespaces.js
+
+Lists every credential registered for the `codespaces` provider through `GET /api/v1/vps`.
+The script follows pagination and does not expose credential contents.
+
+```bash
+node scripts/list-registered-codespaces.js
+npm run list-registered-codespaces
+node scripts/list-registered-codespaces.js --json | jq .
+PWD_API_URL=http://localhost:3200 SERVER_TOKEN=xxx node scripts/list-registered-codespaces.js
+```
+
+Options:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--url <url>` | `$PWD_API_URL` → `http://localhost:$PORT` → `http://localhost:3000` | Backend base URL |
+| `--token <tok>` | `$SERVER_TOKEN` | Server token sent as `x-server-token` |
+| `--json` | off | Print the raw registered rows |
+| `--help`, `-h` | — | Show help |
 
 ---
 

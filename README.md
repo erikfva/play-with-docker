@@ -89,7 +89,8 @@ Codespaces credentials:
 - GitHub REST API versioning uses header `X-GitHub-Api-Version: 2026-03-10`.
 
 Codespaces provider options:
-- `CODESPACES_DEFAULT_REPOSITORY_ID` (required for create)
+- `CODESPACES_DEFAULT_REPOSITORY` (default `vm-manager235-1/test` for RPC creation via `gh`)
+- `CODESPACES_DEFAULT_REPOSITORY_ID` (template repo ID)
 - `CODESPACES_DEFAULT_MACHINE` (default `basicLinux32gb`)
 - `CODESPACES_DEFAULT_GEO` (default `UsEast`)
 - `CODESPACES_DEFAULT_IDLE_TIMEOUT_MINUTES` (default `30`)
@@ -181,6 +182,52 @@ curl -X POST http://localhost:3000/api/v1/sessions/<SESSION_ID>/command \
   -H "x-server-token: $SERVER_TOKEN" \
   -d '{"command":"echo hello"}'
 ```
+
+### Codespaces RPC API
+
+The dedicated Codespaces RPC endpoint allows executing provider-level actions, such as ensuring a Codespace exists on a registered VPS account before starting a session:
+
+```bash
+POST /api/v1/codespaces/rpc/:action
+```
+
+Supported actions:
+- `ensure`: Checks GitHub via `gh` CLI whether a Codespace already exists for the account. If none exists, creates one using `CODESPACES_DEFAULT_REPOSITORY` (`vm-manager235-1/test`).
+
+Example:
+```bash
+curl -X POST http://localhost:3000/api/v1/codespaces/rpc/ensure \
+  -H "Content-Type: application/json" \
+  -H "x-server-token: $SERVER_TOKEN" \
+  -H "x-codespaces-credentials: etecnologysys1alwaysdata" \
+  -d '{
+    "repository": "vm-manager235-1/test",
+    "machine": "basicLinux32gb"
+  }'
+```
+
+Response when created (`201 Created`):
+```json
+{
+  "action": "ensure",
+  "provider": "codespaces",
+  "credentialRef": "etecnologysys1alwaysdata",
+  "created": true,
+  "providerSessionId": "octocat-test-abc123",
+  "codespace": {
+    "name": "octocat-test-abc123",
+    "displayName": "Test Codespace",
+    "state": "Available",
+    "status": "RUNNING",
+    "machine": "basicLinux32gb",
+    "location": "WestUs2",
+    "webIdeUrl": "https://octocat-test-abc123.github.dev",
+    "sshCommand": "gh codespace ssh -c octocat-test-abc123"
+  }
+}
+```
+
+If a Codespace already exists on the account, it returns `200 OK` with `"created": false` without provisioning a duplicate.
 
 ## Render Notes
 
