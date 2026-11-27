@@ -40,7 +40,7 @@ const ACTIONS = new Map([
   ]
 ]);
 
-router.post('/rpc/:action', async (req, res) => {
+router.post('/:action', async (req, res) => {
   const action = req.params.action;
   const handler = ACTIONS.get(action);
 
@@ -56,7 +56,15 @@ router.post('/rpc/:action', async (req, res) => {
   }
 
   try {
-    const provider = getProvider('codespaces');
+    if (req.body?.provider !== 'codespaces') {
+      throw new ProviderError('RPC provider must be "codespaces"', {
+        code: 'CODESPACES_INVALID_PROVIDER',
+        statusCode: 400,
+        details: { provider: req.body?.provider, supportedProviders: ['codespaces'] }
+      });
+    }
+
+    const provider = getProvider(req.body.provider);
     const response = await handler(provider, req);
     return res.status(response.statusCode).json(response.data);
   } catch (error) {

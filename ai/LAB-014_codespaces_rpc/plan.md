@@ -4,7 +4,7 @@
 
 ## Goal
 
-Implement the dedicated action-routed RPC endpoint `POST /api/v1/codespaces/rpc/:action` (with `:action = ensure` in LAB-014) that checks GitHub via `gh` CLI for existing Codespaces under a registered database VPS credential (e.g., `etecnologysys1alwaysdata`) and creates one (`vm-manager235-1/test` by default) if none exists.
+Implement the dedicated action-routed RPC endpoint `POST /api/v1/rpc/:action` (with `:action = ensure` and `provider: "codespaces"` in LAB-014) that checks GitHub via `gh` CLI for existing Codespaces under a registered database VPS credential (e.g., `etecnologysys1alwaysdata`) and creates one (`vm-manager235-1/test` by default) if none exists.
 
 Leave `POST /api/v1/sessions` completely untouched to handle existing Codespace startup/adoption and Docker/PaaS container provisioning.
 
@@ -23,11 +23,11 @@ Leave `POST /api/v1/sessions` completely untouched to handle existing Codespace 
 
 ## Design Decisions & Architecture Alignment
 
-1. **Dedicated RPC Endpoint with URL Action Routing (`POST /api/v1/codespaces/rpc/:action`)**:
+1. **Dedicated RPC Endpoint with URL Action Routing (`POST /api/v1/rpc/:action`)**:
    - Matches the project convention (e.g., `/sessions/terminate-all`, `/vps/status/refresh`).
    - Action `:action` is validated against an explicit allowlist (`ACTIONS = { ensure: ... }`).
    - Unsupported actions fail immediately with `400 CODESPACES_UNSUPPORTED_ACTION`.
-   - Leaves request bodies flat and clean, with explicit routing in HTTP access logs.
+   - Keeps the request body flat; `provider` identifies the target implementation and the URL identifies the action.
 
 2. **Mandatory `gh` CLI Check and Creation**:
    - As explicitly required by the user, the account is checked for existing Codespaces using `gh codespace list --json name,state,displayName,machineName,lastUsedAt`.
@@ -93,7 +93,7 @@ Leave `POST /api/v1/sessions` completely untouched to handle existing Codespace 
   - If post-create confirmation fails unrecoverably, attempt orphan cleanup via `deleteCodespace(token, createdName)` and log redacted warning if deletion fails.
 
 ### Step 4: Add RPC Route `src/routes/codespaces-rpc.js`
-- Create Express router with `POST /rpc/:action`.
+- Create Express router with `POST /:action` (mounted at `/api/v1/rpc`).
 - Define explicit action map:
   ```js
   const ACTIONS = {
@@ -101,10 +101,11 @@ Leave `POST /api/v1/sessions` completely untouched to handle existing Codespace 
   };
   ```
 - Reject unsupported action with `400 CODESPACES_UNSUPPORTED_ACTION` before credential lookup.
+- Require `provider: "codespaces"`; return `400 CODESPACES_INVALID_PROVIDER` for missing or unsupported values before credential lookup.
 - Extract `credentialRef`:
   - Check `req.headers['x-codespaces-credentials']` or `req.body?.credentialRef`.
   - Return `401 CODESPACES_NO_CREDENTIAL` if missing.
-- Resolve provider: `getProvider('codespaces')`.
+- Resolve provider: validate and pass `req.body.provider` to `getProvider`.
 - Call `provider.ensureCodespace({ ...(req.body || {}), credentialRef })`.
 - Return HTTP 201 if `result.created === true`, else HTTP 200, formatted with:
   ```json
@@ -121,14 +122,14 @@ Leave `POST /api/v1/sessions` completely untouched to handle existing Codespace 
 - Import `codespacesRpcRoutes` from `./routes/codespaces-rpc`.
 - Mount route behind `requireServerToken`:
   ```js
-  app.use('/api/v1/codespaces', requireServerToken, codespacesRpcRoutes);
+  app.use('/api/v1/rpc', requireServerToken, codespacesRpcRoutes);
   ```
 - Verify `POST /api/v1/sessions` and `POST /api/v1/vps` routes remain unchanged.
 
 ### Step 6: Test Suite
 - **Route tests (`tests/routes/codespaces-rpc.test.js`)**:
   - Requires server token (`401` / `403` without auth).
-  - Action allowlist: `POST /api/v1/codespaces/rpc/foobar` returns `400 CODESPACES_UNSUPPORTED_ACTION`.
+  - Action allowlist: `POST /api/v1/rpc/foobar` returns `400 CODESPACES_UNSUPPORTED_ACTION`.
   - Missing credential ref returns `401 CODESPACES_NO_CREDENTIAL`.
   - Missing DB credential returns `404 VPS_NOT_FOUND`.
   - Success when Codespace exists returns `200 OK` with `created: false`.
@@ -148,7 +149,7 @@ Leave `POST /api/v1/sessions` completely untouched to handle existing Codespace 
   - Verifies that after a Codespace is ensured for `etecnologysys1alwaysdata`, `POST /api/v1/sessions` with `credentialRef: 'etecnologysys1alwaysdata'` adopts the newly created Codespace.
 
 ### Step 7: Documentation Updates
-- Update `ai/project-overview.md` to document the `POST /api/v1/codespaces/rpc/:action` endpoint and `CODESPACES_DEFAULT_REPOSITORY`.
+- Update `ai/project-overview.md` to document the `POST /api/v1/rpc/:action` endpoint and `CODESPACES_DEFAULT_REPOSITORY`.
 - Update `README.md` API reference section.
 - Add `tests/http/LAB-014-codespaces-rpc.http` with REST Client requests for the `ensure` action and unsupported-action response, following the existing `tests/http/LAB-008-codespaces.http` format. The ensure request uses a registered Codespaces VPS credential and may create a billable Codespace when the account has none.
 
@@ -160,17 +161,17 @@ Leave `POST /api/v1/sessions` completely untouched to handle existing Codespace 
 | `src/services/providers/codespaces/cli-executor.js` | Add `listCodespacesViaCli`, `createCodespaceViaCli`, geo-to-location mapping, and `ENOENT` handling |
 | `src/services/providers/codespaces-provider.js` | Add `ensureCodespace`, repository validation, orphan cleanup, and cache invalidation |
 | `src/routes/codespaces-rpc.js` | **New file**: RPC router with `:action` allowlist dispatcher (`ensure`) |
-| `src/server.js` | Mount `/api/v1/codespaces` behind `requireServerToken` |
+| `src/server.js` | Mount `/api/v1/rpc` behind `requireServerToken` |
 | `tests/codespaces-rpc-route.test.js` | Route tests for auth, validation, allowlist, and 200/201 responses |
 | `tests/codespaces-rpc-provider.test.js` | Provider unit tests for `ensureCodespace` flow |
 | `tests/codespaces-rpc-cli-executor.test.js` | CLI executor and status-cache tests |
 | `tests/http/LAB-014-codespaces-rpc.http` | Manual API requests for ensure and unsupported action, following the LAB-008 HTTP test format |
 | `ai/project-overview.md` | Document new RPC endpoint and defaults |
-| `README.md` | Document `POST /api/v1/codespaces/rpc/ensure` endpoint |
+| `README.md` | Document `POST /api/v1/rpc/ensure` endpoint |
 
 ## Completion Criteria
 
-- [x] Dedicated endpoint `POST /api/v1/codespaces/rpc/:action` implemented with action allowlist (`ensure`).
+- [x] Dedicated endpoint `POST /api/v1/rpc/:action` implemented with action allowlist (`ensure`) and required `provider: "codespaces"` request field.
 - [x] `POST /api/v1/sessions` remains completely intact and unaffected.
 - [x] Credential resolution is DB-only (`loadCredentialByRef('codespaces', credentialRef)`).
 - [x] `gh` CLI checks GitHub account first; returns existing Codespace info if found (`created: false`, 200).
@@ -180,5 +181,5 @@ Leave `POST /api/v1/sessions` completely untouched to handle existing Codespace 
 - [x] Failed post-create confirmation triggers orphan cleanup via `deleteCodespace`.
 - [x] Tokens redacted and never exposed in logs, errors, or responses.
 - [x] All unit and integration tests passing.
-- [x] Manual HTTP API requests added for `POST /api/v1/codespaces/rpc/ensure` (200/201) and unsupported action handling.
+- [x] Manual HTTP API requests added for `POST /api/v1/rpc/ensure` (200/201) and unsupported action handling.
 - [x] Documentation updated.

@@ -52,9 +52,9 @@ flowchart TD
 
 ### File Hierarchy and Responsibility:
 
-1. **`src/server.js`**: Server initializer. Bootstraps the PostgreSQL database connection, restores active keep-alive timers for surviving database sessions, and launches the Express server with routes mounted for `/api/v1/sessions`, `/api/v1/vps`, and `/api/v1/codespaces`.
+1. **`src/server.js`**: Server initializer. Bootstraps the PostgreSQL database connection, restores active keep-alive timers for surviving database sessions, and launches the Express server with routes mounted for `/api/v1/sessions`, `/api/v1/vps`, and `/api/v1/rpc`.
 2. **`src/routes/sessions.js`**: Exposes REST endpoints under `/api/v1/sessions` and handles credential verification requirements and session adoption/startup.
-3. **`src/routes/codespaces-rpc.js`**: Exposes dedicated RPC actions under `/api/v1/codespaces/rpc/:action` (e.g. `ensure` to check via `gh` CLI and create Codespaces if missing).
+3. **`src/routes/codespaces-rpc.js`**: Exposes RPC actions under `/api/v1/rpc/:action`; the request body identifies the provider (currently `codespaces`).
 4. **`src/services/provider-factory.js`**: Resolves requested provider identifiers into their active implementations (`gcs`, `codesandbox`, `codespaces`, `pwd`).
 5. **`src/services/providers/`**:
    - **`base-provider.js`**: Abstract class defining lifecycle hooks (`createSession`, `refreshSession`, `executeCommand`, `terminateSession`, `isSessionActive`, `executeKeepAlive`).
@@ -273,10 +273,11 @@ Implemented in `src/services/providers/codespaces-provider.js` + `src/services/p
 6. **Keep-alive** — `gh-cli-command`, default 20 min, `min(configured, idleTimeout − 10)`, `runOnStart: false`.
 7. **Terminate** — **stops** the codespace (not deletes), fire-and-forgets a background cleanup script, then the route marks the row `TERMINATED` (retained in DB).
 
-### Dedicated RPC Endpoint (`POST /api/v1/codespaces/rpc/:action`)
+### Dedicated RPC Endpoint (`POST /api/v1/rpc/:action`)
 Implemented in `src/routes/codespaces-rpc.js` and `CodespacesProvider.ensureCodespace()`.
 - **Purpose**: Dedicated action-routed endpoint separate from `POST /api/v1/sessions` (which remains dedicated to adopting/starting existing Codespaces and provisioning Docker/PaaS containers).
-- **Supported action**: `ensure` (`POST /api/v1/codespaces/rpc/ensure`).
+- **Supported action**: `ensure` (`POST /api/v1/rpc/ensure`).
+- **Request body**: Requires `provider: "codespaces"`; currently supported provider is Codespaces.
 - **Flow**:
   1. Loads token strictly from the `vps` database table via `loadCredentialByRef('codespaces', credentialRef)`.
   2. Queries the GitHub account via `gh codespace list --json ...` using per-spawn `GH_TOKEN`.

@@ -6,17 +6,18 @@
 # Requires @codespacesCredentialRef to name a Codespaces credential registered
 # in the vps table. Returns 200 if a Codespace already exists, or 201 if one
 # was created using CODESPACES_DEFAULT_REPOSITORY (default vm-manager235-1/test).
-POST {{baseUrl}}/codespaces/rpc/ensure
+POST {{baseUrl}}/rpc/ensure
 Content-Type: application/json
 X-Server-Token: {{serverToken}}
 X-Codespaces-Credentials: {{codespacesCredentialRef}}
 
 {
+  "provider": "codespaces",
   "machine": "basicLinux32gb"
 }
 
 ### LAB-014: Unsupported action is rejected before credential lookup
-POST {{baseUrl}}/codespaces/rpc/not-an-action
+POST {{baseUrl}}/rpc/not-an-action
 Content-Type: application/json
 X-Server-Token: {{serverToken}}
 

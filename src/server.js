@@ -20,7 +20,7 @@ app.use(bodyParser.json());
 // Routes
 app.use('/api/v1/sessions', requireServerToken, sessionRoutes);
 app.use('/api/v1/vps', requireServerToken, vpsRoutes);
-app.use('/api/v1/codespaces', requireServerToken, codespacesRpcRoutes);
+app.use('/api/v1/rpc', requireServerToken, codespacesRpcRoutes);
 
 // Health Check
 app.get('/health', (req, res) => {

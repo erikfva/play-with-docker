@@ -188,7 +188,7 @@ curl -X POST http://localhost:3000/api/v1/sessions/<SESSION_ID>/command \
 The dedicated Codespaces RPC endpoint allows executing provider-level actions, such as ensuring a Codespace exists on a registered VPS account before starting a session:
 
 ```bash
-POST /api/v1/codespaces/rpc/:action
+POST /api/v1/rpc/:action
 ```
 
 Supported actions:
@@ -196,11 +196,12 @@ Supported actions:
 
 Example:
 ```bash
-curl -X POST http://localhost:3000/api/v1/codespaces/rpc/ensure \
+curl -X POST http://localhost:3000/api/v1/rpc/ensure \
   -H "Content-Type: application/json" \
   -H "x-server-token: $SERVER_TOKEN" \
   -H "x-codespaces-credentials: etecnologysys1alwaysdata" \
   -d '{
+    "provider": "codespaces",
     "repository": "vm-manager235-1/test",
     "machine": "basicLinux32gb"
   }'
