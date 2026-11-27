@@ -1,6 +1,6 @@
 @baseUrl = http://localhost:3200/api/v1
 @serverToken = {{$dotenv SERVER_TOKEN}}
-@codespacesCredentialRef = etecnologysys1alwaysdata
+@codespacesCredentialRef = vm-manager234
 
 ### LAB-014: Ensure a Codespace exists for a registered VPS credential
 # Requires @codespacesCredentialRef to name a Codespaces credential registered
@@ -11,7 +11,9 @@ Content-Type: application/json
 X-Server-Token: {{serverToken}}
 X-Codespaces-Credentials: {{codespacesCredentialRef}}
 
-{}
+{
+  "machine": "basicLinux32gb"
+}
 
 ### LAB-014: Unsupported action is rejected before credential lookup
 POST {{baseUrl}}/codespaces/rpc/not-an-action
