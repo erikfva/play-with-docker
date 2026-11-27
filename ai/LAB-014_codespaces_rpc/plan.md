@@ -149,6 +149,7 @@ Leave `POST /api/v1/sessions` completely untouched to handle existing Codespace 
 ### Step 7: Documentation Updates
 - Update `ai/project-overview.md` to document the `POST /api/v1/codespaces/rpc/:action` endpoint and `CODESPACES_DEFAULT_REPOSITORY`.
 - Update `README.md` API reference section.
+- Add `tests/http/LAB-014-codespaces-rpc.http` with REST Client requests for the `ensure` action and unsupported-action response, following the existing `tests/http/LAB-008-codespaces.http` format. The ensure request uses a registered Codespaces VPS credential and may create a billable Codespace when the account has none.
 
 ## Files to Modify and Create
 
@@ -159,8 +160,10 @@ Leave `POST /api/v1/sessions` completely untouched to handle existing Codespace 
 | `src/services/providers/codespaces-provider.js` | Add `ensureCodespace`, repository validation, orphan cleanup, and cache invalidation |
 | `src/routes/codespaces-rpc.js` | **New file**: RPC router with `:action` allowlist dispatcher (`ensure`) |
 | `src/server.js` | Mount `/api/v1/codespaces` behind `requireServerToken` |
-| `tests/routes/codespaces-rpc.test.js` | **New file**: Route tests for auth, validation, allowlist, 200/201 responses |
-| `tests/services/providers/codespaces-rpc.test.js` | **New file**: Provider unit tests for `ensureCodespace` flow |
+| `tests/codespaces-rpc-route.test.js` | Route tests for auth, validation, allowlist, and 200/201 responses |
+| `tests/codespaces-rpc-provider.test.js` | Provider unit tests for `ensureCodespace` flow |
+| `tests/codespaces-rpc-cli-executor.test.js` | CLI executor and status-cache tests |
+| `tests/http/LAB-014-codespaces-rpc.http` | Manual API requests for ensure and unsupported action, following the LAB-008 HTTP test format |
 | `ai/project-overview.md` | Document new RPC endpoint and defaults |
 | `README.md` | Document `POST /api/v1/codespaces/rpc/ensure` endpoint |
 
@@ -175,4 +178,5 @@ Leave `POST /api/v1/sessions` completely untouched to handle existing Codespace 
 - [x] Failed post-create confirmation triggers orphan cleanup via `deleteCodespace`.
 - [x] Tokens redacted and never exposed in logs, errors, or responses.
 - [x] All unit and integration tests passing.
+- [x] Manual HTTP API requests added for `POST /api/v1/codespaces/rpc/ensure` (200/201) and unsupported action handling.
 - [x] Documentation updated.

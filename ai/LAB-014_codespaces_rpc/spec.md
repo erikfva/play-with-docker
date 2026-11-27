@@ -217,11 +217,12 @@ Content-Type: application/json
 
 ## Implementation Checklist
 
-- [ ] Mount `src/routes/codespaces-rpc.js` at `/api/v1/codespaces` in `src/server.js` behind `requireServerToken`, exposing `POST /rpc/:action` with an explicit `ACTIONS` allowlist (`ensure`).
+- [x] Mount `src/routes/codespaces-rpc.js` at `/api/v1/codespaces` in `src/server.js` behind `requireServerToken`, exposing `POST /rpc/:action` with an explicit `ACTIONS` allowlist (`ensure`).
 - [ ] Verify installed `gh --version` and exact `gh codespace list --json` and `gh codespace create` flags, `--location` values, stdout/JSON output, and wait behavior.
-- [ ] Finalize request schema (`credentialRef`, `repository` defaulting to `vm-manager235-1/test`, `branch`, `machine`, `geo`, `idleTimeoutMinutes`, `displayName`) and `CODESPACES_DEFAULT_REPOSITORY=vm-manager235-1/test`.
-- [ ] Implement `listCodespacesViaCli` (`gh codespace list --json ...`) and `createCodespaceViaCli` (`gh codespace create --repo ...`) in `codespaces/cli-executor.js` (or `create-executor.js`) with `execFile`, `retries: 0` on create, sanitized `GH_TOKEN` env, `ENOENT`/timeout handling, and token-redacted error mapping.
-- [ ] Implement `CodespacesProvider.ensureCodespace(options)` using DB-only lookup (`loadCredentialByRef('codespaces', credentialRef)`), `gh` existence check, `gh codespace create` when empty, `githubClient.getCodespace(..., { nocache: true })` confirmation, `deleteCodespace` cleanup on failed post-create confirmation, and `status-cache` invalidation.
-- [ ] Keep `POST /api/v1/sessions` and `BaseProvider` untouched.
-- [ ] Add unit and integration tests for `:action` allowlist validation (`400 CODESPACES_UNSUPPORTED_ACTION`), `etecnologysys1alwaysdata` DB lookup, `gh` check-then-create vs existing-codespace no-op (`201` vs `200`), `vm-manager235-1/test` default, flag validation/mapping, CLI error/timeout mapping, token isolation, and subsequent `POST /api/v1/sessions` adoption.
-- [ ] Update `ai/project-overview.md` and `README.md` with `POST /api/v1/codespaces/rpc/:action` (`ensure`) and `CODESPACES_DEFAULT_REPOSITORY=vm-manager235-1/test`.
+- [x] Finalize request schema (`credentialRef`, `repository` defaulting to `vm-manager235-1/test`, `branch`, `machine`, `geo`, `idleTimeoutMinutes`, `displayName`) and `CODESPACES_DEFAULT_REPOSITORY=vm-manager235-1/test`.
+- [x] Implement `listCodespacesViaCli` (`gh codespace list --json ...`) and `createCodespaceViaCli` (`gh codespace create --repo ...`) in `codespaces/cli-executor.js` with `execFile`, zero create retries, sanitized `GH_TOKEN` env, `ENOENT`/timeout handling, and token-redacted error mapping.
+- [x] Implement `CodespacesProvider.ensureCodespace(options)` using DB-only lookup (`loadCredentialByRef('codespaces', credentialRef)`), `gh` existence check, `gh codespace create` when empty, `githubClient.getCodespace(..., { nocache: true })` confirmation, orphan cleanup on unrecoverable confirmation failure, and `status-cache` invalidation.
+- [x] Keep `POST /api/v1/sessions` and `BaseProvider` untouched.
+- [x] Add unit and route tests for action allowlisting, credential resolution, check-then-create vs existing-codespace behavior, defaults and validation, CLI errors and token isolation, cache invalidation, and orphan cleanup.
+- [x] Add the manual HTTP API requests in `tests/http/LAB-014-codespaces-rpc.http` for ensure (200/201) and unsupported-action behavior.
+- [x] Update `ai/project-overview.md` and `README.md` with `POST /api/v1/codespaces/rpc/:action` (`ensure`) and `CODESPACES_DEFAULT_REPOSITORY=vm-manager235-1/test`.
