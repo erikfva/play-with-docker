@@ -85,10 +85,9 @@ Leave `POST /api/v1/sessions` completely untouched to handle existing Codespace 
     - Return `{ created: false, providerSessionId: list[0].name, codespace: formatResult(...) }` (HTTP 200).
 - If `list.length === 0`:
   - Call `createCodespaceViaCli({ repo, machine, location, branch, displayName }, token)`.
-  - Invalidate read-cache for the codespace name.
-  - Confirm via `getCodespace(token, createdName, { nocache: true })`.
-  - Invalidate VPS status cache entry via `invalidateCache(cacheKey('codespaces', credentialFingerprint))`.
-  - Return `{ created: true, providerSessionId: createdName, codespace: formatResult(...) }` (HTTP 201).
+  - Immediately invalidate the Codespace read cache and VPS status cache entry.
+  - Poll `getCodespace(token, createdName, { nocache: true })` every 3 seconds for up to 60 seconds. Return early if the mapped status is `RUNNING` or terminal (`FAILED`, `STOPPED`, `TERMINATED`).
+  - If the 60-second readiness window expires, return the latest successfully confirmed state, even if it remains `PENDING`/`STARTING` (HTTP 201).
   - If post-create confirmation fails unrecoverably, attempt orphan cleanup via `deleteCodespace(token, createdName)` and log redacted warning if deletion fails.
 
 ### Step 4: Add RPC Route `src/routes/codespaces-rpc.js`
@@ -175,6 +174,7 @@ Leave `POST /api/v1/sessions` completely untouched to handle existing Codespace 
 - [x] `gh` CLI checks GitHub account first; returns existing Codespace info if found (`created: false`, 200).
 - [x] `gh codespace create` called only when no Codespace exists, with default repository `vm-manager235-1/test` and `retries: 0` (`created: true`, 201).
 - [x] Status cache for `('codespaces', credentialFingerprint)` invalidated when new Codespace created.
+- [x] After creation, poll live Codespaces state every 3 seconds for up to 60 seconds; return when active/terminal or return the latest confirmed state after timeout.
 - [x] Failed post-create confirmation triggers orphan cleanup via `deleteCodespace`.
 - [x] Tokens redacted and never exposed in logs, errors, or responses.
 - [x] All unit and integration tests passing.

@@ -32,7 +32,7 @@ Here, **RPC** means an allowlisted, action-routed API endpoint (`POST /api/v1/co
 3. The provider looks up `provider = 'codespaces'` and `name = 'etecnologysys1alwaysdata'` in the `vps` table via `loadCredentialByRef('codespaces', 'etecnologysys1alwaysdata')` to obtain the GitHub token and `credentialFingerprint`.
 4. Using `execFile('gh', ...)` with per-spawn `GH_TOKEN`, the provider checks GitHub (e.g. `gh codespace list --json name,state,displayName,machineName,lastUsedAt`) to verify whether any Codespace already exists on that GitHub account.
 5. If a Codespace already exists (`list.length > 0`), the RPC does **not** create a duplicate: it confirms/returns the existing Codespace metadata (`created: false`, HTTP `200`).
-6. If **no** Codespace exists (`list.length === 0`), the provider runs `gh codespace create --repo vm-manager235-1/test ...` (using request `repository` if supplied, otherwise `CODESPACES_DEFAULT_REPOSITORY` defaulting to `vm-manager235-1/test`, with `retries: 0` and per-spawn `GH_TOKEN`), confirms the newly created Codespace VM ID via `githubClient.getCodespace(..., { nocache: true })`, invalidates the VPS status cache entry if present, and returns the Codespace details (`created: true`, HTTP `201`).
+6. If **no** Codespace exists (`list.length === 0`), the provider runs `gh codespace create --repo vm-manager235-1/test ...` (using request `repository` if supplied, otherwise `CODESPACES_DEFAULT_REPOSITORY` defaulting to `vm-manager235-1/test`, with `retries: 0` and per-spawn `GH_TOKEN`), then polls `githubClient.getCodespace(..., { nocache: true })` every 3 seconds for up to 60 seconds. It returns as soon as the new Codespace is active (`RUNNING`), reaches a terminal state, or the readiness wait expires; after expiry it returns the latest confirmed state (which may still be `PENDING`/`STARTING`). The VPS status cache is invalidated immediately after creation.
 7. The RPC does **not** create a `sessions` row; the caller can now invoke `POST /api/v1/sessions` (`provider: "codespaces"`) with `etecnologysys1alwaysdata` to adopt/start the Codespace and provision Docker/PaaS workloads as usual.
 
 ## Scope
@@ -101,6 +101,7 @@ Here, **RPC** means an allowlisted, action-routed API endpoint (`POST /api/v1/co
 
 - Because `POST /api/v1/sessions` still adopts existing Codespaces on the account (and `CodespacesProvider.getCredentialStatus()` reports `UNAVAILABLE` when `codespaceCount === 0`), creating a new Codespace via `POST /api/v1/codespaces/rpc/ensure` makes that VPS credential usable for subsequent `POST /api/v1/sessions` calls.
 - After `ensure` creates a new Codespace (`created: true`), clear the `status-cache.js` entry for `('codespaces', credentialFingerprint)` so `GET /api/v1/vps` and `GET /api/v1/vps/available-credential?provider=codespaces` reflect the new Codespace VM ID and `AVAILABLE` status promptly after refresh instead of serving stale `UNAVAILABLE` cache entries.
+- After creation, poll live GitHub state every 3 seconds for up to 60 seconds. Return immediately when the VM becomes active (`RUNNING`) or reaches a terminal state; if the wait expires, return the most recently confirmed state, which may still be `PENDING` or `STARTING`.
 - The RPC does not modify existing `sessions` rows or block on active sessions—if a Codespace already exists on GitHub (whether backing a session or idle), `ensure` simply detects it via `gh` and returns `created: false` without creating another VM.
 
 ## Acceptance Criteria
@@ -116,6 +117,7 @@ Here, **RPC** means an allowlisted, action-routed API endpoint (`POST /api/v1/co
 9. `gh codespace create` is never retried automatically on timeout or unknown exit.
 10. `POST /api/v1/sessions` behavior for `codespaces` (adopt/wake/initialize/PaaS Docker provisioning) and `gcs`/`codesandbox` flows remain completely unchanged; after `POST /api/v1/codespaces/rpc/ensure` creates a Codespace for `etecnologysys1alwaysdata`, calling `POST /api/v1/sessions` with `etecnologysys1alwaysdata` succeeds by adopting the newly provisioned Codespace.
 11. Status cache for `('codespaces', credentialFingerprint)` is invalidated when `created: true` so VPS status reflects the new Codespace.
+12. After creating a Codespace, the provider checks its state every 3 seconds for up to 60 seconds, returning once active or terminal; if the wait expires, the response contains the latest confirmed state and may report `PENDING` or `STARTING`.
 
 ## API Contract Proposal
 
@@ -147,6 +149,8 @@ Content-Type: application/json
   "displayName": "My Codespace"
 }
 ```
+
+For a newly created Codespace, the endpoint polls for up to 60 seconds (3-second intervals) for it to become active. If that window expires first, the `201 Created` response contains the latest confirmed state and may still report `Provisioning` / `PENDING`.
 
 - `credentialRef` is optional in the body if `x-codespaces-credentials` header is provided.
 - `repository` defaults to `CODESPACES_DEFAULT_REPOSITORY` (`vm-manager235-1/test`) if omitted.
@@ -221,7 +225,7 @@ Content-Type: application/json
 - [ ] Verify installed `gh --version` and exact `gh codespace list --json` and `gh codespace create` flags, `--location` values, stdout/JSON output, and wait behavior.
 - [x] Finalize request schema (`credentialRef`, `repository` defaulting to `vm-manager235-1/test`, `branch`, `machine`, `geo`, `idleTimeoutMinutes`, `displayName`) and `CODESPACES_DEFAULT_REPOSITORY=vm-manager235-1/test`.
 - [x] Implement `listCodespacesViaCli` (`gh codespace list --json ...`) and `createCodespaceViaCli` (`gh codespace create --repo ...`) in `codespaces/cli-executor.js` with `execFile`, zero create retries, sanitized `GH_TOKEN` env, `ENOENT`/timeout handling, and token-redacted error mapping.
-- [x] Implement `CodespacesProvider.ensureCodespace(options)` using DB-only lookup (`loadCredentialByRef('codespaces', credentialRef)`), `gh` existence check, `gh codespace create` when empty, `githubClient.getCodespace(..., { nocache: true })` confirmation, orphan cleanup on unrecoverable confirmation failure, and `status-cache` invalidation.
+- [x] Implement `CodespacesProvider.ensureCodespace(options)` using DB-only lookup (`loadCredentialByRef('codespaces', credentialRef)`), `gh` existence check, `gh codespace create` when empty, immediate cache invalidation, and fresh REST polling every 3 seconds for up to 60 seconds after creation; return once active/terminal or with the latest state at timeout, and clean up on unrecoverable confirmation failure.
 - [x] Keep `POST /api/v1/sessions` and `BaseProvider` untouched.
 - [x] Add unit and route tests for action allowlisting, credential resolution, check-then-create vs existing-codespace behavior, defaults and validation, CLI errors and token isolation, cache invalidation, and orphan cleanup.
 - [x] Add the manual HTTP API requests in `tests/http/LAB-014-codespaces-rpc.http` for ensure (200/201) and unsupported-action behavior.

@@ -1,6 +1,6 @@
 @baseUrl = http://localhost:3200/api/v1
 @serverToken = {{$dotenv SERVER_TOKEN}}
-@codespacesCredentialRef = vm-manager234
+@codespacesCredentialRef = vm-manager235
 
 ### LAB-014: Ensure a Codespace exists for a registered VPS credential
 # Requires @codespacesCredentialRef to name a Codespaces credential registered

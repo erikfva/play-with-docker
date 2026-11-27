@@ -31,6 +31,7 @@ const VALID_MACHINES = new Set([
 const VALID_GEOS = new Set(['UsEast', 'UsWest', 'EuropeWest', 'SoutheastAsia']);
 const NON_TERMINAL_STATUSES = new Set(['RUNNING', 'STARTING', 'PENDING', 'STOPPING']);
 const POLL_INTERVAL_MS = 3000;
+const ENSURE_READY_TIMEOUT_MS = 60_000;
 
 function parseMetadata(metadata) {
   if (!metadata) {
@@ -1127,13 +1128,49 @@ class CodespacesProvider extends BaseProvider {
         const createdName = await createCodespaceViaCli(createOptions, token);
         githubClient.invalidateCodespace(token, createdName);
 
-        // Confirm post-creation via REST
+        // Clear cached VPS status immediately after creation so other callers
+        // do not continue seeing the account as unavailable during boot polling.
+        if (credentialFingerprint) {
+          invalidateCache(cacheKey('codespaces', credentialFingerprint));
+        }
+
+        // Poll GitHub for readiness for a short bounded window. The CLI can
+        // return as soon as GitHub reports Provisioning; give the VM a chance
+        // to become Available before returning it to the caller.
         let verified;
-        try {
-          verified = await githubClient.getCodespace(token, createdName, { nocache: true });
-        } catch (confirmError) {
-          console.warn(`[Codespaces] Post-create confirmation failed for ${createdName}: ${redactTokensFromMessage(confirmError.message)}`);
-          if (!isTransientConfirmError(confirmError)) {
+        let confirmError;
+        const readyDeadline = Date.now() + ENSURE_READY_TIMEOUT_MS;
+        while (Date.now() < readyDeadline) {
+          try {
+            verified = await githubClient.getCodespace(token, createdName, { nocache: true });
+            confirmError = null;
+          } catch (error) {
+            confirmError = error;
+            if (!isTransientConfirmError(error)) {
+              verified = null;
+              break;
+            }
+          }
+
+          if (verified) {
+            const status = mapState(verified.state);
+            if (status === 'RUNNING' || ['FAILED', 'STOPPED', 'TERMINATED'].includes(status)) {
+              break;
+            }
+          }
+
+          const remaining = readyDeadline - Date.now();
+          if (remaining <= 0) break;
+          await sleep(Math.min(POLL_INTERVAL_MS, remaining));
+        }
+
+        if (!verified) {
+          const error = confirmError || new ProviderError('Unable to confirm created Codespace', {
+            code: 'CODESPACES_CREATION_FAILED',
+            statusCode: 502
+          });
+          console.warn(`[Codespaces] Post-create confirmation failed for ${createdName}: ${redactTokensFromMessage(error.message)}`);
+          if (!isTransientConfirmError(error)) {
             try {
               await githubClient.deleteCodespace(token, createdName);
               console.log(`[Codespaces] Cleaned up orphaned codespace ${createdName}`);
@@ -1141,12 +1178,7 @@ class CodespacesProvider extends BaseProvider {
               console.warn(`[Codespaces] Failed to clean up orphaned codespace ${createdName}: ${redactTokensFromMessage(cleanupError.message)}`);
             }
           }
-          throw confirmError;
-        }
-
-        // Invalidate status-cache for this credential so VPS status service refreshes promptly
-        if (credentialFingerprint) {
-          invalidateCache(cacheKey('codespaces', credentialFingerprint));
+          throw error;
         }
 
         return {

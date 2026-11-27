@@ -281,7 +281,7 @@ Implemented in `src/routes/codespaces-rpc.js` and `CodespacesProvider.ensureCode
   1. Loads token strictly from the `vps` database table via `loadCredentialByRef('codespaces', credentialRef)`.
   2. Queries the GitHub account via `gh codespace list --json ...` using per-spawn `GH_TOKEN`.
   3. If a Codespace exists, confirms it and returns `created: false` (HTTP 200).
-  4. If no Codespace exists, executes `gh codespace create -R <repo>` (defaulting to `vm-manager235-1/test` or `CODESPACES_DEFAULT_REPOSITORY`) with `retries: 0`, confirms via REST `getCodespace`, invalidates the VPS status cache entry, and returns `created: true` (HTTP 201).
+  4. If no Codespace exists, executes `gh codespace create -R <repo>` (defaulting to `vm-manager235-1/test` or `CODESPACES_DEFAULT_REPOSITORY`) with `retries: 0`, invalidates the VPS status cache, and polls fresh REST state every 3 seconds for up to 60 seconds. It returns when the Codespace becomes active or terminal; if the wait expires, it returns the latest confirmed state (which may still be `PENDING`) with `created: true` (HTTP 201).
   5. If post-create confirmation fails, cleans up the orphaned Codespace via `deleteCodespace`.
 - **Adoption**: Once ensured, callers can invoke `POST /api/v1/sessions` with the registered credential reference to adopt and start the Codespace.
 
