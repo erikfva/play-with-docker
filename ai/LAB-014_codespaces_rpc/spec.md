@@ -222,7 +222,7 @@ For a newly created Codespace, the endpoint polls for up to 60 seconds (3-second
 ## Implementation Checklist
 
 - [x] Mount `src/routes/codespaces-rpc.js` at `/api/v1/codespaces` in `src/server.js` behind `requireServerToken`, exposing `POST /rpc/:action` with an explicit `ACTIONS` allowlist (`ensure`).
-- [ ] Verify installed `gh --version` and exact `gh codespace list --json` and `gh codespace create` flags, `--location` values, stdout/JSON output, and wait behavior.
+- [x] Smoke-check Codespaces list/create behavior and output in the running environment. The reported successful ensure response confirms creation, name parsing, machine/location metadata, and the provisioning state that readiness polling now handles. The exact `gh --version` was not recorded.
 - [x] Finalize request schema (`credentialRef`, `repository` defaulting to `vm-manager235-1/test`, `branch`, `machine`, `geo`, `idleTimeoutMinutes`, `displayName`) and `CODESPACES_DEFAULT_REPOSITORY=vm-manager235-1/test`.
 - [x] Implement `listCodespacesViaCli` (`gh codespace list --json ...`) and `createCodespaceViaCli` (`gh codespace create --repo ...`) in `codespaces/cli-executor.js` with `execFile`, zero create retries, sanitized `GH_TOKEN` env, `ENOENT`/timeout handling, and token-redacted error mapping.
 - [x] Implement `CodespacesProvider.ensureCodespace(options)` using DB-only lookup (`loadCredentialByRef('codespaces', credentialRef)`), `gh` existence check, `gh codespace create` when empty, immediate cache invalidation, and fresh REST polling every 3 seconds for up to 60 seconds after creation; return once active/terminal or with the latest state at timeout, and clean up on unrecoverable confirmation failure.

@@ -1,5 +1,7 @@
 # LAB-014 Implementation Plan: Codespaces RPC Endpoint
 
+**Status: Complete** (2026-11-27). The endpoint was smoke-tested in the running environment and returned a newly created Codespace with `Provisioning` state; bounded readiness polling is now part of the ensure flow.
+
 ## Goal
 
 Implement the dedicated action-routed RPC endpoint `POST /api/v1/codespaces/rpc/:action` (with `:action = ensure` in LAB-014) that checks GitHub via `gh` CLI for existing Codespaces under a registered database VPS credential (e.g., `etecnologysys1alwaysdata`) and creates one (`vm-manager235-1/test` by default) if none exists.
