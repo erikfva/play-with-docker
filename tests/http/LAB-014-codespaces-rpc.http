@@ -1,0 +1,24 @@
+@baseUrl = http://localhost:3200/api/v1
+@serverToken = {{$dotenv SERVER_TOKEN}}
+@codespacesCredentialRef = vm-manager235
+
+### LAB-014: Ensure a Codespace exists for a registered VPS credential
+# Requires @codespacesCredentialRef to name a Codespaces credential registered
+# in the vps table. Returns 200 if a Codespace already exists, or 201 if one
+# was created using CODESPACES_DEFAULT_REPOSITORY (default vm-manager235-1/test).
+POST {{baseUrl}}/rpc/ensure
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+X-Codespaces-Credentials: {{codespacesCredentialRef}}
+
+{
+  "provider": "codespaces",
+  "machine": "basicLinux32gb"
+}
+
+### LAB-014: Unsupported action is rejected before credential lookup
+POST {{baseUrl}}/rpc/not-an-action
+Content-Type: application/json
+X-Server-Token: {{serverToken}}
+
+{}

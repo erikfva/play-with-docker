@@ -12,6 +12,7 @@ const DEFAULT_TTL_MS = parsePositiveInteger(
 
 const cache = new Map();
 const inFlight = new Map();
+const keyVersions = new Map();
 
 function cacheKey(provider, credentialFingerprint) {
   return `${provider}:${credentialFingerprint}`;
@@ -42,13 +43,21 @@ async function getOrCheckStatus(key, checker) {
 
   let pending = inFlight.get(key);
   if (!pending) {
+    const versionAtStart = keyVersions.get(key) || 0;
     pending = Promise.resolve()
       .then(checker)
       .then((result) => {
-        if (result?.status !== 'UNKNOWN') putCachedStatus(key, result);
+        const currentVersion = keyVersions.get(key) || 0;
+        if (currentVersion === versionAtStart && result?.status !== 'UNKNOWN') {
+          putCachedStatus(key, result);
+        }
         return result;
       })
-      .finally(() => inFlight.delete(key));
+      .finally(() => {
+        if (inFlight.get(key) === pending) {
+          inFlight.delete(key);
+        }
+      });
     inFlight.set(key, pending);
   }
   return pending;
@@ -56,6 +65,14 @@ async function getOrCheckStatus(key, checker) {
 
 function clearCache() {
   cache.clear();
+  inFlight.clear();
+  keyVersions.clear();
 }
 
-module.exports = { cacheKey, getOrCheckStatus, clearCache, getCachedStatus, putCachedStatus, DEFAULT_TTL_MS };
+function invalidateCache(key) {
+  cache.delete(key);
+  inFlight.delete(key);
+  keyVersions.set(key, (keyVersions.get(key) || 0) + 1);
+}
+
+module.exports = { cacheKey, getOrCheckStatus, clearCache, invalidateCache, getCachedStatus, putCachedStatus, DEFAULT_TTL_MS };

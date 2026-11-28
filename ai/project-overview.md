@@ -52,10 +52,11 @@ flowchart TD
 
 ### File Hierarchy and Responsibility:
 
-1. **`src/server.js`**: Server initializer. Bootstraps the PostgreSQL database connection, restores active keep-alive timers for surviving database sessions, and launches the Express server.
-2. **`src/routes/sessions.js`**: Exposes REST endpoints under `/api/v1/sessions` and handles credential verification requirements.
-3. **`src/services/provider-factory.js`**: Resolves requested provider identifiers into their active implementations (`gcs`, `codesandbox`, `codespaces`, `pwd`).
-4. **`src/services/providers/`**:
+1. **`src/server.js`**: Server initializer. Bootstraps the PostgreSQL database connection, restores active keep-alive timers for surviving database sessions, and launches the Express server with routes mounted for `/api/v1/sessions`, `/api/v1/vps`, and `/api/v1/rpc`.
+2. **`src/routes/sessions.js`**: Exposes REST endpoints under `/api/v1/sessions` and handles credential verification requirements and session adoption/startup.
+3. **`src/routes/codespaces-rpc.js`**: Exposes RPC actions under `/api/v1/rpc/:action`; the request body identifies the provider (currently `codespaces`).
+4. **`src/services/provider-factory.js`**: Resolves requested provider identifiers into their active implementations (`gcs`, `codesandbox`, `codespaces`, `pwd`).
+5. **`src/services/providers/`**:
    - **`base-provider.js`**: Abstract class defining lifecycle hooks (`createSession`, `refreshSession`, `executeCommand`, `terminateSession`, `isSessionActive`, `executeKeepAlive`).
    - **`gcs-provider.js`**: Controls Google Cloud Shell lifecycles and handles system keygen and public key injection.
    - **`codesandbox-provider.js`**: Manages CodeSandbox microVMs. Bootstraps secure UNIX-to-TCP Docker socket proxies using `socat` inside the container.
@@ -271,6 +272,19 @@ Implemented in `src/services/providers/codespaces-provider.js` + `src/services/p
 5. **Refresh** — reads GitHub state (30s TTL cache, `nocache` for boot polling), maps via the 17-state map, updates the row.
 6. **Keep-alive** — `gh-cli-command`, default 20 min, `min(configured, idleTimeout − 10)`, `runOnStart: false`.
 7. **Terminate** — **stops** the codespace (not deletes), fire-and-forgets a background cleanup script, then the route marks the row `TERMINATED` (retained in DB).
+
+### Dedicated RPC Endpoint (`POST /api/v1/rpc/:action`)
+Implemented in `src/routes/codespaces-rpc.js` and `CodespacesProvider.ensureCodespace()`.
+- **Purpose**: Dedicated action-routed endpoint separate from `POST /api/v1/sessions` (which remains dedicated to adopting/starting existing Codespaces and provisioning Docker/PaaS containers).
+- **Supported action**: `ensure` (`POST /api/v1/rpc/ensure`).
+- **Request body**: Requires `provider: "codespaces"`; currently supported provider is Codespaces.
+- **Flow**:
+  1. Loads token strictly from the `vps` database table via `loadCredentialByRef('codespaces', credentialRef)`.
+  2. Queries the GitHub account via `gh codespace list --json ...` using per-spawn `GH_TOKEN`.
+  3. If a Codespace exists, confirms it and returns `created: false` (HTTP 200).
+  4. If no Codespace exists, executes `gh codespace create -R <repo>` (defaulting to `vm-manager235-1/test` or `CODESPACES_DEFAULT_REPOSITORY`) with `retries: 0`, invalidates the VPS status cache, and polls fresh REST state every 3 seconds for up to 60 seconds. It returns when the Codespace becomes active or terminal; if the wait expires, it returns the latest confirmed state (which may still be `PENDING`) with `created: true` (HTTP 201).
+  5. If post-create confirmation fails, cleans up the orphaned Codespace via `deleteCodespace`.
+- **Adoption**: Once ensured, callers can invoke `POST /api/v1/sessions` with the registered credential reference to adopt and start the Codespace.
 
 ### `webHost` semantics
 Always `null` for Codespaces. The web IDE URL is exposed as `metadata.webIdeUrl` only. Consumers treating `webHost` as a shell target should fall back to `sshCommand`.
